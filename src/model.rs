@@ -1,6 +1,7 @@
 //! The UI's copy of the open library, as the backend described it.
 
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug)]
 pub struct Track {
@@ -20,6 +21,28 @@ pub struct Track {
     /// The audio file as the library records it, relative to the library folder. Unlike
     /// `id` it is the same every time the library is opened.
     pub path: String,
+    /// Where the audio file is on this machine: `path` resolved against the library's
+    /// folder. Empty for streaming tracks, which have no file here.
+    pub location: String,
+}
+
+/// Where a track's audio file is: the path the library records, relative to the
+/// `Engine Library` folder (so usually starting with `..`), resolved to a plain path.
+/// Resolved by the path alone, without asking the file system, so it also works for a
+/// library on a drive that is gone.
+pub fn location(library_dir: &str, recorded: &str) -> String {
+    let mut resolved = PathBuf::new();
+    for component in Path::new(library_dir).join(recorded).components() {
+        match component {
+            Component::ParentDir => {
+                // Above the root there is nothing to go up to.
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved.display().to_string()
 }
 
 /// A playlist or playlist folder. Playlists are stored depth first in display order,
@@ -165,6 +188,28 @@ mod tests {
     }
 
     #[test]
+    fn a_tracks_location_is_its_path_resolved_against_the_library() {
+        let library = "/run/media/me/DRIVE/Engine Library";
+        // The usual case: the music sits next to the library folder.
+        assert_eq!(
+            location(library, "../House/a.flac"),
+            "/run/media/me/DRIVE/House/a.flac"
+        );
+        assert_eq!(
+            location(library, "../../Music/x/y.mp3"),
+            "/run/media/me/Music/x/y.mp3"
+        );
+        // Inside the library folder, with a redundant ./ and ..
+        assert_eq!(
+            location(library, "./Stems/../a.flac"),
+            "/run/media/me/DRIVE/Engine Library/a.flac"
+        );
+        // An absolute path is just that, and too many .. stop at the top.
+        assert_eq!(location(library, "/srv/music/a.flac"), "/srv/music/a.flac");
+        assert_eq!(location("/lib", "../../../a.flac"), "/a.flac");
+    }
+
+    #[test]
     fn finds_tracks_by_backend_id() {
         let track = |id| Track {
             id,
@@ -177,6 +222,7 @@ mod tests {
             streaming: false,
             album_art: None,
             path: format!("../Music/{id}.flac"),
+            location: String::new(),
         };
         let library = Library::new(
             "/lib".into(),

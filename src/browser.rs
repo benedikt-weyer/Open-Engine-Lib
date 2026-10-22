@@ -6,10 +6,13 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use iced::widget::image::Handle;
-use iced::widget::{Space, button, column, container, image, mouse_area, row, scrollable, text};
-use iced::{ContentFit, Element, Fill, Length, Theme};
+use iced::widget::{
+    Space, button, column, container, image, mouse_area, row, scrollable, text, tooltip,
+};
+use iced::{ContentFit, Element, Fill, Theme, mouse};
 
 use crate::Message;
+use crate::columns::{Column, ColumnWidths};
 use crate::config::Language;
 use crate::covers::Covers;
 use crate::i18n::fill;
@@ -200,28 +203,93 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
     scrollable(list).width(Fill).height(Fill).into()
 }
 
-/// Column widths, shared by the header and the rows. The first is the "now playing" marker.
-const WIDTHS: [Length; 8] = [
-    Length::Fixed(24.0),
-    Length::Fixed(THUMBNAIL),
-    Length::FillPortion(5),
-    Length::FillPortion(3),
-    Length::FillPortion(3),
-    Length::FillPortion(2),
-    Length::Fixed(64.0),
-    Length::Fixed(64.0),
-];
+/// The width of the marker column that shows which track is playing.
+const MARKER_WIDTH: f32 = 24.0;
+/// The gap after every column. In the header it holds the handle to drag the column's
+/// width, in the rows it is empty, so that the columns line up.
+const GAP: f32 = 10.0;
+/// The height of a header handle: the text of a header and a little more, so that it is
+/// easy to grab.
+const HANDLE_HEIGHT: f32 = 24.0;
 
-fn line<'a>(cells: [Element<'a, Message>; 8]) -> row::Row<'a, Message> {
-    let mut line = row![].spacing(8).align_y(iced::Center).padding([0, 8]);
-    for (cell, width) in cells.into_iter().zip(WIDTHS) {
-        line = line.push(container(cell).width(width).clip(true));
+/// One line of the track list, the header or a track: the marker, the cover, the
+/// resizable columns and then the location, which takes the rest of the width.
+/// `gap` is what goes after each column (`None` for the marker and the cover).
+fn line<'a>(
+    marker: Element<'a, Message>,
+    cover: Element<'a, Message>,
+    cells: [Element<'a, Message>; 6],
+    location: Element<'a, Message>,
+    widths: &ColumnWidths,
+    gap: impl Fn(Option<Column>) -> Element<'a, Message>,
+) -> row::Row<'a, Message> {
+    let mut line = row![container(marker).width(MARKER_WIDTH), gap(None)]
+        .align_y(iced::Center)
+        .padding([0, 8]);
+    line = line.push(container(cover).width(THUMBNAIL)).push(gap(None));
+    for (column, cell) in Column::ALL.into_iter().zip(cells) {
+        line = line
+            .push(container(cell).width(widths.get(column)).clip(true))
+            .push(gap(Some(column)));
     }
-    line
+    line.push(container(location).width(Fill).clip(true))
+}
+
+/// The empty gap of a track row.
+fn plain_gap<'a>(_: Option<Column>) -> Element<'a, Message> {
+    Space::new().width(GAP).into()
+}
+
+/// The gap after a column in the header: a thin divider that can be dragged sideways to
+/// change the width of the column before it.
+fn handle<'a>(column: Option<Column>) -> Element<'a, Message> {
+    let Some(column) = column else {
+        return plain_gap(None);
+    };
+    let divider =
+        container(Space::new().width(1).height(HANDLE_HEIGHT - 6.0)).style(|theme: &Theme| {
+            container::Style {
+                background: Some(theme.extended_palette().background.strong.color.into()),
+                ..container::Style::default()
+            }
+        });
+    // A fixed height: a handle that filled the height would make the whole header as
+    // tall as the list.
+    mouse_area(container(divider).center_x(GAP).center_y(HANDLE_HEIGHT))
+        .on_press(Message::ResizeStarted(column))
+        .interaction(mouse::Interaction::ResizingHorizontally)
+        .into()
 }
 
 fn cell<'a>(content: impl iced::widget::text::IntoFragment<'a>) -> text::Text<'a> {
     text(content).size(14).wrapping(text::Wrapping::None)
+}
+
+/// The bar of column titles. Its height is that of its text and the handles in it,
+/// whatever the height of the window.
+fn header<'a>(language: Language, widths: &ColumnWidths) -> Element<'a, Message> {
+    let strings = language.strings();
+    let heading_cell =
+        |label: &'a str| -> Element<'a, Message> { cell(label).style(text::secondary).into() };
+    container(line(
+        Space::new().into(),
+        Space::new().into(),
+        [
+            heading_cell(&strings.col_title),
+            heading_cell(&strings.col_artist),
+            heading_cell(&strings.col_album),
+            heading_cell(&strings.col_genre),
+            heading_cell(&strings.col_bpm),
+            heading_cell(&strings.col_length),
+        ],
+        heading_cell(&strings.col_location),
+        widths,
+        handle,
+    ))
+    .padding([4, 0])
+    .style(container::bordered_box)
+    .width(Fill)
+    .into()
 }
 
 /// The tracks of the shown list. `playing` is the row that is playing, if it is in this list.
@@ -229,6 +297,7 @@ pub fn tracks<'a>(
     browser: &'a Browser,
     playing: Option<usize>,
     covers: &Covers,
+    widths: &ColumnWidths,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -240,19 +309,7 @@ pub fn tracks<'a>(
     ))
     .size(20);
 
-    let header = container(line([
-        Space::new().into(),
-        Space::new().into(),
-        cell(&strings.col_title).style(text::secondary).into(),
-        cell(&strings.col_artist).style(text::secondary).into(),
-        cell(&strings.col_album).style(text::secondary).into(),
-        cell(&strings.col_genre).style(text::secondary).into(),
-        cell(&strings.col_bpm).style(text::secondary).into(),
-        cell(&strings.col_length).style(text::secondary).into(),
-    ]))
-    .padding([4, 0])
-    .style(container::bordered_box)
-    .width(Fill);
+    let header = header(language, widths);
 
     if list.is_empty() {
         return column![heading, header, text(&strings.no_tracks)]
@@ -276,6 +333,8 @@ pub fn tracks<'a>(
             browser.selected == Some(row_index),
             playing == Some(row_index),
             track.album_art.and_then(|id| covers.get(id)),
+            widths,
+            language,
         ));
     }
     body = body.push(Space::new().height((list.len() - last) as f32 * ROW_HEIGHT));
@@ -314,6 +373,8 @@ fn track_row<'a>(
     selected: bool,
     playing: bool,
     cover: Option<&Handle>,
+    widths: &ColumnWidths,
+    language: Language,
 ) -> Element<'a, Message> {
     // Streaming tracks have no file here, so they can be seen but not played.
     let style = |content: text::Text<'a>| -> Element<'a, Message> {
@@ -337,16 +398,37 @@ fn track_row<'a>(
         None => Space::new().into(),
     };
 
-    let cells = line([
+    // Where the file is. Streaming tracks have none here; the full path is also shown
+    // when pointing at it, as a long one is cut off.
+    let location: Element<'a, Message> = if track.streaming {
+        cell(&language.strings().location_streaming)
+            .style(text::secondary)
+            .into()
+    } else {
+        tooltip(
+            cell(&track.location),
+            text(&track.location).size(13),
+            tooltip::Position::FollowCursor,
+        )
+        .style(container::rounded_box)
+        .into()
+    };
+
+    let cells = line(
         cell(if playing { "▶" } else { "" }).into(),
         thumbnail,
-        style(cell(&track.title)),
-        style(cell(&track.artist)),
-        style(cell(&track.album)),
-        style(cell(&track.genre)),
-        style(cell(bpm)),
-        style(cell(length)),
-    ]);
+        [
+            style(cell(&track.title)),
+            style(cell(&track.artist)),
+            style(cell(&track.album)),
+            style(cell(&track.genre)),
+            style(cell(bpm)),
+            style(cell(length)),
+        ],
+        location,
+        widths,
+        plain_gap,
+    );
 
     mouse_area(
         container(cells)
@@ -377,6 +459,33 @@ fn track_row<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How much room an element takes up vertically: `None` if it wants all it is given.
+    fn height_of(element: &Element<'_, Message>) -> Option<f32> {
+        match element.as_widget().size().height {
+            iced::Length::Fixed(height) => Some(height),
+            iced::Length::Shrink => Some(0.0),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_header_is_as_tall_as_its_text_not_as_tall_as_the_window() {
+        // A header that "fills" its height grows to the height of the whole list.
+        let handle = handle(Some(Column::Title));
+        assert!(
+            height_of(&handle).is_some(),
+            "a divider handle must not fill the height"
+        );
+
+        for language in Language::ALL {
+            let header = header(language, &ColumnWidths::default());
+            assert!(
+                height_of(&header).is_some(),
+                "the header must not fill the height"
+            );
+        }
+    }
 
     #[test]
     fn formats_times() {

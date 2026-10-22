@@ -50,6 +50,12 @@ Versioning rules:
 
 The `.proto` files are compiled in pure Rust (`protox`), so building needs no `protoc`.
 
+## The track list
+
+Besides title, artist, album, genre, BPM and length, the list shows where each file is: the path the library records (relative to its `Engine Library` folder, usually starting with `..`) resolved against that folder, so it is a plain path such as `/run/media/you/DRIVE/House/track.flac`. It is worked out from the path alone, without asking the file system. Streaming tracks have no file here and say so. The location is the last column and takes the width the others leave; pointing at it shows the whole path, since a long one is cut off.
+
+The other columns can be resized by dragging the divider after their header (the pointer changes over it). The drag is followed anywhere in the window and ends when the button is let go, which also saves the widths in `<state dir>/open-engine-lib/track-columns.toml`. A column can be between 40 and 1200 pixels wide.
+
 ## Waveform and beatgrid
 
 While a song is loaded in the player, the UI shows a DJ-style deck above the player bar: a zoomed waveform (6 seconds) scrolling past a fixed playhead with the beatgrid drawn over it, the first beat of every bar stronger and numbered (`17.1` is the first beat of bar 17, `17.2` the second; beat 0 of the grid is the first beat of bar 1, and beats before it are not numbered), and the whole track below it. Clicking the overview jumps there. How it is colored is a setting (`waveform_colors`, on the Settings page and in the NixOS module) that can also be changed from a menu right under the waveform:

@@ -74,6 +74,8 @@ pub struct Strings {
     pub col_genre: String,
     pub col_bpm: String,
     pub col_length: String,
+    pub col_location: String,
+    pub location_streaming: String,
     pub play: String,
     pub pause: String,
     pub stop: String,

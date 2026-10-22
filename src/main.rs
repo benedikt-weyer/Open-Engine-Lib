@@ -4,6 +4,7 @@ mod backend;
 mod browser;
 mod clock;
 mod colors;
+mod columns;
 mod config;
 mod covers;
 mod deck;
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 use backend::{Backend, Control, WaveformSettings};
 use browser::{Browser, Source};
 use clock::Clock;
+use columns::{Column, ColumnStore};
 use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, WaveformColors};
 use covers::Covers;
 use i18n::fill;
@@ -57,6 +59,16 @@ pub enum Page {
     #[default]
     Library,
     Settings,
+}
+
+/// Dragging the border of a column header.
+#[derive(Debug, Clone, Copy)]
+struct Resize {
+    column: Column,
+    /// The column's width when the drag began.
+    width: f32,
+    /// Where the pointer was at the first move, which the drag is measured from.
+    grab: Option<f32>,
 }
 
 /// The backend is a separate process that reads libraries and plays audio.
@@ -107,6 +119,10 @@ struct State {
     backend_error: Option<String>,
     /// The waveform gain slider being dragged and where it is.
     gain_draft: Option<(WaveformBand, f32)>,
+    /// How wide the user made the track list's columns.
+    columns: ColumnStore,
+    /// The column whose width is being dragged.
+    resize: Option<Resize>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +136,11 @@ pub enum Message {
     WaveformGainDragged(WaveformBand, f32),
     WaveformGainReleased,
     ResetWaveformGains,
+    /// The border after a column header was pressed.
+    ResizeStarted(Column),
+    /// The pointer moved, to this x, while a column was being resized.
+    ResizeMoved(f32),
+    ResizeEnded,
     ReopenLibraryToggled(bool),
     RestorePositionToggled(bool),
     CloseRequested(iced::window::Id),
@@ -196,6 +217,8 @@ impl State {
             seeking: None,
             backend_error: None,
             gain_draft: None,
+            columns: ColumnStore::discover(),
+            resize: None,
         };
         (state, start_backend())
     }
@@ -213,8 +236,24 @@ impl State {
         } else {
             Subscription::none()
         };
+        // While a column is being resized, follow the pointer wherever it goes (it leaves
+        // the thin handle at once) and notice when the button is let go.
+        let resizing = if self.resize.is_some() {
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::ResizeMoved(position.x))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::ResizeEnded),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             poll,
+            resizing,
             iced::window::close_requests().map(Message::CloseRequested),
         ])
     }
@@ -481,6 +520,30 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .set_waveform_colors(colors)
                 .err()
                 .map(|e| e.to_string());
+        }
+        Message::ResizeStarted(column) => {
+            state.resize = Some(Resize {
+                column,
+                width: state.columns.widths.get(column),
+                grab: None,
+            });
+        }
+        Message::ResizeMoved(x) => {
+            if let Some(resize) = &mut state.resize {
+                let grab = *resize.grab.get_or_insert(x);
+                state
+                    .columns
+                    .widths
+                    .set(resize.column, resize.width + (x - grab));
+            }
+        }
+        Message::ResizeEnded => {
+            if state.resize.take().is_some() {
+                // Not being able to remember the widths is not worth bothering the user about.
+                if let Err(error) = state.columns.save() {
+                    eprintln!("could not save the column widths: {error}");
+                }
+            }
         }
         Message::WaveformGainDragged(band, gain) => state.gain_draft = Some((band, gain)),
         Message::WaveformGainReleased => {
@@ -855,7 +918,13 @@ fn open_library<'a>(
 
     let mut page = column![
         header,
-        browser::tracks(browser, state.playing_row(browser), &state.covers, language),
+        browser::tracks(
+            browser,
+            state.playing_row(browser),
+            &state.covers,
+            &state.columns.widths,
+            language,
+        ),
     ]
     .spacing(10)
     .width(Fill)
@@ -926,6 +995,7 @@ mod tests {
             streaming: false,
             album_art: None,
             path: format!("../Music/{}.flac", ["a", "b", "c"][id as usize]),
+            location: String::new(),
         }
     }
 
@@ -975,6 +1045,8 @@ mod tests {
             seeking: None,
             backend_error: None,
             gain_draft: None,
+            columns: ColumnStore::load(temp.join("track-columns.toml")),
+            resize: None,
         }
     }
 
@@ -1083,6 +1155,51 @@ mod tests {
             state.snapshot().unwrap(),
             session(&["House", "Deep"], Some("../Music/c.flac"), true, 61_250)
         );
+    }
+
+    #[test]
+    fn dragging_a_column_border_changes_that_columns_width() {
+        let mut state = state();
+        let before = state.columns.widths.get(Column::Artist);
+
+        let _ = handle(&mut state, Message::ResizeStarted(Column::Artist));
+        // The drag is measured from where the pointer was at its first move.
+        let _ = handle(&mut state, Message::ResizeMoved(500.0));
+        assert_eq!(state.columns.widths.get(Column::Artist), before);
+        let _ = handle(&mut state, Message::ResizeMoved(560.0));
+        assert_eq!(state.columns.widths.get(Column::Artist), before + 60.0);
+        let _ = handle(&mut state, Message::ResizeMoved(480.0));
+        assert_eq!(
+            state.columns.widths.get(Column::Artist),
+            before - 20.0,
+            "and back"
+        );
+        // Other columns are not touched, and a column can't be dragged away.
+        assert_eq!(
+            state.columns.widths.get(Column::Album),
+            columns::ColumnWidths::default().get(Column::Album)
+        );
+        let _ = handle(&mut state, Message::ResizeMoved(-5000.0));
+        assert_eq!(state.columns.widths.get(Column::Artist), columns::MIN_WIDTH);
+
+        // Letting go ends the drag and saves the width.
+        let _ = handle(&mut state, Message::ResizeEnded);
+        assert!(state.resize.is_none());
+        let temp =
+            std::env::temp_dir().join(format!("open-engine-lib-main-test-{}", std::process::id()));
+        let saved = ColumnStore::load(temp.join("track-columns.toml"));
+        assert_eq!(saved.widths.get(Column::Artist), columns::MIN_WIDTH);
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn pointer_moves_without_a_drag_change_nothing() {
+        let mut state = state();
+        let before = state.columns.widths;
+        let _ = handle(&mut state, Message::ResizeMoved(300.0));
+        let _ = handle(&mut state, Message::ResizeMoved(900.0));
+        let _ = handle(&mut state, Message::ResizeEnded);
+        assert_eq!(state.columns.widths, before);
     }
 
     #[test]

@@ -216,6 +216,11 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
             length: track.length_seconds,
             streaming: track.streaming,
             album_art: track.album_art_id,
+            location: if track.streaming {
+                String::new()
+            } else {
+                crate::model::location(&opened.path, &track.path)
+            },
             path: track.path,
         }));
     }

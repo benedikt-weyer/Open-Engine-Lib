@@ -56,6 +56,8 @@ col_album: Album
 col_genre: Genre
 col_bpm: BPM
 col_length: Length
+col_location: Location
+location_streaming: Streaming (no file here)
 play: Play
 pause: Pause
 stop: Stop
