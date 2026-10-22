@@ -55,11 +55,6 @@ impl Library {
     pub fn track_by_id(&self, id: u32) -> Option<&Track> {
         self.index_of_id.get(&id).map(|&index| &self.tracks[index])
     }
-
-    /// Index into `tracks` of the track with the backend's id `id`.
-    pub fn index_of(&self, id: u32) -> Option<usize> {
-        self.index_of_id.get(&id).copied()
-    }
 }
 
 #[cfg(test)]
@@ -80,7 +75,6 @@ mod tests {
         };
         let library = Library::new("/lib".into(), vec![track(7), track(3)], Vec::new());
 
-        assert_eq!(library.index_of(3), Some(1));
         assert_eq!(
             library.track_by_id(7).map(|t| t.title.as_str()),
             Some("track 7")

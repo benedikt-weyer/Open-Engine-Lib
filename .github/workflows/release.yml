@@ -23,6 +23,8 @@ permissions:
 
 env:
   BIN: open-engine-lib
+  # The UI starts this executable, which has to sit next to it.
+  BACKEND: open-engine-backend
 
 jobs:
   build-linux:
@@ -35,7 +37,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libasound2-dev
 
       - name: Set version from tag
         shell: bash
@@ -52,7 +54,7 @@ jobs:
         run: |
           name="$BIN-$TAG-linux-x86_64"
           mkdir "$name"
-          cp "target/release/$BIN" LICENSE README.md "$name/"
+          cp "target/release/$BIN" "target/release/$BACKEND" LICENSE README.md "$name/"
           tar -czf "$name.tar.gz" "$name"
 
       - uses: actions/upload-artifact@v4
@@ -61,6 +63,7 @@ jobs:
           path: |
             ${{ env.BIN }}-${{ inputs.tag }}-linux-x86_64.tar.gz
             target/release/${{ env.BIN }}
+            target/release/${{ env.BACKEND }}
           if-no-files-found: error
 
   build-appimage:
@@ -79,6 +82,7 @@ jobs:
         run: |
           mkdir -p AppDir/usr/bin
           install -m755 "target/release/$BIN" "AppDir/usr/bin/$BIN"
+          install -m755 "target/release/$BACKEND" "AppDir/usr/bin/$BACKEND"
           cp packaging/open-engine-lib.desktop packaging/open-engine-lib.svg AppDir/
           ln -s "usr/bin/$BIN" AppDir/AppRun
 
@@ -122,16 +126,13 @@ jobs:
         run: |
           name="$BIN-$TAG-windows-x86_64"
           mkdir "$name"
-          cp "target/release/$BIN.exe" LICENSE README.md "$name/"
+          cp "target/release/$BIN.exe" "target/release/$BACKEND.exe" LICENSE README.md "$name/"
           7z a "$name.zip" "$name"
-          cp "target/release/$BIN.exe" "$BIN-$TAG-windows-x86_64.exe"
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-${{ inputs.tag }}
-          path: |
-            ${{ env.BIN }}-${{ inputs.tag }}-windows-x86_64.zip
-            ${{ env.BIN }}-${{ inputs.tag }}-windows-x86_64.exe
+          path: ${{ env.BIN }}-${{ inputs.tag }}-windows-x86_64.zip
           if-no-files-found: error
 
   publish:
@@ -149,7 +150,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
         run: |
-          files=(artifacts/*.tar.gz artifacts/*.AppImage artifacts/*.zip artifacts/*.exe)
+          files=(artifacts/*.tar.gz artifacts/*.AppImage artifacts/*.zip)
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${files[@]}" --clobber
           else

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build and run the app. Extra arguments are passed to the app.
+# Build and run the app. Extra arguments are passed to the app (e.g. a library to open).
+# The UI starts the backend executable that sits next to it, so both are built.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec cargo run --release -- "$@"
+cargo build --release
+exec ./target/release/open-engine-lib "$@"

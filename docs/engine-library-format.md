@@ -108,7 +108,7 @@ For an implementation: treat text hashes as opaque ids. They can be recomputed f
 
 ### Playlists
 - `Playlist`: `id`, `title`, `parentListId` (0 = top level), `nextListId` (0 = last sibling), `isPersisted`, `lastEditTime`, `isExplicitlyExported`. Siblings form a **singly linked list** through `nextListId` (unique per parent), not an order column.
-- `PlaylistEntity`: `id`, `listId`, `trackId`, `databaseUuid`, `nextEntityId` (0 = last track), `membershipReference`. Tracks in a playlist are likewise a linked list, in play order.
+- `PlaylistEntity`: `id`, `listId`, `trackId`, `databaseUuid`, `nextEntityId` (0 = last track), `membershipReference`. Tracks in a playlist are likewise a linked list, in play order. An entity names its track as `(databaseUuid, trackId)`, which matches the track's `(originDatabaseUuid, originTrackId)`, not necessarily `Track.id`. In the library I inspected the two ids happened to be equal for every track and all 6,264 entities resolved this way, but a reader should resolve through the origin pair (as Open Engine Lib does) because tracks merged in from another database keep their original ids.
 - Views `PlaylistPath`, `PlaylistAllParent` and `PlaylistAllChildren` flatten the hierarchy. Triggers keep the lists consistent on insert and delete, and propagate `isPersisted` up and down the tree.
 
 ### `Smartlist`

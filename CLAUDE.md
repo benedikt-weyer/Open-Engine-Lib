@@ -4,22 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Open Engine Lib: an open-source, Linux-focused desktop app for managing an Engine DJ library. It is a Rust app built on the [iced](https://iced.rs) GUI toolkit (0.14, Elm-style `State` / `Message` / `update` / `view`). `src/main.rs` holds the app state, messages and `update`/`view`, with `navbar.rs` and `settings.rs` as page views and `i18n.rs` loading UI strings from `locales/<code>.yaml` (English and German; add a key to the `Strings` struct and to every locale file, and tests check completeness and matching `{placeholders}`; fill them with `i18n::fill`; views read the language from `ConfigStore::effective()`). The Home page is still a placeholder counter; there is no Engine DJ library handling yet.
+Open Engine Lib: an open-source, Linux-focused desktop app for managing an Engine DJ library. It is two programs in one Cargo workspace that talk over versioned gRPC; see `docs/architecture.md` for the details and `docs/engine-library-format.md` for the Engine database format.
+
+- `open-engine-lib` (`src/`, the UI) is built on the [iced](https://iced.rs) GUI toolkit (0.14, Elm-style `State` / `Message` / `update` / `view`). `src/main.rs` holds the app state, messages and `update`/`view`; `backend.rs` starts the backend process and is the gRPC client; `browser.rs` (playlist tree and virtualised track list), `player_bar.rs`, `navbar.rs` and `settings.rs` are views; `model.rs` is the UI's copy of the open library. `i18n.rs` loads UI strings from `locales/<code>.yaml` (English and German; add a key to the `Strings` struct and to every locale file, and tests check completeness and matching `{placeholders}`; fill them with `i18n::fill`; views read the language from `ConfigStore::effective()`). The UI has no SQLite or audio code.
+- `open-engine-backend` (`backend/`) reads the Engine library and plays audio. The UI spawns it and it exits when the UI goes away. `cache.rs` copies the library's databases into a cache so nothing works on the library in place (audio files are not copied), `library.rs` reads tracks and playlists, `engine.rs` is the playback queue plus the thread that owns the audio device (`player.rs` is the rodio output behind a trait), `service.rs` implements the gRPC services.
+- `open-engine-api` (`api/`) holds `proto/openenginelib/v1/*.proto` and the generated code. Within `v1` only make additive changes; a breaking change is a new `v2` package. The `.proto` files are compiled by `protox`, so `protoc` is not needed.
+
+Smart playlists and the playback history are not shown yet, and the key column is left out because the Engine key numbers have not been verified.
 
 ## Environment
 
-Development uses a Nix flake (`flake.nix`) activated by direnv (`.envrc`: `use flake` + `PATH_add scripts`). The dev shell provides the Rust toolchain and the runtime libraries iced loads dynamically (Wayland, X11, Vulkan, GL, xkbcommon) via `LD_LIBRARY_PATH`. Run `direnv allow` once, or prefix commands with `nix develop --command` if you are outside the shell. Without the shell the app may build but fail to open a window.
+Development uses a Nix flake (`flake.nix`) activated by direnv (`.envrc`: `use flake` + `PATH_add scripts`). The dev shell provides the Rust toolchain and the runtime libraries iced loads dynamically (Wayland, X11, Vulkan, GL, xkbcommon) via `LD_LIBRARY_PATH`. Run `direnv allow` once, or prefix commands with `nix develop --command` if you are outside the shell. Without the shell the app may build but fail to open a window. The backend links ALSA (`alsa-lib`, also in the dev shell and the Nix package) and needs `pkg-config`.
 
 ## Commands
 
-- `run [args]` (`scripts/run`): `cargo run --release`, forwarding args to the app
+- `run [library path]` (`scripts/run`): `cargo build --release` (the UI and the backend), then runs the UI, forwarding args to it. The UI finds the backend next to its own executable, so a plain `cargo run` needs `cargo build -p open-engine-backend` first.
 - `help` (`scripts/help`): lists developer commands. Keep it in sync when adding scripts or commands. In bash, `help` is a builtin, so run `scripts/help` there.
-- `cargo check` / `cargo clippy` / `cargo fmt`
-- `cargo test` (single test: `cargo test <name>`); tests currently cover only `src/config.rs`
+- `cargo check` / `cargo clippy` / `cargo fmt` (add `--workspace` to cover the backend and API crates too)
+- `cargo test --workspace` (single test: `cargo test <name>`): config and i18n in the UI, the queue/cache/library code in the backend, and `backend/tests/grpc.rs`, which starts the real backend and drives it over gRPC. `plays_from_a_real_library` there is `#[ignore]`d: it plays real audio from a real library, see `docs/architecture.md`.
 - `nix flake check`: validates the flake (only x86_64-linux is evaluated locally)
-- `nix build`: builds the Nix package (`nix/package.nix`)
+- `nix build`: builds the Nix package (`nix/package.nix`), which contains both executables
 
-The flake also exports `packages`/`apps` (default), `overlays.default` and `nixosModules.default` (`programs.open-engine-lib.enable`) for NixOS installs. `nix/package.nix` sources only `Cargo.toml`, `Cargo.lock`, `src` and `packaging`, and patches the runtime library RPATH, so add any new top-level build inputs to its fileset.
+The flake also exports `packages`/`apps` (default), `overlays.default` and `nixosModules.default` (`programs.open-engine-lib.enable`) for NixOS installs. `nix/package.nix` sources only `Cargo.toml`, `Cargo.lock`, `src`, `api`, `backend`, `locales` and `packaging`, and patches the runtime library RPATH (windowing libraries on the UI, ALSA on the backend), so add any new top-level build inputs to its fileset.
 
 Newly added files must be `git add`ed (at least `-N`) before Nix flake commands can see them, because flakes only read tracked files.
 
@@ -35,4 +41,4 @@ Every push to `main` runs `.github/workflows/tag.yml`, which tags each new commi
 - `feat:` / `feat(scope):`: minor
 - anything else: patch
 
-Existing `vX.Y.Z` tags are respected (the running version resets to them), and with no tags it starts at `v0.0.0`. Because every commit on `main` gets a tag and a release, prefer squash merges. `release.yml` patches the `Cargo.toml` version from the tag at build time (not committed) and publishes Linux tarball, AppImage and Windows zip/exe assets.
+Existing `vX.Y.Z` tags are respected (the running version resets to them), and with no tags it starts at `v0.0.0`. Because every commit on `main` gets a tag and a release, prefer squash merges. `release.yml` patches the version in `[workspace.package]` of `Cargo.toml` from the tag at build time (not committed; the UI, backend and API crates share it) and publishes a Linux tarball, an AppImage and a Windows zip. Each contains both executables, which have to stay next to each other.

@@ -112,11 +112,20 @@ pub async fn start() -> Result<Backend, String> {
         .map(|byte| format!("{byte:02x}"))
         .collect();
 
-    let mut child = Command::new(&path)
+    let mut command = Command::new(&path);
+    command
         .env(TOKEN_ENV, &token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    #[cfg(windows)]
+    {
+        // The UI has no console, so don't let the backend open one.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("could not start {}: {error}", path.display()))?;
     let stdin = child.stdin.take().expect("stdin is piped");
