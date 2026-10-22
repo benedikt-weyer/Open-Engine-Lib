@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# List developer commands available in this repo.
+cat <<'TXT'
+Developer commands (scripts/ is on PATH via .envrc):
+
+  run [args]            Build and run the app (release)
+  help                  Show this list
+
+Cargo shortcuts:
+
+  cargo run             Build and run (debug)
+  cargo check           Type-check
+  cargo clippy          Lint
+  cargo fmt             Format
+
+Nix:
+
+  nix flake check       Validate the flake
+  nix flake update      Update pinned inputs
+TXT
