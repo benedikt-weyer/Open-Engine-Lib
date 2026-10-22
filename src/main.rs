@@ -46,6 +46,8 @@ fn main() -> iced::Result {
         .subscription(State::subscription)
         // Closing the window saves the session first, see `Message::CloseRequested`.
         .exit_on_close_request(false)
+        // The waveform is drawn as filled shapes, whose edges need smoothing.
+        .antialiasing(true)
         .run()
 }
 

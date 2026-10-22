@@ -8,7 +8,9 @@
 use std::time::{Duration, Instant};
 
 use iced::mouse;
-use iced::widget::canvas::{Action, Frame, Geometry};
+use std::ops::Range;
+
+use iced::widget::canvas::{Action, Frame, Geometry, Path};
 use iced::widget::{canvas, column, container, text};
 use iced::{Color, Element, Event, Fill, Point, Rectangle, Renderer, Size, Theme, window};
 
@@ -70,18 +72,51 @@ pub fn view<'a>(display: Display<'a>, clock: Clock, language: Language) -> Eleme
     .into()
 }
 
-/// Draws the bands of one column as three centred bars over each other, the loudest
-/// usually the low one at the back.
-fn paint_bands(frame: &mut Frame, x: f32, width: f32, middle: f32, half_height: f32, bands: Bands) {
-    for (level, color) in bands.into_iter().zip([LOW, MID, HIGH]) {
-        let half = f32::from(level) / 255.0 * half_height;
-        if half >= 0.5 {
-            frame.fill_rectangle(
-                Point::new(x, middle - half),
-                Size::new(width, half * 2.0),
-                color,
-            );
+/// One band's loudness at `index`, 0 to 1, lightly smoothed with its neighbours so the
+/// outline doesn't jitter from one 10 ms column to the next.
+fn smoothed(columns: &[Bands], index: usize, band: usize) -> f32 {
+    let at = |index: usize| f32::from(columns[index.min(columns.len() - 1)][band]);
+    (at(index.saturating_sub(1)) * 0.25 + at(index) * 0.5 + at(index + 1) * 0.25) / 255.0
+}
+
+/// Draws the waveform of `columns[range]` as three smooth shapes over each other (the
+/// loudest usually the low band at the back), mirrored around `middle`. `x_of` gives
+/// the horizontal position of a column. Each band is one filled outline rather than a
+/// bar per column, so it is drawn anti-aliased and scrolls without shimmering.
+fn paint_waveform(
+    frame: &mut Frame,
+    columns: &[Bands],
+    range: Range<usize>,
+    x_of: impl Fn(usize) -> f32,
+    middle: f32,
+    half_height: f32,
+) {
+    if range.len() < 2 {
+        return;
+    }
+    let xs: Vec<f32> = range.clone().map(x_of).collect();
+
+    for (band, color) in [LOW, MID, HIGH].into_iter().enumerate() {
+        let halves: Vec<f32> = range
+            .clone()
+            .map(|index| smoothed(columns, index, band) * half_height)
+            .collect();
+        if halves.iter().all(|half| *half < 0.25) {
+            continue;
         }
+
+        // Along the top from left to right, back along the bottom.
+        let outline = Path::new(|builder| {
+            builder.move_to(Point::new(xs[0], middle - halves[0]));
+            for (x, half) in xs.iter().zip(&halves).skip(1) {
+                builder.line_to(Point::new(*x, middle - half));
+            }
+            for (x, half) in xs.iter().zip(&halves).rev() {
+                builder.line_to(Point::new(*x, middle + half));
+            }
+            builder.close();
+        });
+        frame.fill(&outline, color);
     }
 }
 
@@ -129,23 +164,21 @@ impl canvas::Program<Message> for Zoomed<'_> {
         let end = now + VISIBLE_SECONDS / 2.0;
         let x_of = |time: f64| ((time - start) * pixels_per_second) as f32;
 
-        // The waveform. A little extra width keeps rounding from leaving gaps.
+        // The waveform, from a column before the window to one after it, so its outline
+        // runs off both edges.
         let columns_per_second = waveform.columns_per_second;
-        let column_width = (pixels_per_second / columns_per_second) as f32 + 0.6;
-        let first = (start * columns_per_second).floor().max(0.0) as usize;
+        let first = ((start * columns_per_second).floor().max(1.0) as usize).saturating_sub(1);
         let last =
-            ((end * columns_per_second).ceil().max(0.0) as usize).min(waveform.columns.len());
-        for index in first..last {
-            let x = x_of(index as f64 / columns_per_second);
-            paint_bands(
-                &mut frame,
-                x,
-                column_width,
-                middle,
-                half_height,
-                waveform.columns[index],
-            );
-        }
+            ((end * columns_per_second).ceil().max(0.0) as usize + 1).min(waveform.columns.len());
+        paint_waveform(
+            &mut frame,
+            &waveform.columns,
+            first..last,
+            // The middle of a column's 10 ms.
+            |index| x_of((index as f64 + 0.5) / columns_per_second),
+            middle,
+            half_height,
+        );
 
         // The beatgrid, with the first beat of every bar stronger.
         if let Some(grid) = &waveform.grid {
@@ -219,17 +252,14 @@ impl canvas::Program<Message> for Overview<'_> {
         let (width, height) = (bounds.width, bounds.height);
         let middle = height / 2.0;
         let bin_width = width / waveform.overview.len().max(1) as f32;
-
-        for (index, bands) in waveform.overview.iter().enumerate() {
-            paint_bands(
-                &mut frame,
-                index as f32 * bin_width,
-                bin_width + 0.6,
-                middle,
-                middle - 2.0,
-                *bands,
-            );
-        }
+        paint_waveform(
+            &mut frame,
+            &waveform.overview,
+            0..waveform.overview.len(),
+            |index| (index as f32 + 0.5) * bin_width,
+            middle,
+            middle - 2.0,
+        );
 
         let progress = (self.clock.position(Instant::now(), waveform.duration)
             / waveform.duration.max(f64::EPSILON)) as f32;
