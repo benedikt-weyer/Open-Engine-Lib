@@ -369,7 +369,8 @@ impl PlaybackService for Service {
         &self,
         _: Request<api::GetStatusRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
-        Ok(Response::new(status_message(self.0.engine.status())))
+        // Asked of the engine, not read from what it published last: that can be stale.
+        self.command(Command::Poll).await
     }
 }
 

@@ -2,6 +2,7 @@
 
 mod backend;
 mod browser;
+mod clock;
 mod config;
 mod covers;
 mod deck;
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use backend::{Backend, Control};
 use browser::{Browser, Source};
+use clock::Clock;
 use config::{ConfigStore, Language, Locations, ThemeMode};
 use covers::Covers;
 use i18n::fill;
@@ -90,7 +92,8 @@ struct State {
     recents_error: Option<String>,
     /// What the backend last said about playback, and when.
     status: PlaybackStatus,
-    status_at: Instant,
+    /// The playhead's position, running on between the reports in `status`.
+    clock: Clock,
     /// The waveform and beatgrid of the playing track.
     waveforms: Waveforms,
     /// The list the queue was made from, so its playing row can be marked.
@@ -177,7 +180,7 @@ impl State {
             covers: Covers::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
-            status_at: Instant::now(),
+            clock: Clock::new(Instant::now()),
             waveforms: Waveforms::default(),
             play_source: None,
             seeking: None,
@@ -622,7 +625,11 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Status(Ok(status)) => {
             state.status = status;
-            state.status_at = Instant::now();
+            state.clock.report(
+                state.status.position_ms as f64 / 1000.0,
+                state.status.state() == PlaybackState::Playing,
+                Instant::now(),
+            );
             state.backend_error = None;
             if state.is_stopped() {
                 state.play_source = None;
@@ -775,17 +782,9 @@ fn open_library<'a>(
             paused: state.status.state() == PlaybackState::Paused,
         });
     // The waveform of the track in the player, with the playhead where the player is.
-    let deck = now.as_ref().map(|now| {
-        deck::view(
-            state.waveforms.display(now.track.id),
-            deck::Anchor {
-                position: state.status.position_ms as f64 / 1000.0,
-                at: state.status_at,
-                playing: state.status.state() == PlaybackState::Playing,
-            },
-            language,
-        )
-    });
+    let deck = now
+        .as_ref()
+        .map(|now| deck::view(state.waveforms.display(now.track.id), state.clock, language));
     let bar = player_bar::view(
         language,
         player_bar::Bar {
@@ -914,7 +913,7 @@ mod tests {
             covers: Covers::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
-            status_at: Instant::now(),
+            clock: Clock::new(Instant::now()),
             waveforms: Waveforms::default(),
             play_source: None,
             seeking: None,

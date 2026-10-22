@@ -13,6 +13,7 @@ use iced::widget::{canvas, column, container, text};
 use iced::{Color, Element, Event, Fill, Point, Rectangle, Renderer, Size, Theme, window};
 
 use crate::Message;
+use crate::clock::Clock;
 use crate::config::Language;
 use crate::i18n::fill;
 use crate::waveform::{Bands, Display, Waveform};
@@ -30,29 +31,7 @@ const MID: Color = Color::from_rgb(0.26, 0.76, 0.38);
 const HIGH: Color = Color::from_rgb(0.38, 0.62, 1.0);
 const PLAYHEAD: Color = Color::WHITE;
 
-/// Where the player was, and when we heard it: between the backend's updates (a few a
-/// second) the position is worked out from the time that has passed, so the waveform
-/// scrolls smoothly.
-#[derive(Debug, Clone, Copy)]
-pub struct Anchor {
-    /// Seconds into the track.
-    pub position: f64,
-    pub at: Instant,
-    pub playing: bool,
-}
-
-impl Anchor {
-    fn now(&self, duration: f64) -> f64 {
-        let moved = if self.playing {
-            self.at.elapsed().as_secs_f64()
-        } else {
-            0.0
-        };
-        (self.position + moved).clamp(0.0, duration)
-    }
-}
-
-pub fn view<'a>(display: Display<'a>, anchor: Anchor, language: Language) -> Element<'a, Message> {
+pub fn view<'a>(display: Display<'a>, clock: Clock, language: Language) -> Element<'a, Message> {
     let strings = language.strings();
 
     let waveform = match display {
@@ -79,10 +58,10 @@ pub fn view<'a>(display: Display<'a>, anchor: Anchor, language: Language) -> Ele
     };
 
     column![
-        canvas(Zoomed { waveform, anchor })
+        canvas(Zoomed { waveform, clock })
             .width(Fill)
             .height(ZOOM_HEIGHT),
-        canvas(Overview { waveform, anchor })
+        canvas(Overview { waveform, clock })
             .width(Fill)
             .height(OVERVIEW_HEIGHT),
         text(grid).size(13).style(text::secondary),
@@ -109,7 +88,7 @@ fn paint_bands(frame: &mut Frame, x: f32, width: f32, middle: f32, half_height: 
 /// The scrolling waveform around the playhead.
 struct Zoomed<'a> {
     waveform: &'a Waveform,
-    anchor: Anchor,
+    clock: Clock,
 }
 
 impl canvas::Program<Message> for Zoomed<'_> {
@@ -123,8 +102,9 @@ impl canvas::Program<Message> for Zoomed<'_> {
         _cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
         // While playing, draw the next frame as soon as the last one is out.
-        (self.anchor.playing && matches!(event, Event::Window(window::Event::RedrawRequested(_))))
-            .then(Action::request_redraw)
+        (self.clock.is_running()
+            && matches!(event, Event::Window(window::Event::RedrawRequested(_))))
+        .then(Action::request_redraw)
     }
 
     fn draw(
@@ -143,7 +123,7 @@ impl canvas::Program<Message> for Zoomed<'_> {
         let middle = height / 2.0;
         let half_height = middle - 4.0;
 
-        let now = self.anchor.now(waveform.duration);
+        let now = self.clock.position(Instant::now(), waveform.duration);
         let pixels_per_second = f64::from(width) / VISIBLE_SECONDS;
         let start = now - VISIBLE_SECONDS / 2.0;
         let end = now + VISIBLE_SECONDS / 2.0;
@@ -198,7 +178,7 @@ impl canvas::Program<Message> for Zoomed<'_> {
 /// The whole track, with what has been played dimmed. Clicking jumps there.
 struct Overview<'a> {
     waveform: &'a Waveform,
-    anchor: Anchor,
+    clock: Clock,
 }
 
 impl canvas::Program<Message> for Overview<'_> {
@@ -217,7 +197,7 @@ impl canvas::Program<Message> for Overview<'_> {
                 let seconds = f64::from(point.x / bounds.width) * self.waveform.duration;
                 Some(Action::publish(Message::SeekTo(seconds as f32)).and_capture())
             }
-            Event::Window(window::Event::RedrawRequested(now)) if self.anchor.playing => {
+            Event::Window(window::Event::RedrawRequested(now)) if self.clock.is_running() => {
                 Some(Action::request_redraw_at(*now + OVERVIEW_REDRAW))
             }
             _ => None,
@@ -251,8 +231,8 @@ impl canvas::Program<Message> for Overview<'_> {
             );
         }
 
-        let progress =
-            (self.anchor.now(waveform.duration) / waveform.duration.max(f64::EPSILON)) as f32;
+        let progress = (self.clock.position(Instant::now(), waveform.duration)
+            / waveform.duration.max(f64::EPSILON)) as f32;
         let played = (progress * width).clamp(0.0, width);
         frame.fill_rectangle(
             Point::ORIGIN,

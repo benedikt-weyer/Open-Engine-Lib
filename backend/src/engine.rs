@@ -68,6 +68,10 @@ pub enum Command {
     Next,
     Previous,
     Seek(Duration),
+    /// Do nothing but answer with the status as it is right now. (The status the engine
+    /// publishes by itself is up to a tick old, which is too stale to draw a moving
+    /// playhead from.)
+    Poll,
     /// Stop and release the audio device.
     Close,
 }
@@ -125,6 +129,7 @@ impl<O: Output> Playback<O> {
                     self.output.seek(to);
                 }
             }
+            Command::Poll => {}
             Command::Close => {
                 self.stop();
                 self.error = None;
@@ -514,6 +519,19 @@ mod tests {
         playback.handle(Command::Close);
         assert!(playback.output.closed);
         assert_eq!(playback.status().state, State::Stopped);
+    }
+
+    #[test]
+    fn polling_reads_the_status_without_changing_it() {
+        let (mut playback, _) = playback(&[]);
+        play(&mut playback, &[1, 2], 1);
+        let before = playback.status();
+        playback.handle(Command::Poll);
+        assert_eq!(playback.status(), before);
+
+        let (mut idle, _) = super::tests::playback(&[]);
+        idle.handle(Command::Poll);
+        assert_eq!(idle.status().state, State::Stopped);
     }
 
     #[test]
