@@ -879,6 +879,34 @@ async fn serves_waveforms_from_a_real_library() {
                 });
                 with_grid += usize::from(grid.is_some());
 
+                // How the overview (the track pooled down to 1200 columns) would look: the
+                // average height of each band, pooling by the loudest value of a group
+                // against by its RMS.
+                let bands: Vec<[f64; 3]> = response
+                    .columns
+                    .chunks(3)
+                    .map(|c| [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])
+                    .collect();
+                let (mut by_max, mut by_rms) = ([0.0f64; 3], [0.0f64; 3]);
+                for bin in 0..1200 {
+                    let (from, to) = (
+                        bin * bands.len() / 1200,
+                        ((bin + 1) * bands.len() / 1200).max(bin * bands.len() / 1200 + 1),
+                    );
+                    for band in 0..3 {
+                        let group = &bands[from..to.min(bands.len())];
+                        by_max[band] += group.iter().map(|c| c[band]).fold(0.0, f64::max) / 1200.0;
+                        by_rms[band] += (group.iter().map(|c| c[band] * c[band]).sum::<f64>()
+                            / group.len() as f64)
+                            .sqrt()
+                            / 1200.0;
+                    }
+                }
+                println!(
+                    "        overview average low/mid/high: by max {:.0}/{:.0}/{:.0}, by rms {:.0}/{:.0}/{:.0}",
+                    by_max[0], by_max[1], by_max[2], by_rms[0], by_rms[1], by_rms[2]
+                );
+
                 // Do the beats of the grid land on the music? Fold the low band's onsets (how
                 // much louder it gets within 30 ms) over one beat: where the kicks hit shows
                 // as the strongest phase, and should be at 0 ms, right on the beat.

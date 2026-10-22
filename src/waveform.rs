@@ -7,6 +7,8 @@ use std::sync::Arc;
 pub const OVERVIEW_COLUMNS: usize = 1200;
 /// How many waveforms are kept: the track playing and a few it was switched from.
 const MAX_KEPT: usize = 6;
+/// The share of overview bins that are at or below full height.
+const OVERVIEW_FULL_SCALE_PERCENTILE: f64 = 0.98;
 /// More beats than any window shows; guards against a broken grid.
 const MAX_BEATS: usize = 4000;
 
@@ -138,24 +140,47 @@ impl Waveform {
     }
 }
 
-/// Shrinks `columns` to at most `count` by keeping the loudest of each group, so that
-/// a short loud sound isn't lost.
+/// Shrinks `columns` to at most `count` for drawing the whole track.
+///
+/// Each bin is the RMS of its columns: how loud the stretch is typically, not how loud
+/// its loudest moment is. Keeping the peaks looks right when zoomed in, but a bin of a
+/// few seconds always holds a peak of every band (hi-hats are in nearly every one), so
+/// all three bands would reach full height everywhere and the front layer would cover
+/// the others. A common gain then brings the loudest bins back to full height, which
+/// keeps the bands in proportion to each other.
 fn pool(columns: &[Bands], count: usize) -> Vec<Bands> {
     if columns.len() <= count {
         return columns.to_vec();
     }
-    (0..count)
+
+    let rms: Vec<[f32; 3]> = (0..count)
         .map(|bin| {
             let from = bin * columns.len() / count;
             let to = ((bin + 1) * columns.len() / count).max(from + 1);
-            let mut pooled = [0u8; 3];
-            for column in &columns[from..to] {
-                for (pooled, value) in pooled.iter_mut().zip(column) {
-                    *pooled = (*pooled).max(*value);
-                }
-            }
-            pooled
+            let group = &columns[from..to];
+            [0, 1, 2].map(|band| {
+                let energy: f32 = group.iter().map(|c| f32::from(c[band]).powi(2)).sum();
+                (energy / group.len() as f32).sqrt()
+            })
         })
+        .collect();
+
+    // The loudest few bins are left to clip, so one outlier can't dim everything else.
+    let mut loudest: Vec<f32> = rms
+        .iter()
+        .map(|bands| bands.iter().copied().fold(0.0, f32::max))
+        .collect();
+    loudest.sort_by(f32::total_cmp);
+    let reference = loudest
+        [((loudest.len() as f64 * OVERVIEW_FULL_SCALE_PERCENTILE) as usize).min(loudest.len() - 1)];
+    let gain = if reference > 0.0 {
+        255.0 / reference
+    } else {
+        1.0
+    };
+
+    rms.iter()
+        .map(|bands| bands.map(|level| (level * gain).round().min(255.0) as u8))
         .collect()
 }
 
@@ -350,18 +375,91 @@ mod tests {
     }
 
     #[test]
-    fn the_overview_keeps_the_loudest_of_each_group() {
-        let mut columns = vec![[0u8, 0, 0]; 4000];
-        columns[1] = [200, 10, 0]; // lands in the first bin
-        columns[3999] = [0, 0, 90]; // lands in the last
+    fn the_overview_shows_typical_loudness_not_peaks() {
+        // Lows 100, mids 50, highs 10 throughout, but a loud high-hat click now and then:
+        // every bin of a long track holds one, yet it is not what the stretch sounds like.
+        let columns: Vec<Bands> = (0..4000)
+            .map(|index| {
+                if index % 50 == 0 {
+                    [100, 50, 255]
+                } else {
+                    [100, 50, 10]
+                }
+            })
+            .collect();
         let waveform = Waveform::new(40.0, 100.0, columns, None);
 
         assert_eq!(waveform.overview.len(), OVERVIEW_COLUMNS);
-        assert_eq!(waveform.overview[0], [200, 10, 0]);
-        assert_eq!(waveform.overview[OVERVIEW_COLUMNS - 1], [0, 0, 90]);
+        // The median bin of each band: most bins hold no click at all (a click is every
+        // 50th column, a bin is about 3).
+        let median = |band: usize| {
+            let mut levels: Vec<u8> = waveform.overview.iter().map(|bands| bands[band]).collect();
+            levels.sort_unstable();
+            levels[levels.len() / 2]
+        };
+        let typical = [median(0), median(1), median(2)];
+        assert!(
+            typical[0] > typical[1] && typical[1] > typical[2],
+            "layers stay in order: {typical:?}"
+        );
+        assert!(
+            typical[2] < typical[0] / 2,
+            "the clicks don't make the highs as tall as the lows: {typical:?}"
+        );
+    }
 
+    #[test]
+    fn the_overview_keeps_loud_and_quiet_parts_apart_and_the_bands_in_proportion() {
+        // A loud first half and a quiet second half, lows twice the mids.
+        let columns: Vec<Bands> = (0..4000)
+            .map(|index| {
+                if index < 2000 {
+                    [160, 80, 40]
+                } else {
+                    [16, 8, 4]
+                }
+            })
+            .collect();
+        let overview = Waveform::new(40.0, 100.0, columns, None).overview;
+
+        let (loud, quiet) = (overview[100], overview[OVERVIEW_COLUMNS - 100]);
+        assert!(
+            loud[0] > 200,
+            "the loud part is brought up to full height: {loud:?}"
+        );
+        assert!(
+            quiet[0] * 5 < loud[0],
+            "and the quiet part stays small: {quiet:?}"
+        );
+        assert!(
+            u32::from(loud[0]).abs_diff(u32::from(loud[1]) * 2) <= 2,
+            "lows are still twice the mids: {loud:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_loud_sound_still_shows_in_the_overview() {
+        let mut columns = vec![[0u8, 0, 0]; 4000];
+        columns[2000] = [255, 255, 255];
+        let overview = Waveform::new(40.0, 100.0, columns, None).overview;
+
+        let seen = overview.iter().map(|bands| bands[0]).max().unwrap();
+        assert!(seen > 100, "{seen}");
+        assert_eq!(overview[0], [0, 0, 0]);
+
+        let silent = Waveform::new(40.0, 100.0, vec![[0u8; 3]; 4000], None).overview;
+        assert!(silent.iter().all(|bands| *bands == [0, 0, 0]));
+    }
+
+    #[test]
+    fn a_short_track_is_not_stretched() {
         let short = Waveform::new(1.0, 100.0, vec![[1, 2, 3]; 100], None);
-        assert_eq!(short.overview.len(), 100, "a short track is not stretched");
+        assert_eq!(short.overview.len(), 100);
+        assert_eq!(
+            short.overview[0],
+            [1, 2, 3],
+            "and its columns are used as they are"
+        );
     }
 
     #[test]
