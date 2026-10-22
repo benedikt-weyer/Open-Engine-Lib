@@ -38,6 +38,18 @@ in
         description = "UI language. Unset follows the system locale (German for de_*, else English).";
       };
 
+      waveform_colors = lib.mkOption {
+        type = lib.types.nullOr (lib.types.enum [ "mono" "rgb" "stacked" "spectrum" ]);
+        default = null;
+        example = "spectrum";
+        description = ''
+          How the waveform of the playing track is colored: "mono" (one blue, lighter for
+          highs), "rgb" (lows red, mids green, highs blue, mixed), "stacked" (three layers:
+          dark blue, amber, white) or "spectrum" (dominant frequency sets the hue). Unset
+          means "stacked".
+        '';
+      };
+
       reopen_library = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
         default = null;

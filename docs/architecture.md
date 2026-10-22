@@ -52,7 +52,16 @@ The `.proto` files are compiled in pure Rust (`protox`), so building needs no `p
 
 ## Waveform and beatgrid
 
-While a song is loaded in the player, the UI shows a DJ-style deck above the player bar: a zoomed waveform (6 seconds) scrolling past a fixed playhead with the beatgrid drawn over it, the first beat of every bar stronger, and the whole track below it. Clicking the overview jumps there. The waveform is drawn in three layers (low red, mid green, high blue, like Engine's tri-band waveform).
+While a song is loaded in the player, the UI shows a DJ-style deck above the player bar: a zoomed waveform (6 seconds) scrolling past a fixed playhead with the beatgrid drawn over it, the first beat of every bar stronger, and the whole track below it. Clicking the overview jumps there. How it is colored is a setting (`waveform_colors`, on the Settings page and in the NixOS module) that can also be changed from a menu right under the waveform:
+
+  | Scheme | Look |
+  | --- | --- |
+  | `mono` | one blue, lighter where there are more highs (the old Pioneer look) |
+  | `rgb` | lows red, mids green, highs blue, mixed into one color per slice, as in Serato and rekordbox "RGB" |
+  | `stacked` (default) | three layers over each other, lows biggest at the back and highs smallest in front: dark blue, amber and white, as on a CDJ-3000 |
+  | `spectrum` | the dominant frequency sets the hue, from red (bass) through green to violet (treble) |
+
+  The height is the loudness of the loudest band in all schemes but `stacked`, where every band has its own layer. The color maths is in `colors.rs`.
 
 - **Waveform:** Engine only stores a coarse overview (1,024 columns for the whole track), too rough to zoom into, so the backend computes its own from the audio file. `GetWaveform` decodes the whole file, splits it into low (< 200 Hz), mid and high (> 2 kHz) with second-order Butterworth filters and keeps the peak of each band per 10 ms. A 5–8 minute track takes 1–2 seconds; the backend keeps the last 8 waveforms. The overview strip is the same data pooled down to 1,200 columns in the UI.
 - **Beatgrid:** this is Engine's own analysis, read from `PerformanceData.beatData` (adjusted grid if there is one, else the analysed one) and sent as markers. Between two markers the beats are evenly spaced, before the first and after the last they carry on at the nearest spacing, and beats whose number is a multiple of 4 start a bar. Tracks without a grid just have no lines, and the deck says so.

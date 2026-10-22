@@ -3,6 +3,7 @@
 mod backend;
 mod browser;
 mod clock;
+mod colors;
 mod config;
 mod covers;
 mod deck;
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 use backend::{Backend, Control};
 use browser::{Browser, Source};
 use clock::Clock;
-use config::{ConfigStore, Language, Locations, ThemeMode};
+use config::{ConfigStore, Language, Locations, ThemeMode, WaveformColors};
 use covers::Covers;
 use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text};
@@ -112,6 +113,7 @@ pub enum Message {
     ThemeSelected(ThemeMode),
     LanguageSelected(Language),
     ResetOverrides,
+    WaveformColorsSelected(WaveformColors),
     ReopenLibraryToggled(bool),
     RestorePositionToggled(bool),
     CloseRequested(iced::window::Id),
@@ -459,6 +461,13 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .err()
                 .map(|e| e.to_string());
         }
+        Message::WaveformColorsSelected(colors) => {
+            state.config_error = state
+                .config
+                .set_waveform_colors(colors)
+                .err()
+                .map(|e| e.to_string());
+        }
         Message::ReopenLibraryToggled(reopen) => {
             state.config_error = state
                 .config
@@ -784,9 +793,15 @@ fn open_library<'a>(
             paused: state.status.state() == PlaybackState::Paused,
         });
     // The waveform of the track in the player, with the playhead where the player is.
-    let deck = now
-        .as_ref()
-        .map(|now| deck::view(state.waveforms.display(now.track.id), state.clock, language));
+    let colors = state.config.effective().waveform_colors;
+    let deck = now.as_ref().map(|now| {
+        deck::view(
+            state.waveforms.display(now.track.id),
+            state.clock,
+            colors,
+            language,
+        )
+    });
     let bar = player_bar::view(
         language,
         player_bar::Bar {

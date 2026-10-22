@@ -29,6 +29,32 @@ pub enum ThemeMode {
     Dark,
 }
 
+/// How the waveform of the playing track is colored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WaveformColors {
+    /// One color (blue); the more highs, the lighter.
+    Mono,
+    /// Lows red, mids green, highs blue, mixed into one color per slice, as in the
+    /// "RGB" waveforms of Serato and rekordbox.
+    Rgb,
+    /// Three layers over each other, lows biggest at the back and highs smallest in
+    /// front: dark blue, amber and white, as on a CDJ-3000.
+    #[default]
+    Stacked,
+    /// The dominant frequency sets the hue, from red for bass to violet for treble.
+    Spectrum,
+}
+
+impl WaveformColors {
+    pub const ALL: [WaveformColors; 4] = [
+        WaveformColors::Mono,
+        WaveformColors::Rgb,
+        WaveformColors::Stacked,
+        WaveformColors::Spectrum,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
     #[serde(rename = "en")]
@@ -65,6 +91,7 @@ impl Default for Language {
 pub struct Config {
     pub theme: ThemeMode,
     pub language: Language,
+    pub waveform_colors: WaveformColors,
     /// Open the library that was open when the app was last closed.
     pub reopen_library: bool,
     /// When reopening it, also go back to the playlist, the song and its position.
@@ -76,6 +103,7 @@ impl Default for Config {
         Self {
             theme: ThemeMode::default(),
             language: Language::default(),
+            waveform_colors: WaveformColors::default(),
             reopen_library: true,
             restore_position: true,
         }
@@ -91,6 +119,8 @@ struct Layer {
     #[serde(skip_serializing_if = "Option::is_none")]
     language: Option<Language>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_colors: Option<WaveformColors>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reopen_library: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     restore_position: Option<bool>,
@@ -103,6 +133,9 @@ impl Layer {
         }
         if let Some(language) = self.language {
             config.language = language;
+        }
+        if let Some(waveform_colors) = self.waveform_colors {
+            config.waveform_colors = waveform_colors;
         }
         if let Some(reopen_library) = self.reopen_library {
             config.reopen_library = reopen_library;
@@ -237,6 +270,10 @@ impl ConfigStore {
         self.edit(|layer| layer.language = Some(language))
     }
 
+    pub fn set_waveform_colors(&mut self, colors: WaveformColors) -> io::Result<()> {
+        self.edit(|layer| layer.waveform_colors = Some(colors))
+    }
+
     pub fn set_reopen_library(&mut self, reopen: bool) -> io::Result<()> {
         self.edit(|layer| layer.reopen_library = Some(reopen))
     }
@@ -354,6 +391,30 @@ mod tests {
         let store = ConfigStore::load(dir.locations());
         assert_eq!(store.effective(), Config::default());
         assert!(!store.is_layered());
+    }
+
+    #[test]
+    fn the_waveform_colors_are_a_saved_choice() {
+        let dir = TempDir::new();
+        let mut store = ConfigStore::load(dir.locations());
+        assert_eq!(store.effective().waveform_colors, WaveformColors::Stacked);
+
+        for colors in WaveformColors::ALL {
+            store.set_waveform_colors(colors).unwrap();
+            let reloaded = ConfigStore::load(dir.locations());
+            assert_eq!(reloaded.effective().waveform_colors, colors);
+        }
+        let written = fs::read_to_string(dir.path("user.toml")).unwrap();
+        assert!(
+            written.contains("waveform_colors = \"spectrum\""),
+            "{written}"
+        );
+
+        // An unknown name is ignored like any other invalid config, not a crash.
+        fs::write(dir.path("user.toml"), "waveform_colors = \"neon\"\n").unwrap();
+        let broken = ConfigStore::load(dir.locations());
+        assert_eq!(broken.effective().waveform_colors, WaveformColors::Stacked);
+        assert!(!broken.warnings.is_empty());
     }
 
     #[test]

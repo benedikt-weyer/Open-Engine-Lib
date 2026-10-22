@@ -6,6 +6,15 @@ theme: Design
 theme_light: Hell
 theme_dark: Dunkel
 language_heading: Sprache
+waveform_colors_heading: Wellenform-Farben
+waveform_colors_mono: "Mono: eine Farbe, heller bei den Höhen"
+waveform_colors_rgb: "RGB-Mischung: Bässe rot, Mitten grün, Höhen blau, zu einer Farbe gemischt"
+waveform_colors_stacked: "3-Band übereinander: Tiefen, Mitten und Höhen als Ebenen (dunkelblau, bernstein, weiß)"
+waveform_colors_spectrum: "Spektrum: die vorherrschende Frequenz bestimmt den Farbton, von Rot (Bass) bis Violett (Höhen)"
+waveform_colors_short_mono: Mono
+waveform_colors_short_rgb: RGB
+waveform_colors_short_stacked: 3-Band
+waveform_colors_short_spectrum: Spektrum
 startup_heading: Start
 reopen_library: Letzte Bibliothek wieder öffnen
 restore_position: Auch zu Playlist, Titel und Position darin zurückkehren (pausiert)

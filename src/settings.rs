@@ -2,7 +2,7 @@ use iced::Element;
 use iced::widget::{button, checkbox, column, radio, text};
 
 use crate::Message;
-use crate::config::{ConfigStore, Language, ThemeMode};
+use crate::config::{ConfigStore, Language, ThemeMode, WaveformColors};
 use crate::i18n::fill;
 
 fn theme_name(language: Language, theme: ThemeMode) -> &'static str {
@@ -10,6 +10,16 @@ fn theme_name(language: Language, theme: ThemeMode) -> &'static str {
     match theme {
         ThemeMode::Light => &strings.theme_light,
         ThemeMode::Dark => &strings.theme_dark,
+    }
+}
+
+fn waveform_colors_name(language: Language, colors: WaveformColors) -> &'static str {
+    let strings = language.strings();
+    match colors {
+        WaveformColors::Mono => &strings.waveform_colors_mono,
+        WaveformColors::Rgb => &strings.waveform_colors_rgb,
+        WaveformColors::Stacked => &strings.waveform_colors_stacked,
+        WaveformColors::Spectrum => &strings.waveform_colors_spectrum,
     }
 }
 
@@ -40,6 +50,16 @@ pub fn view<'a>(config: &'a ConfigStore, error: Option<&'a str>) -> Element<'a, 
             option,
             Some(current.language),
             Message::LanguageSelected,
+        ));
+    }
+
+    page = page.push(text(&strings.waveform_colors_heading).size(20));
+    for colors in WaveformColors::ALL {
+        page = page.push(radio(
+            waveform_colors_name(language, colors),
+            colors,
+            Some(current.waveform_colors),
+            Message::WaveformColorsSelected,
         ));
     }
 

@@ -2,8 +2,8 @@
 //! scrolling waveform around the playhead with the beatgrid drawn over it, and the
 //! whole track below it to see where you are and to jump to somewhere else.
 //!
-//! The waveform is drawn in three layers, the low frequencies red, the mids green and
-//! the highs blue, the way Engine's tri-band waveform shows them.
+//! How the waveform is colored is a setting (`WaveformColors`) that can also be changed
+//! from a menu next to the display.
 
 use std::time::{Duration, Instant};
 
@@ -11,12 +11,13 @@ use iced::mouse;
 use std::ops::Range;
 
 use iced::widget::canvas::{Action, Frame, Geometry, Path};
-use iced::widget::{canvas, column, container, text};
+use iced::widget::{canvas, column, container, pick_list, row, text};
 use iced::{Color, Element, Event, Fill, Point, Rectangle, Renderer, Size, Theme, window};
 
 use crate::Message;
 use crate::clock::Clock;
-use crate::config::Language;
+use crate::colors::{self, STACKED_LAYERS};
+use crate::config::{Language, WaveformColors};
 use crate::i18n::fill;
 use crate::waveform::{Bands, Display, Waveform};
 
@@ -28,12 +29,40 @@ const OVERVIEW_HEIGHT: f32 = 44.0;
 const OVERVIEW_REDRAW: Duration = Duration::from_millis(100);
 
 const BACKGROUND: Color = Color::from_rgb(0.06, 0.07, 0.09);
-const LOW: Color = Color::from_rgb(0.90, 0.28, 0.24);
-const MID: Color = Color::from_rgb(0.26, 0.76, 0.38);
-const HIGH: Color = Color::from_rgb(0.38, 0.62, 1.0);
 const PLAYHEAD: Color = Color::WHITE;
 
-pub fn view<'a>(display: Display<'a>, clock: Clock, language: Language) -> Element<'a, Message> {
+/// An entry of the color scheme menu: the scheme and its name in the UI language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SchemeChoice {
+    colors: WaveformColors,
+    name: &'static str,
+}
+
+impl std::fmt::Display for SchemeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+fn scheme_choice(language: Language, colors: WaveformColors) -> SchemeChoice {
+    let strings = language.strings();
+    SchemeChoice {
+        colors,
+        name: match colors {
+            WaveformColors::Mono => &strings.waveform_colors_short_mono,
+            WaveformColors::Rgb => &strings.waveform_colors_short_rgb,
+            WaveformColors::Stacked => &strings.waveform_colors_short_stacked,
+            WaveformColors::Spectrum => &strings.waveform_colors_short_spectrum,
+        },
+    }
+}
+
+pub fn view<'a>(
+    display: Display<'a>,
+    clock: Clock,
+    colors: WaveformColors,
+    language: Language,
+) -> Element<'a, Message> {
     let strings = language.strings();
 
     let waveform = match display {
@@ -59,14 +88,36 @@ pub fn view<'a>(display: Display<'a>, clock: Clock, language: Language) -> Eleme
         None => strings.beatgrid_none.clone(),
     };
 
+    // A quick way to change the colors without going to the settings.
+    let choices = WaveformColors::ALL.map(|colors| scheme_choice(language, colors));
+    let scheme_menu = pick_list(
+        choices.to_vec(),
+        Some(scheme_choice(language, colors)),
+        |choice: SchemeChoice| Message::WaveformColorsSelected(choice.colors),
+    )
+    .text_size(13)
+    .padding([2, 8]);
+
     column![
-        canvas(Zoomed { waveform, clock })
-            .width(Fill)
-            .height(ZOOM_HEIGHT),
-        canvas(Overview { waveform, clock })
-            .width(Fill)
-            .height(OVERVIEW_HEIGHT),
-        text(grid).size(13).style(text::secondary),
+        canvas(Zoomed {
+            waveform,
+            clock,
+            colors
+        })
+        .width(Fill)
+        .height(ZOOM_HEIGHT),
+        canvas(Overview {
+            waveform,
+            clock,
+            colors
+        })
+        .width(Fill)
+        .height(OVERVIEW_HEIGHT),
+        row![
+            text(grid).size(13).style(text::secondary).width(Fill),
+            scheme_menu
+        ]
+        .align_y(iced::Center),
     ]
     .spacing(4)
     .into()
@@ -85,6 +136,7 @@ fn smoothed(columns: &[Bands], index: usize, band: usize) -> f32 {
 /// bar per column, so it is drawn anti-aliased and scrolls without shimmering.
 fn paint_waveform(
     frame: &mut Frame,
+    colors: WaveformColors,
     columns: &[Bands],
     range: Range<usize>,
     x_of: impl Fn(usize) -> f32,
@@ -96,7 +148,24 @@ fn paint_waveform(
     }
     let xs: Vec<f32> = range.clone().map(x_of).collect();
 
-    for (band, color) in [LOW, MID, HIGH].into_iter().enumerate() {
+    if colors == WaveformColors::Stacked {
+        paint_stacked(frame, columns, &range, &xs, middle, half_height);
+    } else {
+        paint_colored(frame, colors, columns, &range, &xs, middle, half_height);
+    }
+}
+
+/// Three layers over each other, one shape per band: the back one (low) is usually the
+/// tallest and the front one (high) the smallest.
+fn paint_stacked(
+    frame: &mut Frame,
+    columns: &[Bands],
+    range: &Range<usize>,
+    xs: &[f32],
+    middle: f32,
+    half_height: f32,
+) {
+    for (band, color) in STACKED_LAYERS.into_iter().enumerate() {
         let halves: Vec<f32> = range
             .clone()
             .map(|index| smoothed(columns, index, band) * half_height)
@@ -120,10 +189,48 @@ fn paint_waveform(
     }
 }
 
+/// One shape as tall as the loudest band, whose color changes along it: each stretch
+/// between two columns is filled with the color of the sound there.
+fn paint_colored(
+    frame: &mut Frame,
+    colors: WaveformColors,
+    columns: &[Bands],
+    range: &Range<usize>,
+    xs: &[f32],
+    middle: f32,
+    half_height: f32,
+) {
+    let levels: Vec<[f32; 3]> = range
+        .clone()
+        .map(|index| [0, 1, 2].map(|band| smoothed(columns, index, band)))
+        .collect();
+    let halves: Vec<f32> = levels
+        .iter()
+        .map(|levels| colors::amplitude(*levels) * half_height)
+        .collect();
+
+    for index in 0..xs.len() - 1 {
+        if halves[index] < 0.25 && halves[index + 1] < 0.25 {
+            continue;
+        }
+        // A hair of overlap, so that no gap shows between neighbouring stretches.
+        let (left, right) = (xs[index], xs[index + 1] + 0.4);
+        let stretch = Path::new(|builder| {
+            builder.move_to(Point::new(left, middle - halves[index]));
+            builder.line_to(Point::new(right, middle - halves[index + 1]));
+            builder.line_to(Point::new(right, middle + halves[index + 1]));
+            builder.line_to(Point::new(left, middle + halves[index]));
+            builder.close();
+        });
+        frame.fill(&stretch, colors::column(colors, levels[index]));
+    }
+}
+
 /// The scrolling waveform around the playhead.
 struct Zoomed<'a> {
     waveform: &'a Waveform,
     clock: Clock,
+    colors: WaveformColors,
 }
 
 impl canvas::Program<Message> for Zoomed<'_> {
@@ -172,6 +279,7 @@ impl canvas::Program<Message> for Zoomed<'_> {
             ((end * columns_per_second).ceil().max(0.0) as usize + 1).min(waveform.columns.len());
         paint_waveform(
             &mut frame,
+            self.colors,
             &waveform.columns,
             first..last,
             // The middle of a column's 10 ms.
@@ -212,6 +320,7 @@ impl canvas::Program<Message> for Zoomed<'_> {
 struct Overview<'a> {
     waveform: &'a Waveform,
     clock: Clock,
+    colors: WaveformColors,
 }
 
 impl canvas::Program<Message> for Overview<'_> {
@@ -254,6 +363,7 @@ impl canvas::Program<Message> for Overview<'_> {
         let bin_width = width / waveform.overview.len().max(1) as f32;
         paint_waveform(
             &mut frame,
+            self.colors,
             &waveform.overview,
             0..waveform.overview.len(),
             |index| (index as f32 + 0.5) * bin_width,

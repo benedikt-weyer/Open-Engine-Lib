@@ -6,6 +6,15 @@ theme: Theme
 theme_light: Light
 theme_dark: Dark
 language_heading: Language
+waveform_colors_heading: Waveform colors
+waveform_colors_mono: "Mono: one color, lighter for the highs"
+waveform_colors_rgb: "RGB blend: lows red, mids green, highs blue, mixed into one color"
+waveform_colors_stacked: "3-band stacked: low, mid and high layers over each other (dark blue, amber, white)"
+waveform_colors_spectrum: "Spectrum: the dominant frequency sets the hue, from red (bass) to violet (treble)"
+waveform_colors_short_mono: Mono
+waveform_colors_short_rgb: RGB
+waveform_colors_short_stacked: 3-band
+waveform_colors_short_spectrum: Spectrum
 startup_heading: Startup
 reopen_library: Reopen the last library
 restore_position: Also go back to the playlist, song and position in it (paused)
