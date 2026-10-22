@@ -9,7 +9,7 @@ Findings from inspecting a real Engine DJ library on an external drive (a Denon 
 | `Database2/*.db` | Plain SQLite 3 (no SQLCipher, no key) | Yes, with any SQLite client |
 | Track metadata, playlists, history, smartlists | Ordinary SQL columns, UTF-8 text | Yes |
 | Cues, loops, beat grid, waveform | BLOBs: a 4-byte length plus zlib, or raw binary | Yes, after decoding (see below) |
-| Album art | 256×256 PNG BLOBs in `AlbumArt`, or 256×256 JPEG files in `Artwork/` | Yes |
+| Album art | 256×256 PNG or JPEG BLOBs in `AlbumArt`, JPEG files in `Artwork/`, or a streaming URL | Yes |
 | Overview `.rgb` files | The same zlib BLOB format as the waveform column | Yes |
 | `user.profile` | Plain JSON | Yes |
 | `.stems` files | Plain MP4 container, one 8-channel AAC stream | Container yes. The audio would not decode in ffmpeg 9.0.2 (see [Stems](#stems)) |
@@ -72,15 +72,39 @@ Triggers keep `lastEditTime` current, forbid changing or recycling `id`, fill in
 One row per track (`trackId` is the primary key and a foreign key with cascade). The analysis results are all BLOBs, decoded in the next section: `trackData`, `overviewWaveFormData`, `beatData`, `quickCues`, `loops`. Also `thirdPartySourceId` and `activeOnLoadLoops`.
 
 ### `AlbumArt`
-`id`, `hash` (indexed), `albumArt` (BLOB). `Track.albumArtId` points here. The rows come in three kinds, told apart by the SQLite type of `hash`:
+`id`, `hash` (indexed), `albumArt` (BLOB). `Track.albumArtId` points here. Rows come in five kinds, told apart by the SQLite type of `hash` and by what `albumArt` holds:
 
-| Kind | `hash` | `albumArt` | Where the image lives | Rows in `m.db` / `hm.db` |
+| Kind | `hash` | `albumArt` | Where the image lives | Rows `m.db` / `hm.db` |
 | --- | --- | --- | --- | --- |
-| In-database | 40-char hex **text** | 256×256 PNG | In the BLOB | 2,138 / 326 |
+| Streaming | text `URI:<hex>` | the text `image://streaming/<percent-encoded cover URL>` | Not stored, fetched from the URL | 165 / 2 |
+| In-database PNG | text `<hex>` | 256×256 8-bit RGB PNG | In the BLOB | 1,973 / 162 |
+| In-database JPEG | text `<hex>` | 256×256 JPEG | In the BLOB | 0 / 162 |
 | On disk | **20-byte BLOB** (raw SHA-1 digest) | NULL | `Artwork/<base64url(hash)>.jpg` | 490 / 448 |
 | Empty | NULL | NULL | none | 1 / 1 |
 
-For the hex-text rows I could not work out what is hashed. It is not the SHA-1 of the stored PNG in `m.db` (0 of 2,138), nor in `hm.db` in general (118 of 326), and it did not equal the SHA-1 of the cover embedded in the audio file either (tested on 3 tracks). `Track.albumArt` is the constant string `image://planck/0` on 2,455 tracks and NULL on the rest. `Track.albumArtSourceHash` was NULL on every row.
+#### How the hash is computed
+
+**Text hex format.** Take the SHA-1 digest, split it into five big-endian 32-bit words, format each word as hex **without zero padding** and concatenate. This is why text hashes are sometimes shorter than 40 characters (in `m.db`: 40 chars on 1,405 rows, 39 on 475, 38 on 81, 37 on 10, 36 on 2). A plain `sha1().hexdigest()` only matches when no word starts with a zero nibble. In Python: `"".join(f"{w:x}" for w in struct.unpack(">5I", hashlib.sha1(data).digest()))`.
+
+**What is hashed, per kind** (checked against the real data):
+
+| Kind | Input to SHA-1 | Verified |
+| --- | --- | --- |
+| Streaming | The stored `albumArt` text, i.e. the whole `image://streaming/...` string, with `URI:` prepended to the result | 167 of 167 rows |
+| In-database JPEG | The stored JPEG bytes | 162 of 162 rows |
+| On disk | The original cover image as embedded in the audio file (raw digest, not hex) | 5 of 5 tracks tested |
+| In-database PNG | **Not identified** (see below) | 0 matches |
+
+**The PNG rows.** The hash is *not* the SHA-1 of any of these: the stored PNG bytes, the decompressed PNG data with or without filter bytes, the decoded pixels in RGB, BGR, RGBA, BGRA or ARGB order (25 images tested), or the cover embedded in the audio file (0 of 60 tracks).
+
+What I could establish:
+- For 317 tracks that appear in both databases with different representations (a PNG row in `m.db`, an on-disk row in `hm.db`), the old text hash and the new raw hash map one to one (308 distinct pairs, no fan-out). So the old hash is a function of the cover image, but of some transformed form of it rather than the original bytes.
+- That is consistent with the library having been written by older software that hashed a 256×256 thumbnail it generated, then stored it as a PNG. Two PNGs carry a `CREATOR: gd-jpeg ... quality = 100` text chunk, which suggests the thumbnail started life as a JPEG. This is an inference. I could not reproduce the bytes, because there is no tool here that encodes a JPEG exactly like the original software.
+- The three storage schemes look like successive versions of the software: PNG rows, then JPEG rows, then files in `Artwork/`. The same track can show both an old PNG row in `m.db` and a new on-disk row in `hm.db`.
+
+For an implementation: treat text hashes as opaque ids. They can be recomputed for streaming and JPEG rows and for new on-disk rows, but not for old PNG rows, so do not generate or "repair" them.
+
+`Track.albumArt` is the constant string `image://planck/0` on 2,455 tracks and NULL on the rest. `Track.albumArtSourceHash` was NULL on every row.
 
 ### Playlists
 - `Playlist`: `id`, `title`, `parentListId` (0 = top level), `nextListId` (0 = last sibling), `isPersisted`, `lastEditTime`, `isExplicitlyExported`. Siblings form a **singly linked list** through `nextListId` (unique per parent), not an order column.
