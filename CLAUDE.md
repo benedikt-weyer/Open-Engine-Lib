@@ -17,6 +17,9 @@ Development uses a Nix flake (`flake.nix`) activated by direnv (`.envrc`: `use f
 - `cargo check` / `cargo clippy` / `cargo fmt`
 - `cargo test` (single test: `cargo test <name>`). There are no tests yet.
 - `nix flake check`: validates the flake (only x86_64-linux is evaluated locally)
+- `nix build`: builds the Nix package (`nix/package.nix`)
+
+The flake also exports `packages`/`apps` (default), `overlays.default` and `nixosModules.default` (`programs.open-engine-lib.enable`) for NixOS installs. `nix/package.nix` sources only `Cargo.toml`, `Cargo.lock`, `src` and `packaging`, and patches the runtime library RPATH, so add any new top-level build inputs to its fileset.
 
 Newly added files must be `git add`ed (at least `-N`) before Nix flake commands can see them, because flakes only read tracked files.
 
