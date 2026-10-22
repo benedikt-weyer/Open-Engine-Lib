@@ -38,7 +38,7 @@ If the backend is missing or fails to start, the library page says so and offers
 The protocol lives in `api/proto/openenginelib/v1/`:
 
 - `backend.proto`: `BackendService.GetInfo`, the version handshake.
-- `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`.
+- `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`, `GetWaveform`.
 - `playback.proto`: `PlaybackService`: `Play`, `TogglePause`, `Stop`, `Next`, `Previous`, `Seek`, `GetStatus`. The backend owns the queue and moves on to the next track by itself; the UI polls `GetStatus` while playing.
 
 Versioning rules:
@@ -49,6 +49,16 @@ Versioning rules:
 - Track and playlist ids are only valid while a library is open; they are indices, not the Engine database's ids.
 
 The `.proto` files are compiled in pure Rust (`protox`), so building needs no `protoc`.
+
+## Waveform and beatgrid
+
+While a song is loaded in the player, the UI shows a DJ-style deck above the player bar: a zoomed waveform (6 seconds) scrolling past a fixed playhead with the beatgrid drawn over it, the first beat of every bar stronger, and the whole track below it. Clicking the overview jumps there. The waveform is drawn in three layers (low red, mid green, high blue, like Engine's tri-band waveform).
+
+- **Waveform:** Engine only stores a coarse overview (1,024 columns for the whole track), too rough to zoom into, so the backend computes its own from the audio file. `GetWaveform` decodes the whole file, splits it into low (< 200 Hz), mid and high (> 2 kHz) with second-order Butterworth filters and keeps the peak of each band per 10 ms. A 5–8 minute track takes 1–2 seconds; the backend keeps the last 8 waveforms. The overview strip is the same data pooled down to 1,200 columns in the UI.
+- **Beatgrid:** this is Engine's own analysis, read from `PerformanceData.beatData` (adjusted grid if there is one, else the analysed one) and sent as markers. Between two markers the beats are evenly spaced, before the first and after the last they carry on at the nearest spacing, and beats whose number is a multiple of 4 start a bar. Tracks without a grid just have no lines, and the deck says so.
+- **Smooth scrolling:** the backend's position arrives about four times a second, but the canvas works out the position in between from the time that has passed and asks for a redraw every frame while playing. It resynchronises with every update.
+- **Checked on a real library:** for every track tried the grid's tempo equals the library's BPM, and the strongest kick onsets of four-on-the-floor tracks fall 10–30 ms after the grid line, which is the detection window's own lag, so the lines sit on the beats.
+- **Not done:** no scrubbing by dragging, no zoom control, no cue points or loops, and no waveform for streaming tracks (they have no file).
 
 ## Restoring the last session
 
@@ -78,5 +88,6 @@ The backend never works on a library in place: it may sit on a removable drive, 
 - `cargo test --workspace` runs everything.
 - `backend/tests/grpc.rs` starts the real backend process and drives it over gRPC with a fixture library: the token check, the handshake, the cache, tracks and playlists, play errors, and shutdown when the UI goes away. It needs no sound card.
 - `serves_covers_from_a_real_library` in the same file is ignored by default and silent: it fetches every cover of a real library and checks the image types (`... --test grpc covers -- --ignored --nocapture`).
+- `serves_waveforms_from_a_real_library` (ignored, silent) fetches the waveforms of a real library's first tracks and reports timings, the grid's tempo against the library's, and where the kick onsets fall relative to the beats.
 - `plays_from_a_real_library` in the same file is ignored by default. It opens a real library and plays a track through the real audio device (it is audible):
   `OPEN_ENGINE_TEST_LIBRARY=/run/media/you/DRIVE cargo test -p open-engine-backend --test grpc -- --ignored --nocapture`

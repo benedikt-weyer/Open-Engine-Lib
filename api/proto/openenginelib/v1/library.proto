@@ -23,6 +23,13 @@ service LibraryService {
   // Errors: FAILED_PRECONDITION if no library is open, NOT_FOUND if the id is unknown
   // or its image is not available on this machine (e.g. covers of streaming tracks).
   rpc GetAlbumArt(GetAlbumArtRequest) returns (GetAlbumArtResponse);
+  // The waveform of a track, for drawing it, and its beatgrid if the library has one.
+  // The waveform is computed from the audio file, so this takes a moment the first
+  // time for a track (the backend remembers recent ones).
+  // Errors: FAILED_PRECONDITION if no library is open or the track is a streaming
+  // track, INVALID_ARGUMENT for an unknown track id, NOT_FOUND if the audio file does
+  // not exist, INTERNAL if it can't be decoded.
+  rpc GetWaveform(GetWaveformRequest) returns (GetWaveformResponse);
 }
 
 message OpenLibraryRequest {
@@ -100,4 +107,36 @@ message Playlist {
   bool has_children = 5;
   // Track ids in playlist order.
   repeated uint32 track_ids = 6;
+}
+
+message GetWaveformRequest {
+  uint32 track_id = 1;
+}
+
+message GetWaveformResponse {
+  double duration_seconds = 1;
+  // How many columns make up a second of the track (100: one per 10 ms).
+  uint32 columns_per_second = 2;
+  // Three bytes per column, in time order: the loudness of the low, the mid and the
+  // high frequencies, from 0 (silent) to 255. The bands are scaled to the track's loud
+  // parts, with the quieter bands (usually the highs) boosted by at most 3.3x, so the
+  // levels of different bands are only roughly comparable.
+  bytes columns = 3;
+  // Unset if the library has no beatgrid for the track.
+  optional BeatGrid beat_grid = 4;
+}
+
+// The library's analysis of where the beats are. Between two markers the beats are
+// evenly spaced; before the first and after the last they continue at the spacing of
+// the nearest pair.
+message BeatGrid {
+  // At least two, in time order.
+  repeated BeatMarker markers = 1;
+}
+
+message BeatMarker {
+  // May be negative: the grid can start before the track does.
+  double position_seconds = 1;
+  // Counts beats, and can be negative. A beat whose number is a multiple of 4 starts a bar.
+  int64 beat_number = 2;
 }

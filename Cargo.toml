@@ -5,6 +5,11 @@
 members = ["api", "backend"]
 default-members = [".", "backend"]
 
+# The audio decoders are far too slow without optimisation, which would make waveforms
+# take many seconds in a debug build. Dependencies are built optimised, our own code isn't.
+[profile.dev.package."*"]
+opt-level = 2
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -18,7 +23,7 @@ default-run = "open-engine-lib"
 [dependencies]
 dirs = "7.0.0"
 getrandom = "0.4.3"
-iced = { version = "0.14", features = ["tokio", "image"] }
+iced = { version = "0.14", features = ["tokio", "image", "canvas"] }
 open-engine-api = { version = "0.1.0", path = "api" }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }

@@ -47,6 +47,10 @@ stop: Stopp
 previous: Zurück
 next: Weiter
 nothing_playing: Es wird nichts abgespielt
+waveform_loading: Wellenform wird analysiert…
+waveform_unavailable: Für diesen Titel ist keine Wellenform verfügbar.
+beatgrid_bpm: "Beatgrid · {bpm} BPM"
+beatgrid_none: Kein Beatgrid
 now_playing: "{title} · {artist}"
 streaming_not_playable: "„{title}“ ist ein Streaming-Titel und kann hier nicht abgespielt werden."
 file_missing: "„{title}“ wurde nicht gefunden: {path}"

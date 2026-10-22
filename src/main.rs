@@ -4,6 +4,7 @@ mod backend;
 mod browser;
 mod config;
 mod covers;
+mod deck;
 mod i18n;
 mod model;
 mod navbar;
@@ -12,10 +13,11 @@ mod recent;
 mod session;
 mod settings;
 mod sidebar;
+mod waveform;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use backend::{Backend, Control};
 use browser::{Browser, Source};
@@ -28,6 +30,7 @@ use model::Library;
 use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
 use recent::Recents;
 use session::{Session, SessionStore};
+use waveform::{Waveform, Waveforms};
 
 /// How often the playback position is fetched from the backend while playing.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -85,8 +88,11 @@ struct State {
     covers: Covers,
     /// Why the recent libraries could not be saved.
     recents_error: Option<String>,
-    /// What the backend last said about playback.
+    /// What the backend last said about playback, and when.
     status: PlaybackStatus,
+    status_at: Instant,
+    /// The waveform and beatgrid of the playing track.
+    waveforms: Waveforms,
     /// The list the queue was made from, so its playing row can be marked.
     play_source: Option<Source>,
     /// Where the user is dragging the seek slider to, in seconds.
@@ -132,9 +138,13 @@ pub enum Message {
     Tick,
     SeekDragged(f32),
     SeekReleased,
+    /// Jump to a point of the track, in seconds (from clicking the waveform overview).
+    SeekTo(f32),
     Status(Result<PlaybackStatus, String>),
     /// A fetched cover: the covers' generation it was asked in, its id and its image.
     CoverLoaded(u32, u32, Result<Option<Vec<u8>>, String>),
+    /// A fetched waveform: the waveforms' generation it was asked in, the track id and the waveform.
+    WaveformLoaded(u32, u32, Result<Option<Arc<Waveform>>, String>),
 }
 
 impl State {
@@ -167,6 +177,8 @@ impl State {
             covers: Covers::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
+            status_at: Instant::now(),
+            waveforms: Waveforms::default(),
             play_source: None,
             seeking: None,
             backend_error: None,
@@ -218,6 +230,7 @@ impl State {
         self.restore = restore;
         self.reset_playback();
         self.covers.clear();
+        self.waveforms.clear();
         self.library = LibraryState::Opening(path.clone());
         Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
     }
@@ -389,6 +402,23 @@ impl State {
         }))
     }
 
+    /// Asks the backend for the waveform of the track in the player, if it has not been
+    /// asked for yet.
+    fn fetch_waveform(&mut self) -> Task<Message> {
+        let (Some(backend), false, Some(id)) =
+            (self.backend(), self.is_stopped(), self.status.track_id)
+        else {
+            return Task::none();
+        };
+        if !self.waveforms.claim(id) {
+            return Task::none();
+        }
+        let generation = self.waveforms.generation();
+        Task::perform(backend::waveform(backend, id), move |result| {
+            Message::WaveformLoaded(generation, id, result)
+        })
+    }
+
     fn is_stopped(&self) -> bool {
         !matches!(
             self.status.state(),
@@ -408,7 +438,7 @@ fn start_backend() -> Task<Message> {
 fn update(state: &mut State, message: Message) -> Task<Message> {
     let task = handle(state, message);
     state.save_session(false);
-    Task::batch([task, state.fetch_covers()])
+    Task::batch([task, state.fetch_covers(), state.fetch_waveform()])
 }
 
 fn handle(state: &mut State, message: Message) -> Task<Message> {
@@ -505,6 +535,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.library = LibraryState::Closed { error: None };
             state.reset_playback();
             state.covers.clear();
+            state.waveforms.clear();
             // Closing a library on purpose means the next start doesn't reopen it.
             state.save(&Session::default(), true);
             if let Some(backend) = state.backend() {
@@ -577,6 +608,11 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::Previous => return state.control(Control::Previous),
         Message::Tick => return state.control(Control::Poll),
         Message::SeekDragged(seconds) => state.seeking = Some(seconds),
+        Message::SeekTo(seconds) => {
+            return state.control(Control::Seek {
+                position_ms: (seconds.max(0.0) * 1000.0) as u64,
+            });
+        }
         Message::SeekReleased => {
             if let Some(seconds) = state.seeking.take() {
                 return state.control(Control::Seek {
@@ -586,12 +622,20 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Status(Ok(status)) => {
             state.status = status;
+            state.status_at = Instant::now();
             state.backend_error = None;
             if state.is_stopped() {
                 state.play_source = None;
             }
         }
         Message::Status(Err(error)) => state.backend_error = Some(error),
+        Message::WaveformLoaded(generation, id, result) => match result {
+            Ok(waveform) => state.waveforms.set(generation, id, waveform),
+            Err(error) => {
+                state.waveforms.set(generation, id, None);
+                state.backend_error = Some(error);
+            }
+        },
         Message::CoverLoaded(generation, id, result) => match result {
             Ok(image) => state.covers.set(generation, id, image),
             Err(error) => {
@@ -730,6 +774,18 @@ fn open_library<'a>(
                 .unwrap_or(state.status.position_ms as f32 / 1000.0),
             paused: state.status.state() == PlaybackState::Paused,
         });
+    // The waveform of the track in the player, with the playhead where the player is.
+    let deck = now.as_ref().map(|now| {
+        deck::view(
+            state.waveforms.display(now.track.id),
+            deck::Anchor {
+                position: state.status.position_ms as f64 / 1000.0,
+                at: state.status_at,
+                playing: state.status.state() == PlaybackState::Playing,
+            },
+            language,
+        )
+    });
     let bar = player_bar::view(
         language,
         player_bar::Bar {
@@ -745,11 +801,14 @@ fn open_library<'a>(
     let mut page = column![
         header,
         browser::tracks(browser, state.playing_row(browser), &state.covers, language),
-        bar
     ]
     .spacing(10)
     .width(Fill)
     .height(Fill);
+    if let Some(deck) = deck {
+        page = page.push(deck);
+    }
+    page = page.push(bar);
 
     if let Some(error) = &state.status.error {
         page = page.push(text(playback_error(language, error, library)).style(text::danger));
@@ -855,6 +914,8 @@ mod tests {
             covers: Covers::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
+            status_at: Instant::now(),
+            waveforms: Waveforms::default(),
             play_source: None,
             seeking: None,
             backend_error: None,

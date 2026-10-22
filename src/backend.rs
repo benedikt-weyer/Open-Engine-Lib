@@ -18,9 +18,9 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, ListPlaylistsRequest,
-    ListTracksRequest, NextRequest, OpenLibraryRequest, PlayRequest, PlaybackStatus,
-    PreviousRequest, SeekRequest, StopRequest, TogglePauseRequest,
+    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetWaveformRequest,
+    ListPlaylistsRequest, ListTracksRequest, NextRequest, OpenLibraryRequest, PlayRequest,
+    PlaybackStatus, PreviousRequest, SeekRequest, StopRequest, TogglePauseRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -30,6 +30,7 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 
 use crate::model::{Library, Playlist, Track};
+use crate::waveform::{BeatGrid, Marker, Waveform};
 
 /// Overrides where to find the backend executable.
 const BACKEND_ENV: &str = "OPEN_ENGINE_BACKEND";
@@ -263,6 +264,49 @@ pub async fn album_art(mut backend: Backend, id: u32) -> Result<Option<Vec<u8>>,
         Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
         Err(status) => Err(describe(status)),
     }
+}
+
+/// Fetches the waveform and beatgrid of a track: `None` if there is none, because the
+/// track is a streaming track or its file is missing or can't be decoded.
+pub async fn waveform(mut backend: Backend, id: u32) -> Result<Option<Arc<Waveform>>, String> {
+    let response = match backend
+        .library
+        .get_waveform(GetWaveformRequest { track_id: id })
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status)
+            if matches!(
+                status.code(),
+                tonic::Code::NotFound | tonic::Code::FailedPrecondition | tonic::Code::Internal
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(status) => return Err(describe(status)),
+    };
+    if response.columns_per_second == 0 {
+        return Ok(None);
+    }
+
+    let columns = response.columns.as_chunks::<3>().0.to_vec();
+    let grid = response.beat_grid.and_then(|grid| {
+        BeatGrid::new(
+            grid.markers
+                .into_iter()
+                .map(|marker| Marker {
+                    position: marker.position_seconds,
+                    beat_number: marker.beat_number,
+                })
+                .collect(),
+        )
+    });
+    Ok(Some(Arc::new(Waveform::new(
+        response.duration_seconds,
+        f64::from(response.columns_per_second),
+        columns,
+        grid,
+    ))))
 }
 
 pub async fn close_library(mut backend: Backend) -> Result<(), String> {

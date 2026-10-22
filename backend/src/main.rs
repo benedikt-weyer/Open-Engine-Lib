@@ -8,11 +8,13 @@
 //!   else there afterwards; logs go to stderr),
 //! - it exits when its stdin is closed, which is how it notices that the UI is gone.
 
+mod beatgrid;
 mod cache;
 mod engine;
 mod library;
 mod player;
 mod service;
+mod waveform;
 
 use std::io::{Read, Write};
 use std::process::ExitCode;

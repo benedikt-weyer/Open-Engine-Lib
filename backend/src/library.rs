@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 
+use crate::beatgrid::{self, Marker};
 use crate::cache::{self, DATABASE_DIR};
 
 const DATABASE: &str = "Database2/m.db";
@@ -56,6 +57,8 @@ impl From<rusqlite::Error> for OpenError {
 
 #[derive(Debug, Clone)]
 pub struct Track {
+    /// The track's id in the Engine database.
+    pub db_id: i64,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -95,8 +98,8 @@ pub struct Library {
     pub cache: PathBuf,
     pub tracks: Vec<Track>,
     pub playlists: Vec<Playlist>,
-    /// Kept open to read cover images on demand: they are not loaded with the tracks.
-    art: Mutex<Connection>,
+    /// Kept open to read what is not loaded with the tracks (covers, beatgrids) on demand.
+    connection: Mutex<Connection>,
 }
 
 /// A cover image as the file it is stored as.
@@ -131,8 +134,26 @@ impl Library {
             cache,
             tracks,
             playlists,
-            art: Mutex::new(connection),
+            connection: Mutex::new(connection),
         })
+    }
+
+    /// The beatgrid of the track at `index` in `tracks`, if the library has analysed one.
+    pub fn beat_grid(&self, index: usize) -> rusqlite::Result<Option<Vec<Marker>>> {
+        let Some(track) = self.tracks.get(index) else {
+            return Ok(None);
+        };
+        let connection = self.connection.lock().expect("database lock");
+        let blob = connection.query_row(
+            "SELECT beatData FROM PerformanceData WHERE trackId = ?1",
+            [track.db_id],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        );
+        match blob {
+            Ok(blob) => Ok(blob.and_then(|blob| beatgrid::parse(&blob))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// The cover image with the `AlbumArt` id `id`, if there is one on this machine.
@@ -142,7 +163,7 @@ impl Library {
     /// after the row's raw hash, or as a streaming URL, which has no image to give.
     pub fn album_art(&self, id: u32) -> rusqlite::Result<Option<AlbumArt>> {
         let (hash, image): (Value, Value) = {
-            let connection = self.art.lock().expect("database lock");
+            let connection = self.connection.lock().expect("database lock");
             let row = connection.query_row(
                 "SELECT hash, albumArt FROM AlbumArt WHERE id = ?1",
                 [id],
@@ -255,6 +276,7 @@ fn load_tracks(
         }
 
         tracks.push(Track {
+            db_id: id,
             title,
             artist: text(2)?,
             album: text(3)?,

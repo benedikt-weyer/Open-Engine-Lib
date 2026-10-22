@@ -11,8 +11,9 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, ListPlaylistsRequest,
-    ListTracksRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind, PlaybackState,
+    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetWaveformRequest,
+    ListPlaylistsRequest, ListTracksRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind,
+    PlaybackState,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -607,4 +608,264 @@ async fn loads_a_real_track_paused_at_a_position() {
         return;
     }
     panic!("none of the first 50 tracks could be loaded");
+}
+
+/// A mono 16-bit WAV file: `seconds` of a tone of `hz`.
+fn wav(path: &Path, tones: &[(f32, f32)]) {
+    const RATE: u32 = 22_050;
+    let samples: Vec<i16> = tones
+        .iter()
+        .flat_map(|&(hz, seconds)| {
+            (0..(RATE as f32 * seconds) as usize).map(move |n| {
+                ((std::f32::consts::TAU * hz * n as f32 / RATE as f32).sin()
+                    * 0.8
+                    * f32::from(i16::MAX)) as i16
+            })
+        })
+        .collect();
+    let data_len = (samples.len() * 2) as u32;
+    let mut file = Vec::new();
+    file.extend(b"RIFF");
+    file.extend((36 + data_len).to_le_bytes());
+    file.extend(b"WAVEfmt ");
+    file.extend(16u32.to_le_bytes());
+    file.extend([1u8, 0, 1, 0]); // PCM, mono
+    file.extend(RATE.to_le_bytes());
+    file.extend((RATE * 2).to_le_bytes());
+    file.extend([2u8, 0, 16, 0]);
+    file.extend(b"data");
+    file.extend(data_len.to_le_bytes());
+    file.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+    std::fs::write(path, file).unwrap();
+}
+
+/// A `beatData` blob for a 120 BPM grid starting a quarter second in.
+fn beat_blob() -> Vec<u8> {
+    use std::io::Write;
+    let mut data = Vec::new();
+    data.extend(22_050f64.to_be_bytes());
+    data.extend(66_150f64.to_be_bytes());
+    data.push(1);
+    for _ in 0..2 {
+        data.extend(2i64.to_be_bytes());
+        for (samples, beat) in [(5_512.5f64, 0i64), (5_512.5 + 11_025.0 * 4.0, 4)] {
+            data.extend(samples.to_le_bytes());
+            data.extend(beat.to_le_bytes());
+            data.extend([0u8; 8]);
+        }
+    }
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&data).unwrap();
+    let mut blob = (data.len() as u32).to_be_bytes().to_vec();
+    blob.extend(encoder.finish().unwrap());
+    blob
+}
+
+#[tokio::test]
+async fn serves_waveforms_and_beatgrids() {
+    let temp = TempDir::new("waveform");
+    let library_dir = fixture_library(&temp.0);
+    std::fs::create_dir_all(temp.0.join("Music")).unwrap();
+    // One second of bass, then one second of treble.
+    wav(
+        &temp.0.join("Music/tone.wav"),
+        &[(80.0, 1.0), (5_000.0, 1.0)],
+    );
+    wav(&temp.0.join("Music/plain.wav"), &[(800.0, 1.0)]);
+    {
+        let db = rusqlite::Connection::open(library_dir.join("Database2/m.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, beatData BLOB);
+             INSERT INTO Track VALUES (4, 'Tone', 'T', 'T', 'Test', 120.0, 120, 2, '../Music/tone.wav', NULL, 'db', 4, NULL),
+                 (5, 'Plain', 'T', 'T', 'Test', 0.0, 0, 1, '../Music/plain.wav', NULL, 'db', 5, NULL);",
+        )
+        .unwrap();
+        db.execute("INSERT INTO PerformanceData VALUES (4, ?1)", [beat_blob()])
+            .unwrap();
+    }
+
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    assert_eq!(
+        code(
+            library
+                .get_waveform(GetWaveformRequest { track_id: 0 })
+                .await
+        ),
+        Code::FailedPrecondition,
+        "no library open"
+    );
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Track ids are positions: 0..=2 are the fixture's, 3 is Tone, 4 is Plain.
+    let tone = library
+        .get_waveform(GetWaveformRequest { track_id: 3 })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(tone.columns_per_second, 100);
+    assert!((tone.duration_seconds - 2.0).abs() < 0.01);
+    assert_eq!(tone.columns.len(), 200 * 3);
+    let band = |column: usize, band: usize| u32::from(tone.columns[column * 3 + band]);
+    assert!(
+        band(50, 0) > 150 && band(50, 2) < 60,
+        "bass first: {} {}",
+        band(50, 0),
+        band(50, 2)
+    );
+    assert!(band(150, 2) > 150 && band(150, 0) < 60, "treble after");
+
+    let grid = tone.beat_grid.expect("the track has a beatgrid");
+    let markers: Vec<_> = grid
+        .markers
+        .iter()
+        .map(|m| (m.position_seconds, m.beat_number))
+        .collect();
+    assert_eq!(markers, [(0.25, 0), (2.25, 4)]);
+
+    // The same waveform without a beatgrid for a track that has none.
+    let plain = library
+        .get_waveform(GetWaveformRequest { track_id: 4 })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(plain.columns.len(), 100 * 3);
+    assert!(plain.beat_grid.is_none());
+
+    // Tracks without a usable file, and unknown ids.
+    assert_eq!(
+        code(
+            library
+                .get_waveform(GetWaveformRequest { track_id: 0 })
+                .await
+        ),
+        Code::NotFound
+    );
+    assert_eq!(
+        code(
+            library
+                .get_waveform(GetWaveformRequest { track_id: 2 })
+                .await
+        ),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        code(
+            library
+                .get_waveform(GetWaveformRequest { track_id: 99 })
+                .await
+        ),
+        Code::InvalidArgument
+    );
+}
+
+/// Waveforms and beatgrids of a real library's first tracks, with timings: `OPEN_ENGINE_TEST_LIBRARY=...
+/// cargo test -p open-engine-backend --test grpc waveforms -- --ignored --nocapture`. Silent.
+#[tokio::test]
+#[ignore = "needs a real library (OPEN_ENGINE_TEST_LIBRARY)"]
+async fn serves_waveforms_from_a_real_library() {
+    let path = std::env::var("OPEN_ENGINE_TEST_LIBRARY").expect("OPEN_ENGINE_TEST_LIBRARY");
+    let temp = TempDir::new("real-waveforms");
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    library
+        .open_library(OpenLibraryRequest { path })
+        .await
+        .unwrap();
+
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let mut tracks = Vec::new();
+    while let Some(batch) = stream.message().await.unwrap() {
+        tracks.extend(batch.tracks);
+    }
+
+    let (mut done, mut with_grid, mut missing) = (0, 0, 0);
+    for track in tracks.iter().filter(|track| !track.streaming).take(25) {
+        let started = Instant::now();
+        match library
+            .get_waveform(GetWaveformRequest { track_id: track.id })
+            .await
+        {
+            Ok(response) => {
+                let response = response.into_inner();
+                done += 1;
+                let columns = response.columns.len() / 3;
+                let expected = (f64::from(track.length_seconds.unwrap_or(0)) * 100.0) as usize;
+                assert!(
+                    columns.abs_diff(expected) < 300,
+                    "{columns} columns for {expected} expected"
+                );
+                let grid = response.beat_grid.as_ref().map(|grid| {
+                    let (a, b) = (grid.markers.first().unwrap(), grid.markers.last().unwrap());
+                    60.0 * (b.beat_number - a.beat_number) as f64
+                        / (b.position_seconds - a.position_seconds)
+                });
+                with_grid += usize::from(grid.is_some());
+
+                // Do the beats of the grid land on the music? Fold the low band's onsets (how
+                // much louder it gets within 30 ms) over one beat: where the kicks hit shows
+                // as the strongest phase, and should be at 0 ms, right on the beat.
+                if let Some(grid) = response.beat_grid.as_ref() {
+                    let low = |column: usize| f64::from(response.columns[column * 3]);
+                    let (first, last) =
+                        (grid.markers.first().unwrap(), grid.markers.last().unwrap());
+                    let spacing = (last.position_seconds - first.position_seconds)
+                        / (last.beat_number - first.beat_number) as f64;
+                    let bins = (spacing * 100.0).round() as usize; // one per 10 ms
+                    let mut onset = vec![0.0f64; bins];
+                    for beat in 8..(response.duration_seconds / spacing) as usize - 8 {
+                        for (bin, onset) in onset.iter_mut().enumerate() {
+                            let column = ((first.position_seconds + beat as f64 * spacing) * 100.0)
+                                .round() as usize
+                                + bin;
+                            if column >= 3 && column < columns {
+                                *onset += (low(column) - low(column - 3)).max(0.0);
+                            }
+                        }
+                    }
+                    let best = (0..bins)
+                        .max_by(|&a, &b| onset[a].total_cmp(&onset[b]))
+                        .unwrap();
+                    // Wrapped to -half..+half a beat, in ms; a kick just before the grid line
+                    // shows up as the end of the beat.
+                    let ms = if best * 2 > bins {
+                        best as i64 - bins as i64
+                    } else {
+                        best as i64
+                    } * 10;
+                    let mean = onset.iter().sum::<f64>() / bins as f64;
+                    println!(
+                        "        kick onsets are strongest {ms:>4} ms from the beat (x{:.1} the average)",
+                        onset[best] / mean
+                    );
+                }
+                println!(
+                    "{:>6.0?}  {:>5} s  library bpm {:>6.1?}  grid bpm {:>6.1?}  markers {}",
+                    started.elapsed(),
+                    response.duration_seconds as u32,
+                    track.bpm,
+                    grid,
+                    response.beat_grid.map_or(0, |grid| grid.markers.len()),
+                );
+            }
+            Err(status) => {
+                assert_eq!(status.code(), Code::NotFound, "{status}");
+                missing += 1;
+            }
+        }
+    }
+    println!("{done} waveforms ({with_grid} with a beatgrid), {missing} files not on the drive");
 }

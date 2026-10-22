@@ -1,7 +1,8 @@
 //! The gRPC services (`openenginelib.v1`) that the UI talks to.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use open_engine_api::API_VERSION;
@@ -16,12 +17,37 @@ use tonic::{Request, Response, Status};
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, Library, OpenError};
 use crate::player::Start;
+use crate::waveform::{self, AnalyzeError, Waveform};
 
 /// Tracks per message of `ListTracks`, to stay well below gRPC's message size limit.
 const TRACKS_PER_BATCH: usize = 500;
 
+/// Waveforms are kept for the tracks used last, so skipping back to a track is instant.
+const WAVEFORMS_KEPT: usize = 8;
+
+#[derive(Default)]
+struct WaveformCache {
+    /// Paths, oldest first.
+    order: VecDeque<PathBuf>,
+    waveforms: HashMap<PathBuf, Arc<Waveform>>,
+}
+
+impl WaveformCache {
+    fn insert(&mut self, path: PathBuf, waveform: Arc<Waveform>) {
+        if self.waveforms.insert(path.clone(), waveform).is_none() {
+            self.order.push_back(path);
+        }
+        while self.order.len() > WAVEFORMS_KEPT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.waveforms.remove(&oldest);
+            }
+        }
+    }
+}
+
 struct Shared {
     library: RwLock<Option<Arc<Library>>>,
+    waveforms: Mutex<WaveformCache>,
     engine: Engine,
     /// Where copies of the libraries' databases are kept.
     cache_root: PathBuf,
@@ -34,6 +60,7 @@ impl Service {
     pub fn new(engine: Engine, cache_root: PathBuf) -> Self {
         Self(Arc::new(Shared {
             library: RwLock::new(None),
+            waveforms: Mutex::new(WaveformCache::default()),
             engine,
             cache_root,
         }))
@@ -167,6 +194,77 @@ impl LibraryService for Service {
         Ok(Response::new(api::GetAlbumArtResponse {
             data: art.data,
             mime_type: art.mime_type.to_owned(),
+        }))
+    }
+
+    async fn get_waveform(
+        &self,
+        request: Request<api::GetWaveformRequest>,
+    ) -> Result<Response<api::GetWaveformResponse>, Status> {
+        let library = self.library()?;
+        let id = request.into_inner().track_id;
+        let track = library
+            .tracks
+            .get(id as usize)
+            .ok_or_else(|| Status::invalid_argument(format!("unknown track id {id}")))?;
+        if track.streaming {
+            return Err(Status::failed_precondition(
+                "a streaming track has no audio file to analyse",
+            ));
+        }
+        let path = track.path.clone();
+
+        let shared = Arc::clone(&self.0);
+        // Decoding a whole track takes a moment and must not block the async threads.
+        let (waveform, grid) = tokio::task::spawn_blocking(move || {
+            let cached = shared
+                .waveforms
+                .lock()
+                .expect("waveform lock")
+                .waveforms
+                .get(&path)
+                .cloned();
+            let waveform = match cached {
+                Some(waveform) => waveform,
+                None => {
+                    let waveform =
+                        Arc::new(waveform::analyze_file(&path).map_err(|error| match error {
+                            AnalyzeError::NotFound => {
+                                Status::not_found(format!("{} does not exist", path.display()))
+                            }
+                            AnalyzeError::Failed(error) => Status::internal(error),
+                        })?);
+                    shared
+                        .waveforms
+                        .lock()
+                        .expect("waveform lock")
+                        .insert(path, Arc::clone(&waveform));
+                    waveform
+                }
+            };
+            let grid = library.beat_grid(id as usize).unwrap_or_else(|error| {
+                // The waveform is still worth showing without its grid.
+                eprintln!("could not read the beatgrid of track {id}: {error}");
+                None
+            });
+            Ok::<_, Status>((waveform, grid))
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))??;
+
+        Ok(Response::new(api::GetWaveformResponse {
+            duration_seconds: waveform.duration_seconds,
+            columns_per_second: waveform::COLUMNS_PER_SECOND,
+            columns: waveform.columns.iter().flatten().copied().collect(),
+            beat_grid: grid.map(|markers| api::BeatGrid {
+                markers: markers
+                    .into_iter()
+                    .map(|marker| api::BeatMarker {
+                        position_seconds: marker.position_seconds,
+                        beat_number: marker.beat_number,
+                    })
+                    .collect(),
+            }),
         }))
     }
 }

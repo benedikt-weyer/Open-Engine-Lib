@@ -47,6 +47,10 @@ stop: Stop
 previous: Previous
 next: Next
 nothing_playing: Nothing playing
+waveform_loading: Analysing the waveform…
+waveform_unavailable: No waveform available for this track.
+beatgrid_bpm: "Beatgrid · {bpm} BPM"
+beatgrid_none: No beatgrid
 now_playing: "{title} · {artist}"
 streaming_not_playable: "“{title}” is a streaming track and can't be played here."
 file_missing: "“{title}” was not found: {path}"

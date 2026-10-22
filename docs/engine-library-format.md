@@ -148,7 +148,7 @@ Decoded layouts below are from the library inspected. Field names are mine.
 | 25 | N × 24 bytes | markers, **little-endian**: f64 sample offset, i64 beat number, i32 beats until next marker, i32 unknown |
 | ... | i64 BE | number of adjusted markers, followed by the same marker layout |
 
-Nine trailing bytes after the adjusted markers were not identified. Sanity check: BPM computed from the first and last marker (`60 × sampleRate × Δbeats / Δsamples`) matched `bpmAnalyzed` within 0.6 BPM for 3,265 of 3,284 tracks. The rest are likely variable-tempo grids or grids edited after analysis, which I did not investigate.
+Nine trailing bytes after the adjusted markers were not identified. Open Engine Lib uses the adjusted list (falling back to the analysed one) and draws beats evenly spaced between markers; beat numbers divisible by 4 start a bar, which matches the first marker's number in the tracks I looked at (-4) but is otherwise an assumption. Sanity check: BPM computed from the first and last marker (`60 × sampleRate × Δbeats / Δsamples`) matched `bpmAnalyzed` within 0.6 BPM for 3,265 of 3,284 tracks. The rest are likely variable-tempo grids or grids edited after analysis, which I did not investigate.
 
 ### `quickCues` (big-endian)
 `i64 count` (8 in the tracks I decoded), then per cue: `u8 label length`, label bytes, `f64 sample position` (-1.0 means unset), `4 bytes ARGB colour`. Then a 17-byte tail: `f64`, `u8`, `f64`. These look like the main cue point (adjusted and default) with an override flag.
