@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 
-use crate::player::{Output, PlayError, RodioOutput};
+use crate::player::{Output, PlayError, RodioOutput, Start};
 
 /// How often the engine checks whether the current track has ended.
 const TICK: Duration = Duration::from_millis(100);
@@ -61,6 +61,7 @@ pub enum Command {
     Play {
         queue: Vec<QueueItem>,
         position: usize,
+        start: Start,
     },
     TogglePause,
     Stop,
@@ -91,12 +92,16 @@ impl<O: Output> Playback<O> {
 
     pub fn handle(&mut self, command: Command) {
         match command {
-            Command::Play { queue, position } => {
+            Command::Play {
+                queue,
+                position,
+                start,
+            } => {
                 self.error = None;
                 self.queue = queue;
                 self.position = None;
                 if position < self.queue.len() {
-                    self.start(position);
+                    self.start(position, start);
                 }
             }
             Command::TogglePause => {
@@ -107,12 +112,12 @@ impl<O: Output> Playback<O> {
             Command::Stop => self.stop(),
             Command::Next => {
                 if let Some(position) = self.position.filter(|p| p + 1 < self.queue.len()) {
-                    self.start(position + 1);
+                    self.start(position + 1, Start::default());
                 }
             }
             Command::Previous => {
                 if let Some(position) = self.position {
-                    self.start(position.saturating_sub(1));
+                    self.start(position.saturating_sub(1), Start::default());
                 }
             }
             Command::Seek(to) => {
@@ -139,7 +144,7 @@ impl<O: Output> Playback<O> {
 
         self.position = None;
         for next in position + 1..self.queue.len() {
-            if self.start(next) {
+            if self.start(next, Start::default()) {
                 return;
             }
         }
@@ -172,16 +177,18 @@ impl<O: Output> Playback<O> {
     }
 
     /// Starts `queue[position]`. On failure records the error and stays stopped.
-    fn start(&mut self, position: usize) -> bool {
+    fn start(&mut self, position: usize, start: Start) -> bool {
         let item = &self.queue[position];
         let result = if item.streaming {
             self.output.stop();
             Err((ErrorKind::Streaming, String::new()))
         } else {
-            self.output.play(&item.path).map_err(|error| match error {
-                PlayError::NotFound(path) => (ErrorKind::NotFound, path.display().to_string()),
-                PlayError::Failed(error) => (ErrorKind::Failed, error),
-            })
+            self.output
+                .play(&item.path, start)
+                .map_err(|error| match error {
+                    PlayError::NotFound(path) => (ErrorKind::NotFound, path.display().to_string()),
+                    PlayError::Failed(error) => (ErrorKind::Failed, error),
+                })
         };
 
         match result {
@@ -288,16 +295,19 @@ mod tests {
         missing: HashSet<PathBuf>,
         seeked: Option<Duration>,
         closed: bool,
+        /// How the last track was started.
+        started: Start,
     }
 
     impl Output for FakeOutput {
-        fn play(&mut self, path: &Path) -> Result<(), PlayError> {
+        fn play(&mut self, path: &Path, start: Start) -> Result<(), PlayError> {
             self.playing = None;
             self.finished.set(false);
             if self.missing.contains(path) {
                 return Err(PlayError::NotFound(path.to_path_buf()));
             }
-            self.paused = false;
+            self.started = start;
+            self.paused = start.paused;
             self.playing = Some(path.to_path_buf());
             Ok(())
         }
@@ -350,6 +360,7 @@ mod tests {
         playback.handle(Command::Play {
             queue: ids.iter().map(|&id| item(id, false)).collect(),
             position,
+            start: Start::default(),
         });
     }
 
@@ -369,6 +380,27 @@ mod tests {
             playback.output.playing,
             Some(PathBuf::from("/music/11.flac"))
         );
+    }
+
+    #[test]
+    fn can_load_a_track_paused_at_a_position() {
+        let (mut playback, _) = playback(&[]);
+        let at = Duration::from_secs(95);
+        playback.handle(Command::Play {
+            queue: vec![item(1, false), item(2, false)],
+            position: 1,
+            start: Start { paused: true, at },
+        });
+
+        let status = playback.status();
+        assert_eq!((status.state, status.track_id), (State::Paused, Some(2)));
+        assert_eq!(playback.output.started, Start { paused: true, at });
+
+        // Resuming plays on; the next track starts normally.
+        playback.handle(Command::TogglePause);
+        assert_eq!(playback.status().state, State::Playing);
+        playback.handle(Command::Previous);
+        assert_eq!(playback.output.started, Start::default());
     }
 
     #[test]
@@ -415,6 +447,7 @@ mod tests {
                 item(4, false),
             ],
             position: 0,
+            start: Start::default(),
         });
 
         finished.set(true);

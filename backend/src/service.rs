@@ -15,6 +15,7 @@ use tonic::{Request, Response, Status};
 
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, Library, OpenError};
+use crate::player::Start;
 
 /// Tracks per message of `ListTracks`, to stay well below gRPC's message size limit.
 const TRACKS_PER_BATCH: usize = 500;
@@ -181,6 +182,7 @@ fn track_message(id: u32, track: &library::Track) -> api::Track {
         length_seconds: track.length,
         streaming: track.streaming,
         album_art_id: track.album_art,
+        path: track.relative_path.clone(),
     }
 }
 
@@ -217,7 +219,16 @@ impl PlaybackService for Service {
             )));
         }
 
-        self.command(Command::Play { queue, position }).await
+        let start = Start {
+            paused: request.start_paused,
+            at: Duration::from_millis(request.start_position_ms),
+        };
+        self.command(Command::Play {
+            queue,
+            position,
+            start,
+        })
+        .await
     }
 
     async fn toggle_pause(

@@ -1,5 +1,5 @@
 use iced::Element;
-use iced::widget::{button, column, radio, text};
+use iced::widget::{button, checkbox, column, radio, text};
 
 use crate::Message;
 use crate::config::{ConfigStore, Language, ThemeMode};
@@ -42,6 +42,23 @@ pub fn view<'a>(config: &'a ConfigStore, error: Option<&'a str>) -> Element<'a, 
             Message::LanguageSelected,
         ));
     }
+
+    page = page.push(text(&strings.startup_heading).size(20));
+    page = page.push(
+        checkbox(current.reopen_library)
+            .label(&strings.reopen_library)
+            .on_toggle(Message::ReopenLibraryToggled),
+    );
+    // Going back to the song only makes sense in a library that is reopened.
+    page = page.push(
+        checkbox(current.restore_position)
+            .label(&strings.restore_position)
+            .on_toggle_maybe(
+                current
+                    .reopen_library
+                    .then_some(Message::RestorePositionToggled),
+            ),
+    );
 
     if config.is_layered() {
         let underlying = config.underlying();

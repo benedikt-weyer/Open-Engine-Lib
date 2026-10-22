@@ -6,6 +6,9 @@ theme: Theme
 theme_light: Light
 theme_dark: Dark
 language_heading: Language
+startup_heading: Startup
+reopen_library: Reopen the last library
+restore_position: Also go back to the playlist, song and position in it (paused)
 config_read_only_notice: The config is read-only (declarative). Changes are saved as overrides on top of it.
 config_file: "Config file: {path}"
 underlying_theme: "Underlying theme: {theme}"

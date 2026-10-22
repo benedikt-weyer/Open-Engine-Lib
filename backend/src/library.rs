@@ -63,6 +63,8 @@ pub struct Track {
     pub bpm: Option<f64>,
     /// Length in whole seconds.
     pub length: Option<u32>,
+    /// The audio file as the library records it, relative to the library folder.
+    pub relative_path: String,
     /// Absolute-ish path to the audio file (the library's relative path joined onto its folder).
     pub path: PathBuf,
     /// Streaming tracks (e.g. TIDAL) only exist on the player, never as a file here.
@@ -262,6 +264,7 @@ fn load_tracks(
                 .filter(|length| *length >= 0.0)
                 .map(|length| length as u32),
             path: dir.join(&relative),
+            relative_path: relative,
             streaming: row
                 .get::<_, Option<String>>(9)?
                 .is_some_and(|source| !source.is_empty()),

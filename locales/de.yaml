@@ -6,6 +6,9 @@ theme: Design
 theme_light: Hell
 theme_dark: Dunkel
 language_heading: Sprache
+startup_heading: Start
+reopen_library: Letzte Bibliothek wieder öffnen
+restore_position: Auch zu Playlist, Titel und Position darin zurückkehren (pausiert)
 config_read_only_notice: Die Konfiguration ist schreibgeschützt (deklarativ). Änderungen werden als Überschreibungen darüber gespeichert.
 config_file: "Konfigurationsdatei: {path}"
 underlying_theme: "Zugrunde liegendes Design: {theme}"

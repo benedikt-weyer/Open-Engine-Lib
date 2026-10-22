@@ -50,6 +50,16 @@ Versioning rules:
 
 The `.proto` files are compiled in pure Rust (`protox`), so building needs no `protoc`.
 
+## Restoring the last session
+
+The UI remembers what was open in `<state dir>/open-engine-lib/session.toml`: the library, the playlist (as the titles from the top level down, since indices change between opens), the song (by its `Track.path`, which the library keeps unique and which stays the same across opens) and, if the song was loaded in the player, how far into it. At startup it opens that library and goes back to the playlist and song. A song that was loaded is loaded again **paused** at its position (`PlayRequest.start_paused` and `start_position_ms`), so the app never starts playing by itself. If the playlist or song no longer exists, it falls back to the list of all tracks or to no selection.
+
+- The song that is playing wins over the one that is merely selected, and it brings the list it is playing from.
+- The session is saved when something changes, and a playing song's position at most every 5 seconds. Closing the window saves it once more, exactly.
+- Closing a library with "Close library" clears the session, so the next start doesn't reopen it. A library that fails to open (say the drive is unplugged) leaves it alone.
+- A library path given on the command line wins and nothing is restored.
+- Two settings control this (Settings page, `config.toml`, or the NixOS module): `reopen_library` and `restore_position`, both on by default. With `restore_position` off, only the library is reopened.
+
 ## Cover images
 
 Tracks carry an `album_art_id` (tracks of one album share it) and the UI fetches the image with `GetAlbumArt` only for what is on screen: the rows it has built plus the playing track. The UI keeps at most 300 covers and forgets the oldest. The backend finds the image the way the library stores it (see `docs/engine-library-format.md`): an image in the `AlbumArt` table, or a JPEG in the library's `Artwork` folder named after the row's raw hash. That folder is read in place, like the audio files, not from the cache. Covers of streaming tracks are only URLs, so they have no image and `GetAlbumArt` answers `NOT_FOUND`. In the library I inspected, 2,570 distinct covers were 1,914 PNGs, 490 JPEGs and 166 unavailable (165 streaming and one empty row).

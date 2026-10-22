@@ -9,6 +9,7 @@ mod model;
 mod navbar;
 mod player_bar;
 mod recent;
+mod session;
 mod settings;
 mod sidebar;
 
@@ -26,15 +27,20 @@ use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use model::Library;
 use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
 use recent::Recents;
+use session::{Session, SessionStore};
 
 /// How often the playback position is fetched from the backend while playing.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How long after a library opens to wait with scrolling its track list to the right place.
+const REVEAL_DELAY: Duration = Duration::from_millis(150);
 
 fn main() -> iced::Result {
     iced::application(State::new, update, view)
         .title("Open Engine Lib")
         .theme(State::theme)
         .subscription(State::subscription)
+        // Closing the window saves the session first, see `Message::CloseRequested`.
+        .exit_on_close_request(false)
         .run()
 }
 
@@ -67,8 +73,12 @@ struct State {
     /// Last error from saving or resetting the config, shown on the settings page.
     config_error: Option<String>,
     backend: BackendState,
-    /// A library to open as soon as the backend is up (from the command line).
-    open_when_ready: Option<PathBuf>,
+    /// A library to open as soon as the backend is up, and the session to go back to
+    /// in it: the command line's library, or the one open last time.
+    open_when_ready: Option<(PathBuf, Option<Session>)>,
+    /// What to go back to once the library being opened is open.
+    restore: Option<Session>,
+    session: SessionStore,
     library: LibraryState,
     recents: Recents,
     /// Cover images fetched for the tracks in view and the one playing.
@@ -91,6 +101,9 @@ pub enum Message {
     ThemeSelected(ThemeMode),
     LanguageSelected(Language),
     ResetOverrides,
+    ReopenLibraryToggled(bool),
+    RestorePositionToggled(bool),
+    CloseRequested(iced::window::Id),
 
     BackendStarted(Result<Box<Backend>, String>),
     RetryBackend,
@@ -102,6 +115,8 @@ pub enum Message {
     LibraryClosed(Result<(), String>),
     OpenRecent(PathBuf),
     ForgetRecent(PathBuf),
+    /// Scroll the track list to a row, once the list is on screen.
+    RevealRow(usize),
 
     ShowCollection,
     ShowPlaylist(usize),
@@ -124,12 +139,29 @@ pub enum Message {
 
 impl State {
     fn new() -> (Self, Task<Message>) {
+        let config = ConfigStore::load(Locations::discover());
+        let session = SessionStore::discover();
+
+        // A library on the command line is what was asked for. Otherwise go back to the
+        // last one, if the settings say so.
+        let settings = config.effective();
+        let open_when_ready = match std::env::args_os().nth(1) {
+            Some(path) => Some((PathBuf::from(path), None)),
+            None if settings.reopen_library => session.session().library.clone().map(|path| {
+                let restore = settings.restore_position.then(|| session.session().clone());
+                (path, restore)
+            }),
+            None => None,
+        };
+
         let state = Self {
             page: Page::default(),
-            config: ConfigStore::load(Locations::discover()),
+            config,
             config_error: None,
             backend: BackendState::Starting,
-            open_when_ready: std::env::args_os().nth(1).map(PathBuf::from),
+            open_when_ready,
+            restore: None,
+            session,
             library: LibraryState::Closed { error: None },
             recents: Recents::discover(),
             covers: Covers::default(),
@@ -150,11 +182,15 @@ impl State {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        if self.status.state() == PlaybackState::Playing {
+        let poll = if self.status.state() == PlaybackState::Playing {
             iced::time::every(POLL_INTERVAL).map(|_| Message::Tick)
         } else {
             Subscription::none()
-        }
+        };
+        Subscription::batch([
+            poll,
+            iced::window::close_requests().map(Message::CloseRequested),
+        ])
     }
 
     fn backend(&self) -> Option<Backend> {
@@ -172,12 +208,14 @@ impl State {
         }
     }
 
-    fn open(&mut self, path: PathBuf) -> Task<Message> {
+    /// Opens the library at `path`; `restore` says what to go back to in it, if anything.
+    fn open(&mut self, path: PathBuf, restore: Option<Session>) -> Task<Message> {
         let Some(backend) = self.backend() else {
             // Still starting: remember it for when the backend is up.
-            self.open_when_ready = Some(path);
+            self.open_when_ready = Some((path, restore));
             return Task::none();
         };
+        self.restore = restore;
         self.reset_playback();
         self.covers.clear();
         self.library = LibraryState::Opening(path.clone());
@@ -192,6 +230,11 @@ impl State {
 
     /// Starts the shown list at `row`.
     fn play_row(&mut self, row: usize) -> Task<Message> {
+        self.play_row_at(row, false, 0)
+    }
+
+    /// Loads the shown list with `row` playing, or paused if `paused`, from `at_ms`.
+    fn play_row_at(&mut self, row: usize, paused: bool, at_ms: u64) -> Task<Message> {
         let LibraryState::Open(browser) = &self.library else {
             return Task::none();
         };
@@ -207,7 +250,114 @@ impl State {
         self.control(Control::Play {
             track_ids,
             position: row as u32,
+            start_paused: paused,
+            start_position_ms: at_ms,
         })
+    }
+
+    /// Goes back to what `session` describes in the library that was just opened: the
+    /// playlist, the song (selected and in view) and, if it was loaded, the song
+    /// itself, paused where it was left.
+    fn restore_session(&mut self, session: Session) -> Task<Message> {
+        let LibraryState::Open(browser) = &mut self.library else {
+            return Task::none();
+        };
+        let library = Arc::clone(&browser.library);
+
+        // A playlist that is gone just means the list of all tracks.
+        let source = match library.find_playlist(&session.playlist) {
+            Some(index) => {
+                browser.expand(&library.playlist_chain(index));
+                Source::Playlist(index)
+            }
+            None => Source::Collection,
+        };
+        browser.show(source);
+
+        let row = session.track.as_deref().and_then(|path| {
+            browser
+                .tracks()
+                .iter()
+                .position(|&track| library.tracks[track].path == path)
+        });
+        let Some(row) = row else {
+            return Task::none();
+        };
+        browser.selected = Some(row);
+
+        let play = if session.loaded {
+            self.play_row_at(row, true, session.position_ms)
+        } else {
+            Task::none()
+        };
+        // The list is not on screen yet, and a scroll needs it to be.
+        // (The timer is made inside the future: update does not run in the runtime.)
+        let reveal = Task::perform(
+            async { tokio::time::sleep(REVEAL_DELAY).await },
+            move |()| Message::RevealRow(row),
+        );
+        Task::batch([play, reveal])
+    }
+
+    /// What to remember of the current state: `None` while no library is open, when
+    /// there is nothing to remember (and what was remembered must be left alone).
+    fn snapshot(&self) -> Option<Session> {
+        let LibraryState::Open(browser) = &self.library else {
+            return None;
+        };
+        let library = &browser.library;
+        let playlist_of = |source: Source| match source {
+            Source::Collection => Vec::new(),
+            Source::Playlist(index) => library.playlist_path(index),
+        };
+
+        // A song in the player wins over the one that is only selected, and brings its
+        // own playlist: the one it is playing from.
+        let playing = if self.is_stopped() {
+            None
+        } else {
+            self.status.track_id.and_then(|id| library.track_by_id(id))
+        };
+        let (playlist, track, loaded, position_ms) = match playing {
+            Some(track) => (
+                playlist_of(self.play_source.unwrap_or(browser.source)),
+                Some(track.path.clone()),
+                true,
+                self.status.position_ms,
+            ),
+            None => (
+                playlist_of(browser.source),
+                browser
+                    .selected
+                    .and_then(|row| browser.tracks().get(row))
+                    .map(|&track| library.tracks[track].path.clone()),
+                false,
+                0,
+            ),
+        };
+
+        Some(Session {
+            library: Some(PathBuf::from(&library.path)),
+            playlist,
+            track,
+            loaded,
+            position_ms,
+        })
+    }
+
+    /// Writes the session down if it changed. A playing song's position is only
+    /// written every few seconds, unless `force`d (when the app closes).
+    fn save_session(&mut self, force: bool) {
+        if let Some(session) = self.snapshot() {
+            self.save(&session, force);
+        }
+    }
+
+    fn save(&mut self, session: &Session, force: bool) {
+        // Not being able to remember is not worth bothering the user about.
+        if let Err(error) = self.session.save(session, force) {
+            eprintln!("could not save the session: {error}");
+        }
     }
 
     /// The row of the shown list that is playing, if the shown list is the playing one.
@@ -257,6 +407,7 @@ fn start_backend() -> Task<Message> {
 /// Handles a message, then fetches whatever covers the result has put on screen.
 fn update(state: &mut State, message: Message) -> Task<Message> {
     let task = handle(state, message);
+    state.save_session(false);
     Task::batch([task, state.fetch_covers()])
 }
 
@@ -273,14 +424,32 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .err()
                 .map(|e| e.to_string());
         }
+        Message::ReopenLibraryToggled(reopen) => {
+            state.config_error = state
+                .config
+                .set_reopen_library(reopen)
+                .err()
+                .map(|e| e.to_string());
+        }
+        Message::RestorePositionToggled(restore) => {
+            state.config_error = state
+                .config
+                .set_restore_position(restore)
+                .err()
+                .map(|e| e.to_string());
+        }
+        Message::CloseRequested(_) => {
+            state.save_session(true);
+            return iced::exit();
+        }
         Message::ResetOverrides => {
             state.config_error = state.config.reset_overrides().err().map(|e| e.to_string());
         }
 
         Message::BackendStarted(Ok(backend)) => {
             state.backend = BackendState::Ready(backend);
-            if let Some(path) = state.open_when_ready.take() {
-                return state.open(path);
+            if let Some((path, restore)) = state.open_when_ready.take() {
+                return state.open(path, restore);
             }
         }
         Message::BackendStarted(Err(error)) => state.backend = BackendState::Failed(error),
@@ -309,7 +478,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 Message::LibraryChosen,
             );
         }
-        Message::LibraryChosen(Some(path)) => return state.open(path),
+        Message::LibraryChosen(Some(path)) => return state.open(path, None),
         Message::LibraryChosen(None) => {}
         Message::LibraryOpened(result) => {
             if matches!(state.library, LibraryState::Opening(_)) {
@@ -322,14 +491,22 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                             .map(|error| error.to_string());
                         LibraryState::Open(Browser::new(library))
                     }
-                    Err(error) => LibraryState::Closed { error: Some(error) },
+                    Err(error) => {
+                        state.restore = None;
+                        LibraryState::Closed { error: Some(error) }
+                    }
                 };
+                if let Some(session) = state.restore.take() {
+                    return state.restore_session(session);
+                }
             }
         }
         Message::CloseLibrary => {
             state.library = LibraryState::Closed { error: None };
             state.reset_playback();
             state.covers.clear();
+            // Closing a library on purpose means the next start doesn't reopen it.
+            state.save(&Session::default(), true);
             if let Some(backend) = state.backend() {
                 return Task::perform(backend::close_library(backend), Message::LibraryClosed);
             }
@@ -338,7 +515,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::OpenRecent(path) => {
             // One library at a time: the backend would end up with the other one.
             if !matches!(state.library, LibraryState::Opening(_)) {
-                return state.open(path);
+                return state.open(path, None);
             }
         }
         Message::ForgetRecent(path) => {
@@ -356,6 +533,11 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                     _ => Source::Collection,
                 });
                 return browser::scroll_to_top();
+            }
+        }
+        Message::RevealRow(row) => {
+            if let LibraryState::Open(browser) = &mut state.library {
+                return browser.reveal(row);
             }
         }
         Message::ToggleFolder(index) => {
@@ -610,5 +792,186 @@ fn playback_error(language: Language, error: &PlaybackError, library: &Library) 
             &strings.play_failed,
             &[("title", &title), ("error", &error.detail)],
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use model::{Playlist, Track};
+
+    fn track(id: u32) -> Track {
+        Track {
+            id,
+            title: format!("Track {id}"),
+            artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            bpm: None,
+            length: None,
+            streaming: false,
+            album_art: None,
+            path: format!("../Music/{}.flac", ["a", "b", "c"][id as usize]),
+        }
+    }
+
+    fn playlist(title: &str, depth: usize, has_children: bool, tracks: &[usize]) -> Playlist {
+        Playlist {
+            title: title.into(),
+            depth,
+            has_children,
+            tracks: tracks.to_vec(),
+        }
+    }
+
+    /// An app with a library open: tracks a, b, c; playlists House/Deep (b, c) and Pop (a).
+    fn state() -> State {
+        let temp =
+            std::env::temp_dir().join(format!("open-engine-lib-main-test-{}", std::process::id()));
+        let library = Library::new(
+            "/media/DRIVE/Engine Library".into(),
+            "/cache".into(),
+            vec![track(0), track(1), track(2)],
+            vec![
+                playlist("House", 0, true, &[]),
+                playlist("Deep", 1, false, &[1, 2]),
+                playlist("Pop", 0, false, &[0]),
+            ],
+        );
+        State {
+            page: Page::Library,
+            config: ConfigStore::load(Locations {
+                base_candidates: Vec::new(),
+                user_config: temp.join("config.toml"),
+                overrides: temp.join("overrides.toml"),
+            }),
+            config_error: None,
+            backend: BackendState::Starting,
+            open_when_ready: None,
+            restore: None,
+            session: SessionStore::load(temp.join("session.toml")),
+            library: LibraryState::Open(Browser::new(Arc::new(library))),
+            recents: Recents::load(temp.join("recent.toml")),
+            covers: Covers::default(),
+            recents_error: None,
+            status: PlaybackStatus::default(),
+            play_source: None,
+            seeking: None,
+            backend_error: None,
+        }
+    }
+
+    fn browser(state: &State) -> &Browser {
+        match &state.library {
+            LibraryState::Open(browser) => browser,
+            _ => panic!("no library is open"),
+        }
+    }
+
+    fn session(playlist: &[&str], track: Option<&str>, loaded: bool, position_ms: u64) -> Session {
+        Session {
+            library: Some("/media/DRIVE/Engine Library".into()),
+            playlist: playlist.iter().map(|title| title.to_string()).collect(),
+            track: track.map(str::to_owned),
+            loaded,
+            position_ms,
+        }
+    }
+
+    #[test]
+    fn restores_the_playlist_the_song_in_it_and_loads_it() {
+        let mut state = state();
+        let _ = state.restore_session(session(
+            &["House", "Deep"],
+            Some("../Music/c.flac"),
+            true,
+            95_000,
+        ));
+
+        let browser = browser(&state);
+        assert_eq!(browser.source, Source::Playlist(1));
+        assert_eq!(browser.selected, Some(1), "c is the second track of Deep");
+        assert!(browser.is_expanded(0), "the folder holding it is opened up");
+        assert_eq!(
+            state.play_source,
+            Some(Source::Playlist(1)),
+            "loaded from that list"
+        );
+    }
+
+    #[test]
+    fn a_song_that_was_only_selected_is_selected_but_not_loaded() {
+        let mut state = state();
+        let _ = state.restore_session(session(&["Pop"], Some("../Music/a.flac"), false, 0));
+
+        assert_eq!(browser(&state).source, Source::Playlist(2));
+        assert_eq!(browser(&state).selected, Some(0));
+        assert_eq!(state.play_source, None);
+    }
+
+    #[test]
+    fn falls_back_when_the_playlist_or_song_is_gone() {
+        let mut state = state();
+        let _ = state.restore_session(session(&["Gone"], Some("../Music/b.flac"), true, 1_000));
+        assert_eq!(browser(&state).source, Source::Collection);
+        assert_eq!(
+            browser(&state).selected,
+            Some(1),
+            "b is the second of all tracks"
+        );
+
+        let mut state = state_with_nothing();
+        let _ = state.restore_session(session(&["Pop"], Some("../Music/zzz.flac"), true, 1_000));
+        assert_eq!(browser(&state).source, Source::Playlist(2));
+        assert_eq!(browser(&state).selected, None);
+        assert_eq!(state.play_source, None, "nothing to load");
+    }
+
+    fn state_with_nothing() -> State {
+        state()
+    }
+
+    #[test]
+    fn remembers_what_is_selected() {
+        let mut state = state();
+        assert_eq!(state.snapshot().unwrap().track, None);
+
+        if let LibraryState::Open(browser) = &mut state.library {
+            browser.show(Source::Playlist(1));
+            browser.selected = Some(0);
+        }
+        assert_eq!(
+            state.snapshot().unwrap(),
+            session(&["House", "Deep"], Some("../Music/b.flac"), false, 0)
+        );
+    }
+
+    #[test]
+    fn remembers_the_playing_song_and_the_list_it_plays_from() {
+        let mut state = state();
+        // The user browses all tracks and has selected something else meanwhile.
+        if let LibraryState::Open(browser) = &mut state.library {
+            browser.selected = Some(0);
+        }
+        state.play_source = Some(Source::Playlist(1));
+        state.status = PlaybackStatus {
+            state: PlaybackState::Paused.into(),
+            queue_position: Some(1),
+            track_id: Some(2),
+            position_ms: 61_250,
+            error: None,
+        };
+
+        assert_eq!(
+            state.snapshot().unwrap(),
+            session(&["House", "Deep"], Some("../Music/c.flac"), true, 61_250)
+        );
+    }
+
+    #[test]
+    fn remembers_nothing_while_no_library_is_open() {
+        let mut state = state();
+        state.library = LibraryState::Closed { error: None };
+        assert_eq!(state.snapshot(), None);
     }
 }

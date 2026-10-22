@@ -66,6 +66,10 @@ message Track {
   // share the id. Unset if the track has none. The image may still turn out not to be
   // available, see GetAlbumArt.
   optional uint32 album_art_id = 9;
+  // The audio file as the library records it, relative to the `Engine Library`
+  // folder. Unlike `id`, it stays the same across opens, so it identifies the track
+  // between sessions (the library keeps it unique).
+  string path = 10;
 }
 
 message GetAlbumArtRequest {

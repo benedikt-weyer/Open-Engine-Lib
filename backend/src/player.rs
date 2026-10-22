@@ -25,11 +25,20 @@ impl fmt::Display for PlayError {
     }
 }
 
+/// How a track starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Start {
+    /// Start paused: nothing is heard until the track is resumed.
+    pub paused: bool,
+    /// Where in the track to start.
+    pub at: Duration,
+}
+
 /// What the playback engine needs from an audio output. Behind a trait so the
 /// queue logic can be tested without a sound card.
 pub trait Output {
-    /// Stops whatever is playing and starts the file at `path` from the beginning.
-    fn play(&mut self, path: &Path) -> Result<(), PlayError>;
+    /// Stops whatever is playing and starts the file at `path`.
+    fn play(&mut self, path: &Path, start: Start) -> Result<(), PlayError>;
     fn is_paused(&self) -> bool;
     fn toggle_pause(&mut self);
     /// True once the current file has played to its end.
@@ -51,7 +60,7 @@ pub struct RodioOutput {
 }
 
 impl Output for RodioOutput {
-    fn play(&mut self, path: &Path) -> Result<(), PlayError> {
+    fn play(&mut self, path: &Path, start: Start) -> Result<(), PlayError> {
         self.stop();
 
         let file = File::open(path).map_err(|error| match error.kind() {
@@ -70,7 +79,15 @@ impl Output for RodioOutput {
         let device = self.device.as_ref().expect("device was just opened");
 
         let player = rodio::Player::connect_new(device.mixer());
+        // Pause before the track is added, so that nothing is heard of it.
+        if start.paused {
+            player.pause();
+        }
         player.append(source);
+        if !start.at.is_zero() {
+            // A format that can't seek just starts from the beginning.
+            let _ = player.try_seek(start.at);
+        }
         self.current = Some(player);
         Ok(())
     }

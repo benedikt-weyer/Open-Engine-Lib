@@ -215,6 +215,7 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
             length: track.length_seconds,
             streaming: track.streaming,
             album_art: track.album_art_id,
+            path: track.path,
         }));
     }
 
@@ -276,12 +277,20 @@ pub async fn close_library(mut backend: Backend) -> Result<(), String> {
 /// A playback request. Every one of them answers with the resulting status.
 #[derive(Debug, Clone)]
 pub enum Control {
-    Play { track_ids: Vec<u32>, position: u32 },
+    Play {
+        track_ids: Vec<u32>,
+        position: u32,
+        /// Load the track without playing it.
+        start_paused: bool,
+        start_position_ms: u64,
+    },
     TogglePause,
     Stop,
     Next,
     Previous,
-    Seek { position_ms: u64 },
+    Seek {
+        position_ms: u64,
+    },
     Poll,
 }
 
@@ -291,11 +300,15 @@ pub async fn control(mut backend: Backend, control: Control) -> Result<PlaybackS
         Control::Play {
             track_ids,
             position,
+            start_paused,
+            start_position_ms,
         } => {
             playback
                 .play(PlayRequest {
                     track_ids,
                     position,
+                    start_paused,
+                    start_position_ms,
                 })
                 .await
         }

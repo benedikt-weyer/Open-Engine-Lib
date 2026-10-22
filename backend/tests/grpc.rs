@@ -172,7 +172,8 @@ async fn serves_the_api_over_grpc() {
             playback
                 .play(PlayRequest {
                     track_ids: vec![0],
-                    position: 0
+                    position: 0,
+                    ..Default::default()
                 })
                 .await
         ),
@@ -220,6 +221,10 @@ async fn serves_the_api_over_grpc() {
             tracks[1].length_seconds
         ),
         ("Two", Some(130.5), Some(61))
+    );
+    assert_eq!(
+        tracks[0].path, "../Music/one.flac",
+        "as the library records it"
     );
     assert_eq!(tracks[2].bpm, None);
     assert!(tracks[2].streaming && !tracks[0].streaming);
@@ -269,7 +274,8 @@ async fn serves_the_api_over_grpc() {
             playback
                 .play(PlayRequest {
                     track_ids: vec![99],
-                    position: 0
+                    position: 0,
+                    ..Default::default()
                 })
                 .await
         ),
@@ -280,7 +286,8 @@ async fn serves_the_api_over_grpc() {
             playback
                 .play(PlayRequest {
                     track_ids: vec![0],
-                    position: 1
+                    position: 1,
+                    ..Default::default()
                 })
                 .await
         ),
@@ -291,6 +298,7 @@ async fn serves_the_api_over_grpc() {
         .play(PlayRequest {
             track_ids: vec![0],
             position: 0,
+            ..Default::default()
         })
         .await
         .unwrap()
@@ -307,6 +315,7 @@ async fn serves_the_api_over_grpc() {
         .play(PlayRequest {
             track_ids: vec![2],
             position: 0,
+            ..Default::default()
         })
         .await
         .unwrap()
@@ -407,6 +416,7 @@ async fn plays_from_a_real_library() {
             .play(PlayRequest {
                 track_ids: vec![track.id],
                 position: 0,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -532,4 +542,69 @@ async fn serves_covers_from_a_real_library() {
         .filter(|track| track.streaming && track.album_art_id.is_some())
         .count();
     println!("{streaming_missing} streaming tracks have a cover id (their covers are URLs)");
+}
+
+/// Loading a track paused at a position (what restoring the last session does) must stay
+/// silent: `OPEN_ENGINE_TEST_LIBRARY=... cargo test -p open-engine-backend --test grpc paused -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs a real library (OPEN_ENGINE_TEST_LIBRARY) and an audio device"]
+async fn loads_a_real_track_paused_at_a_position() {
+    let path = std::env::var("OPEN_ENGINE_TEST_LIBRARY").expect("OPEN_ENGINE_TEST_LIBRARY");
+    let temp = TempDir::new("paused");
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let connection = |channel: Channel| -> Connection {
+        InterceptedService::new(channel, with_token as fn(_) -> _)
+    };
+    let mut library = LibraryServiceClient::new(connection(channel.clone()));
+    let mut playback = PlaybackServiceClient::new(connection(channel));
+    library
+        .open_library(OpenLibraryRequest { path })
+        .await
+        .unwrap();
+
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let mut tracks = Vec::new();
+    while let Some(batch) = stream.message().await.unwrap() {
+        tracks.extend(batch.tracks);
+    }
+
+    for track in tracks.iter().filter(|track| !track.streaming).take(50) {
+        let status = playback
+            .play(PlayRequest {
+                track_ids: vec![track.id],
+                position: 0,
+                start_paused: true,
+                start_position_ms: 20_000,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        if status.error.is_some() {
+            continue;
+        }
+        println!("loaded {:?} paused: {status:?}", track.title);
+        assert_eq!(status.state(), PlaybackState::Paused);
+        assert_eq!(status.position_ms, 20_000);
+
+        // Paused means paused: the position does not move.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let later = playback
+            .get_status(open_engine_api::v1::GetStatusRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(later.state(), PlaybackState::Paused);
+        assert_eq!(later.position_ms, 20_000);
+        playback
+            .stop(open_engine_api::v1::StopRequest {})
+            .await
+            .unwrap();
+        return;
+    }
+    panic!("none of the first 50 tracks could be loaded");
 }

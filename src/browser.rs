@@ -21,6 +21,8 @@ const ROW_HEIGHT: f32 = 32.0;
 const THUMBNAIL: f32 = 28.0;
 /// Rows built above and below the visible ones, so scrolling doesn't show gaps.
 const ROW_BUFFER: usize = 10;
+/// Rows kept above a row that is scrolled to, so it isn't right at the edge.
+const REVEAL_MARGIN: usize = 3;
 /// Window heights vary and resizing sends no scroll event, so always build at least
 /// enough rows for a tall window.
 const MIN_VIEWPORT: f32 = 1600.0;
@@ -90,6 +92,25 @@ impl Browser {
         self.scroll = 0.0;
     }
 
+    /// Opens the folders on the way down to the last playlist of `chain` (see
+    /// `Library::playlist_chain`), so that it is visible in the tree.
+    pub fn expand(&mut self, chain: &[usize]) {
+        if let Some((_, parents)) = chain.split_last() {
+            self.expanded.extend(parents.iter().copied());
+        }
+    }
+
+    /// Scrolls the track list so that `row` is near its top.
+    pub fn reveal(&mut self, row: usize) -> iced::Task<Message> {
+        let y = row.saturating_sub(REVEAL_MARGIN) as f32 * ROW_HEIGHT;
+        self.scroll = y;
+        scroll_to(y)
+    }
+
+    pub fn is_expanded(&self, playlist: usize) -> bool {
+        self.expanded.contains(&playlist)
+    }
+
     pub fn toggle(&mut self, playlist: usize) {
         if !self.expanded.remove(&playlist) {
             self.expanded.insert(playlist);
@@ -144,7 +165,7 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
             hidden_below = None;
         }
 
-        let expanded = browser.expanded.contains(&index);
+        let expanded = browser.is_expanded(index);
         let toggle: Element<'a, Message> = if playlist.has_children {
             button(text(if expanded { "▾" } else { "▸" }))
                 .padding([4, 6])
@@ -277,9 +298,13 @@ pub fn tracks<'a>(
 const TRACKS: &str = "tracks";
 
 pub fn scroll_to_top() -> iced::Task<Message> {
+    scroll_to(0.0)
+}
+
+fn scroll_to(y: f32) -> iced::Task<Message> {
     iced::widget::operation::scroll_to(
         iced::widget::Id::new(TRACKS),
-        scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+        scrollable::AbsoluteOffset { x: 0.0, y },
     )
 }
 

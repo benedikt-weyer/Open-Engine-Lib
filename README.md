@@ -9,7 +9,7 @@ The app never works on your library in place: it copies the databases to a cache
 
 ## Configuration
 
-Settings (light/dark theme and the English/German UI language) can be changed on the Settings page. They are stored in `~/.config/open-engine-lib/config.toml`.
+Settings (light/dark theme, the English/German UI language, and whether the last library is reopened at startup, and with it the playlist, song and position) can be changed on the Settings page. They are stored in `~/.config/open-engine-lib/config.toml`.
 
 On NixOS the config can be set declaratively with the flake's module:
 
@@ -19,6 +19,8 @@ programs.open-engine-lib = {
   enable = true;
   settings.theme = "dark";   # "light" | "dark"
   settings.language = "de";  # "en" | "de"; unset follows the system locale
+  settings.reopen_library = true;   # reopen the last library at startup (default: true)
+  settings.restore_position = true; # ...and its playlist, song and position, paused (default: true)
 };
 ```
 

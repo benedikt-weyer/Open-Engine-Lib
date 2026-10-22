@@ -26,6 +26,11 @@ service PlaybackService {
 message PlayRequest {
   repeated uint32 track_ids = 1;
   uint32 position = 2;
+  // Load the track without playing it: it starts out paused (and silent), ready to be
+  // resumed with TogglePause.
+  bool start_paused = 3;
+  // Where in the track to start, in milliseconds. Formats that can't seek start at 0.
+  uint64 start_position_ms = 4;
 }
 
 message TogglePauseRequest {}

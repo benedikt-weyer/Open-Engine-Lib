@@ -37,6 +37,23 @@ in
         example = "de";
         description = "UI language. Unset follows the system locale (German for de_*, else English).";
       };
+
+      reopen_library = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = false;
+        description = "Open the library that was open last time at startup. Unset means yes.";
+      };
+
+      restore_position = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = false;
+        description = ''
+          When reopening the last library, also go back to the playlist, the song and
+          its position in the song (paused, not playing). Unset means yes.
+        '';
+      };
     };
   };
 

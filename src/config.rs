@@ -61,10 +61,25 @@ impl Default for Language {
 }
 
 /// The fully resolved settings the app runs with.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub theme: ThemeMode,
     pub language: Language,
+    /// Open the library that was open when the app was last closed.
+    pub reopen_library: bool,
+    /// When reopening it, also go back to the playlist, the song and its position.
+    pub restore_position: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            theme: ThemeMode::default(),
+            language: Language::default(),
+            reopen_library: true,
+            restore_position: true,
+        }
+    }
 }
 
 /// One config layer: only the values it sets.
@@ -75,6 +90,10 @@ struct Layer {
     theme: Option<ThemeMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     language: Option<Language>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reopen_library: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restore_position: Option<bool>,
 }
 
 impl Layer {
@@ -84,6 +103,12 @@ impl Layer {
         }
         if let Some(language) = self.language {
             config.language = language;
+        }
+        if let Some(reopen_library) = self.reopen_library {
+            config.reopen_library = reopen_library;
+        }
+        if let Some(restore_position) = self.restore_position {
+            config.restore_position = restore_position;
         }
     }
 }
@@ -212,6 +237,14 @@ impl ConfigStore {
         self.edit(|layer| layer.language = Some(language))
     }
 
+    pub fn set_reopen_library(&mut self, reopen: bool) -> io::Result<()> {
+        self.edit(|layer| layer.reopen_library = Some(reopen))
+    }
+
+    pub fn set_restore_position(&mut self, restore: bool) -> io::Result<()> {
+        self.edit(|layer| layer.restore_position = Some(restore))
+    }
+
     /// Applies a change to the layer edits belong in (the override layer when
     /// layered, else the base) and saves it.
     fn edit(&mut self, change: impl FnOnce(&mut Layer)) -> io::Result<()> {
@@ -321,6 +354,24 @@ mod tests {
         let store = ConfigStore::load(dir.locations());
         assert_eq!(store.effective(), Config::default());
         assert!(!store.is_layered());
+    }
+
+    #[test]
+    fn restoring_the_last_session_is_on_by_default_and_can_be_turned_off() {
+        let dir = TempDir::new();
+        let mut store = ConfigStore::load(dir.locations());
+        assert!(store.effective().reopen_library);
+        assert!(store.effective().restore_position);
+
+        store.set_reopen_library(false).unwrap();
+        store.set_restore_position(false).unwrap();
+
+        let reloaded = ConfigStore::load(dir.locations());
+        assert!(!reloaded.effective().reopen_library);
+        assert!(!reloaded.effective().restore_position);
+        // Only what was changed is written down.
+        let written = fs::read_to_string(dir.path("user.toml")).unwrap();
+        assert!(!written.contains("theme") && written.contains("reopen_library = false"));
     }
 
     #[test]
