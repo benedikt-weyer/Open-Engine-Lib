@@ -242,7 +242,12 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
         })
         .collect();
 
-    Ok(Arc::new(Library::new(opened.path, tracks, playlists)))
+    Ok(Arc::new(Library::new(
+        opened.path,
+        opened.cache_path,
+        tracks,
+        playlists,
+    )))
 }
 
 pub async fn close_library(mut backend: Backend) -> Result<(), String> {

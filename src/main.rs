@@ -471,14 +471,23 @@ fn open_library<'a>(
     let library = &browser.library;
 
     let header = row![
-        text(fill(
-            &strings.library_summary,
-            &[
-                ("path", &library.path),
-                ("tracks", &library.tracks.len()),
-                ("playlists", &library.playlists.len()),
-            ],
-        ))
+        column![
+            text(fill(
+                &strings.library_summary,
+                &[
+                    ("path", &library.path),
+                    ("tracks", &library.tracks.len()),
+                    ("playlists", &library.playlists.len()),
+                ],
+            )),
+            text(fill(
+                &strings.library_cache,
+                &[("path", &library.cache_path)],
+            ))
+            .size(14)
+            .style(text::secondary),
+        ]
+        .spacing(2)
         .width(Fill),
         button(text(&strings.close_library)).on_press(Message::CloseLibrary),
     ]

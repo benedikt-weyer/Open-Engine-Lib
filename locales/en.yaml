@@ -28,6 +28,7 @@ forget_library: Remove from the list
 recents_save_failed: "Could not save the recent libraries: {error}"
 close_library: Close library
 library_summary: "{path} · Tracks: {tracks} · Playlists: {playlists}"
+library_cache: "Working copy of the databases: {path}"
 collection: All tracks
 tracks_heading: "{name} · Tracks: {count}"
 no_tracks: This playlist has no tracks.

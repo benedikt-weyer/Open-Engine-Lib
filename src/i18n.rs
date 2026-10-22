@@ -46,6 +46,7 @@ pub struct Strings {
     pub recents_save_failed: String,
     pub close_library: String,
     pub library_summary: String,
+    pub library_cache: String,
     pub collection: String,
     pub tracks_heading: String,
     pub no_tracks: String,

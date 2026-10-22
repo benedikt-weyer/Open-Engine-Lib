@@ -32,13 +32,20 @@ pub struct Playlist {
 pub struct Library {
     /// The `Engine Library` folder that was opened.
     pub path: String,
+    /// The backend's cached copy of the library's databases, which is what it reads.
+    pub cache_path: String,
     pub tracks: Vec<Track>,
     pub playlists: Vec<Playlist>,
     index_of_id: HashMap<u32, usize>,
 }
 
 impl Library {
-    pub fn new(path: String, tracks: Vec<Track>, playlists: Vec<Playlist>) -> Self {
+    pub fn new(
+        path: String,
+        cache_path: String,
+        tracks: Vec<Track>,
+        playlists: Vec<Playlist>,
+    ) -> Self {
         let index_of_id = tracks
             .iter()
             .enumerate()
@@ -46,6 +53,7 @@ impl Library {
             .collect();
         Self {
             path,
+            cache_path,
             tracks,
             playlists,
             index_of_id,
@@ -73,7 +81,12 @@ mod tests {
             length: None,
             streaming: false,
         };
-        let library = Library::new("/lib".into(), vec![track(7), track(3)], Vec::new());
+        let library = Library::new(
+            "/lib".into(),
+            "/cache".into(),
+            vec![track(7), track(3)],
+            Vec::new(),
+        );
 
         assert_eq!(
             library.track_by_id(7).map(|t| t.title.as_str()),

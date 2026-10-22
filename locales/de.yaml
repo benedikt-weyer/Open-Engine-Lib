@@ -28,6 +28,7 @@ forget_library: Aus der Liste entfernen
 recents_save_failed: "Die zuletzt geöffneten Bibliotheken konnten nicht gespeichert werden: {error}"
 close_library: Bibliothek schließen
 library_summary: "{path} · Titel: {tracks} · Playlists: {playlists}"
+library_cache: "Arbeitskopie der Datenbanken: {path}"
 collection: Alle Titel
 tracks_heading: "{name} · Titel: {count}"
 no_tracks: Diese Playlist enthält keine Titel.
