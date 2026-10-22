@@ -1,8 +1,6 @@
 native_name: Deutsch
-nav_home: Start
+nav_library: Bibliothek
 nav_settings: Einstellungen
-increment: Erhöhen
-decrement: Verringern
 settings_title: Einstellungen
 theme: Design
 theme_light: Hell
@@ -14,4 +12,34 @@ underlying_theme: "Zugrunde liegendes Design: {theme}"
 underlying_language: "Zugrunde liegende Sprache: {language}"
 reset_overrides: Auf zugrunde liegende Konfiguration zurücksetzen
 save_failed: "Einstellungen konnten nicht gespeichert werden: {error}"
-counter_status: "Der Zähler steht bei {value}."
+backend_starting: Das Backend wird gestartet…
+backend_failed: "Das Backend konnte nicht gestartet werden: {error}"
+backend_error: "Backend-Fehler: {error}"
+retry: Erneut versuchen
+library_closed_title: Keine Bibliothek geöffnet
+library_closed_hint: Öffne eine Engine-Bibliothek, indem du ihren Ordner „Engine Library“ oder das Laufwerk, das ihn enthält, auswählst.
+open_library: Bibliothek öffnen…
+choose_library: Engine-Bibliothek auswählen
+opening_library: "{path} wird geöffnet…"
+open_failed: "Die Bibliothek konnte nicht geöffnet werden: {error}"
+close_library: Bibliothek schließen
+library_summary: "{path} · Titel: {tracks} · Playlists: {playlists}"
+collection: Alle Titel
+tracks_heading: "{name} · Titel: {count}"
+no_tracks: Diese Playlist enthält keine Titel.
+col_title: Titel
+col_artist: Interpret
+col_album: Album
+col_genre: Genre
+col_bpm: BPM
+col_length: Länge
+play: Abspielen
+pause: Pause
+stop: Stopp
+previous: Zurück
+next: Weiter
+nothing_playing: Es wird nichts abgespielt
+now_playing: "{title} · {artist}"
+streaming_not_playable: "„{title}“ ist ein Streaming-Titel und kann hier nicht abgespielt werden."
+file_missing: "„{title}“ wurde nicht gefunden: {path}"
+play_failed: "„{title}“ konnte nicht abgespielt werden: {error}"

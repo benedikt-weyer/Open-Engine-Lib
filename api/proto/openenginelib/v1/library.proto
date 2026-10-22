@@ -1,0 +1,80 @@
+// Opening an Engine library and reading its tracks and playlists. The backend
+// holds at most one open library; opening another replaces it.
+syntax = "proto3";
+
+package openenginelib.v1;
+
+service LibraryService {
+  // Opens the library at `path`, closing the current one (and stopping playback).
+  // The backend never works on the library in place: it copies the databases into
+  // its cache and reads those. The audio files stay where they are and are played
+  // from there.
+  // Errors: NOT_FOUND if no Engine library is there, INTERNAL if it can't be read.
+  rpc OpenLibrary(OpenLibraryRequest) returns (OpenLibraryResponse);
+  // Closes the library and stops playback. Succeeds if none is open.
+  rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
+  // Streams every track of the open library in id order, in batches.
+  // Error: FAILED_PRECONDITION if no library is open.
+  rpc ListTracks(ListTracksRequest) returns (stream TrackBatch);
+  // All playlists, depth first in display order, each with its tracks.
+  // Error: FAILED_PRECONDITION if no library is open.
+  rpc ListPlaylists(ListPlaylistsRequest) returns (ListPlaylistsResponse);
+}
+
+message OpenLibraryRequest {
+  // The `Engine Library` folder, the drive or folder that contains it, or its
+  // `Database2` folder.
+  string path = 1;
+}
+
+message OpenLibraryResponse {
+  // The `Engine Library` folder that was actually opened.
+  string path = 1;
+  uint32 track_count = 2;
+  uint32 playlist_count = 3;
+  // The backend's cached copy of the databases, which is what it reads.
+  string cache_path = 4;
+}
+
+message CloseLibraryRequest {}
+message CloseLibraryResponse {}
+
+message ListTracksRequest {}
+
+message TrackBatch {
+  repeated Track tracks = 1;
+}
+
+message Track {
+  // Identifies the track while this library is open. Ids are not stable across
+  // opens and say nothing about the Engine database's own ids.
+  uint32 id = 1;
+  string title = 2;
+  string artist = 3;
+  string album = 4;
+  string genre = 5;
+  // Analysed tempo, unset if unknown.
+  optional double bpm = 6;
+  optional uint32 length_seconds = 7;
+  // Streaming tracks (e.g. TIDAL) have no file on this machine and can't be played.
+  bool streaming = 8;
+}
+
+message ListPlaylistsRequest {}
+
+message ListPlaylistsResponse {
+  repeated Playlist playlists = 1;
+}
+
+message Playlist {
+  // Identifies the playlist while this library is open.
+  uint32 id = 1;
+  string title = 2;
+  // 0 for top-level playlists.
+  uint32 depth = 3;
+  optional uint32 parent_id = 4;
+  // True for folders; they can hold tracks too.
+  bool has_children = 5;
+  // Track ids in playlist order.
+  repeated uint32 track_ids = 6;
+}

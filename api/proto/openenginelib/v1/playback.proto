@@ -1,0 +1,75 @@
+// Playing tracks of the open library. The backend owns the queue and moves on
+// to the next track by itself, so the UI only has to poll GetStatus.
+syntax = "proto3";
+
+package openenginelib.v1;
+
+service PlaybackService {
+  // Replaces the queue and starts the track at `position`.
+  // Errors: FAILED_PRECONDITION if no library is open, INVALID_ARGUMENT for an
+  // unknown track id or a position outside the queue. A track that can't be
+  // played is not an RPC error: it is reported in the returned status.
+  rpc Play(PlayRequest) returns (PlaybackStatus);
+  // Pauses, or resumes if paused. Does nothing while stopped.
+  rpc TogglePause(TogglePauseRequest) returns (PlaybackStatus);
+  // Stops playback and empties the queue.
+  rpc Stop(StopRequest) returns (PlaybackStatus);
+  // Starts the next track of the queue. Does nothing at its end.
+  rpc Next(NextRequest) returns (PlaybackStatus);
+  // Starts the previous track of the queue, or restarts the first one.
+  rpc Previous(PreviousRequest) returns (PlaybackStatus);
+  // Jumps within the current track. Formats that can't seek ignore it.
+  rpc Seek(SeekRequest) returns (PlaybackStatus);
+  rpc GetStatus(GetStatusRequest) returns (PlaybackStatus);
+}
+
+message PlayRequest {
+  repeated uint32 track_ids = 1;
+  uint32 position = 2;
+}
+
+message TogglePauseRequest {}
+message StopRequest {}
+message NextRequest {}
+message PreviousRequest {}
+
+message SeekRequest {
+  uint64 position_ms = 1;
+}
+
+message GetStatusRequest {}
+
+message PlaybackStatus {
+  PlaybackState state = 1;
+  // Index into the queue and the id of the track being played. Unset while stopped.
+  optional uint32 queue_position = 2;
+  optional uint32 track_id = 3;
+  uint64 position_ms = 4;
+  // The last track that failed to play since playback was last started. Cleared
+  // by the next Play.
+  optional PlaybackError error = 5;
+}
+
+enum PlaybackState {
+  PLAYBACK_STATE_UNSPECIFIED = 0;
+  PLAYBACK_STATE_STOPPED = 1;
+  PLAYBACK_STATE_PLAYING = 2;
+  PLAYBACK_STATE_PAUSED = 3;
+}
+
+message PlaybackError {
+  PlaybackErrorKind kind = 1;
+  uint32 track_id = 2;
+  // Human readable details, e.g. the missing path or the decoder's message.
+  string detail = 3;
+}
+
+enum PlaybackErrorKind {
+  PLAYBACK_ERROR_KIND_UNSPECIFIED = 0;
+  // The track's file does not exist.
+  PLAYBACK_ERROR_KIND_NOT_FOUND = 1;
+  // A streaming track, which has no file.
+  PLAYBACK_ERROR_KIND_STREAMING = 2;
+  // The file or the audio device could not be opened.
+  PLAYBACK_ERROR_KIND_FAILED = 3;
+}

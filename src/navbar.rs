@@ -7,7 +7,7 @@ use crate::{Message, Page};
 pub fn view<'a>(current: Page, language: Language) -> Element<'a, Message> {
     let strings = language.strings();
     let items = [
-        (Page::Home, &strings.nav_home),
+        (Page::Library, &strings.nav_library),
         (Page::Settings, &strings.nav_settings),
     ];
 

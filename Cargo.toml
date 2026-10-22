@@ -1,11 +1,28 @@
-[package]
-name = "open-engine-lib"
+# The UI (this package) and the backend it spawns are separate processes that
+# talk over gRPC; `api` holds the shared protocol definition. All three share one
+# version, which the release workflow patches from the tag.
+[workspace]
+members = ["api", "backend"]
+default-members = [".", "backend"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
+[package]
+name = "open-engine-lib"
+version.workspace = true
+edition.workspace = true
+default-run = "open-engine-lib"
+
 [dependencies]
 dirs = "7.0.0"
-iced = "0.14"
+getrandom = "0.4.3"
+iced = { version = "0.14", features = ["tokio"] }
+open-engine-api = { version = "0.1.0", path = "api" }
+rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.54.1", features = ["rt", "time"] }
 toml = "1.1.8"
+tonic = "0.14.6"
 yaml_serde = "0.10.7"

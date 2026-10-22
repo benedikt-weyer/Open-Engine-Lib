@@ -1,0 +1,20 @@
+// Version handshake. The UI calls GetInfo first and only continues if the
+// backend serves an API version it speaks.
+syntax = "proto3";
+
+package openenginelib.v1;
+
+service BackendService {
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+}
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+  // Version of the backend program, e.g. "0.3.1". For display only.
+  string backend_version = 1;
+  // Major API versions this backend serves, i.e. the `vN` packages. Within a
+  // version only additive changes are made; anything else becomes `v(N+1)`,
+  // which a backend can serve next to `vN`.
+  repeated uint32 supported_api_versions = 2;
+}

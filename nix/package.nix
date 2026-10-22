@@ -11,11 +11,12 @@
   libxcursor,
   libxi,
   libxrandr,
+  alsa-lib,
 }:
 
 let
-  # Libraries iced/winit/wgpu load with dlopen at runtime.
-  runtimeLibs = [
+  # Libraries iced/winit/wgpu load with dlopen at runtime (the UI).
+  uiLibs = [
     wayland
     libxkbcommon
     vulkan-loader
@@ -25,10 +26,12 @@ let
     libxi
     libxrandr
   ];
+  # The backend links ALSA for audio output.
+  runtimeLibs = uiLibs ++ [ alsa-lib ];
 in
 rustPlatform.buildRustPackage {
   pname = "open-engine-lib";
-  version = (fromTOML (builtins.readFile ../Cargo.toml)).package.version;
+  version = (fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version;
 
   src = lib.fileset.toSource {
     root = ../.;
@@ -36,6 +39,8 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
+      ../api
+      ../backend
       ../locales
       ../packaging
     ];
@@ -57,7 +62,8 @@ rustPlatform.buildRustPackage {
   '';
 
   postFixup = ''
-    patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/open-engine-lib
+    patchelf --add-rpath ${lib.makeLibraryPath uiLibs} $out/bin/open-engine-lib
+    patchelf --add-rpath ${lib.makeLibraryPath [ alsa-lib ]} $out/bin/open-engine-backend
   '';
 
   meta = {

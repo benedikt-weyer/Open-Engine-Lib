@@ -1,8 +1,6 @@
 native_name: English
-nav_home: Home
+nav_library: Library
 nav_settings: Settings
-increment: Increment
-decrement: Decrement
 settings_title: Settings
 theme: Theme
 theme_light: Light
@@ -14,4 +12,34 @@ underlying_theme: "Underlying theme: {theme}"
 underlying_language: "Underlying language: {language}"
 reset_overrides: Reset to underlying config
 save_failed: "Could not save settings: {error}"
-counter_status: "The counter is at {value}."
+backend_starting: Starting the backend…
+backend_failed: "The backend could not be started: {error}"
+backend_error: "Backend error: {error}"
+retry: Try again
+library_closed_title: No library open
+library_closed_hint: Open an Engine library by choosing its “Engine Library” folder, or the drive that contains it.
+open_library: Open library…
+choose_library: Choose the Engine library
+opening_library: "Opening {path}…"
+open_failed: "Could not open the library: {error}"
+close_library: Close library
+library_summary: "{path} · Tracks: {tracks} · Playlists: {playlists}"
+collection: All tracks
+tracks_heading: "{name} · Tracks: {count}"
+no_tracks: This playlist has no tracks.
+col_title: Title
+col_artist: Artist
+col_album: Album
+col_genre: Genre
+col_bpm: BPM
+col_length: Length
+play: Play
+pause: Pause
+stop: Stop
+previous: Previous
+next: Next
+nothing_playing: Nothing playing
+now_playing: "{title} · {artist}"
+streaming_not_playable: "“{title}” is a streaming track and can't be played here."
+file_missing: "“{title}” was not found: {path}"
+play_failed: "Could not play “{title}”: {error}"

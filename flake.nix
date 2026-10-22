@@ -58,6 +58,7 @@
             libxcursor
             libxi
             libxrandr
+            alsa-lib
           ]);
 
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
