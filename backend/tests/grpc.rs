@@ -762,6 +762,7 @@ async fn serves_waveforms_and_beatgrids() {
         track_id: 4,
         low_mid_hz: Some(low_mid_hz),
         mid_high_hz: Some(mid_high_hz),
+        ..Default::default()
     };
     let high = library
         .get_waveform(waveform_with(200, 1_000))
@@ -788,6 +789,49 @@ async fn serves_waveforms_and_beatgrids() {
             ),
             Code::InvalidArgument,
             "{low_mid_hz} / {mid_high_hz}"
+        );
+    }
+
+    // The gains amplify a band (and only that one), up to full height, and the same
+    // file is not analysed again for it.
+    let with_gain = |gain_mid| GetWaveformRequest {
+        track_id: 4,
+        gain_mid: Some(gain_mid),
+        ..Default::default()
+    };
+    let quieter = library
+        .get_waveform(with_gain(0.5))
+        .await
+        .unwrap()
+        .into_inner();
+    let louder = library
+        .get_waveform(with_gain(1.5))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(band_at_50(&quieter, 1) < band_at_50(&plain, 1));
+    assert!(band_at_50(&louder, 1) > band_at_50(&plain, 1));
+    assert_eq!(
+        band_at_50(&louder, 0),
+        band_at_50(&plain, 0),
+        "the low band is untouched"
+    );
+    assert_eq!(
+        band_at_50(&louder, 2),
+        band_at_50(&plain, 2),
+        "and so is the high band"
+    );
+    let loudest = library
+        .get_waveform(with_gain(20.0))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(band_at_50(&loudest, 1), 255, "gain stops at full height");
+    for gain in [0.0, -1.0, 21.0, f32::NAN] {
+        assert_eq!(
+            code(library.get_waveform(with_gain(gain)).await),
+            Code::InvalidArgument,
+            "gain {gain}"
         );
     }
 

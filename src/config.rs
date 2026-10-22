@@ -16,7 +16,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use open_engine_api::{
-    WAVEFORM_LOW_MID_HZ, WAVEFORM_MAX_SPLIT_HZ, WAVEFORM_MID_HIGH_HZ, WAVEFORM_MIN_SPLIT_HZ,
+    WAVEFORM_GAIN_HIGH, WAVEFORM_GAIN_LOW, WAVEFORM_GAIN_MID, WAVEFORM_LOW_MID_HZ,
+    WAVEFORM_MAX_GAIN, WAVEFORM_MAX_SPLIT_HZ, WAVEFORM_MID_HIGH_HZ, WAVEFORM_MIN_SPLIT_HZ,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +31,18 @@ pub enum ThemeMode {
     Light,
     #[default]
     Dark,
+}
+
+/// One of the three frequency bands of the waveform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveformBand {
+    Low,
+    Mid,
+    High,
+}
+
+impl WaveformBand {
+    pub const ALL: [WaveformBand; 3] = [WaveformBand::Low, WaveformBand::Mid, WaveformBand::High];
 }
 
 /// How the waveform of the playing track is colored.
@@ -90,7 +103,7 @@ impl Default for Language {
 }
 
 /// The fully resolved settings the app runs with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub theme: ThemeMode,
     pub language: Language,
@@ -99,13 +112,30 @@ pub struct Config {
     pub waveform_low_mid_hz: u32,
     /// Where its mid band ends and its high band starts, in Hz.
     pub waveform_mid_high_hz: u32,
+    /// How much each band of the waveform is amplified before it is drawn: 1 draws a band
+    /// at its true level. A fixed scale, the same for every track.
+    pub waveform_gain_low: f32,
+    pub waveform_gain_mid: f32,
+    pub waveform_gain_high: f32,
     /// Open the library that was open when the app was last closed.
     pub reopen_library: bool,
     /// When reopening it, also go back to the playlist, the song and its position.
     pub restore_position: bool,
 }
 
+fn gain_is_valid(gain: f32) -> bool {
+    gain.is_finite() && gain > 0.0 && gain <= WAVEFORM_MAX_GAIN
+}
+
 impl Config {
+    pub fn waveform_gain(&self, band: WaveformBand) -> f32 {
+        match band {
+            WaveformBand::Low => self.waveform_gain_low,
+            WaveformBand::Mid => self.waveform_gain_mid,
+            WaveformBand::High => self.waveform_gain_high,
+        }
+    }
+
     /// Whether the waveform's split points are in range and in order.
     fn waveform_split_is_valid(&self) -> bool {
         let range = WAVEFORM_MIN_SPLIT_HZ..=WAVEFORM_MAX_SPLIT_HZ;
@@ -121,6 +151,16 @@ impl Config {
             self.waveform_low_mid_hz = WAVEFORM_LOW_MID_HZ;
             self.waveform_mid_high_hz = WAVEFORM_MID_HIGH_HZ;
         }
+        // A gain that makes no sense is replaced on its own; the others are kept.
+        for (gain, default) in [
+            (&mut self.waveform_gain_low, WAVEFORM_GAIN_LOW),
+            (&mut self.waveform_gain_mid, WAVEFORM_GAIN_MID),
+            (&mut self.waveform_gain_high, WAVEFORM_GAIN_HIGH),
+        ] {
+            if !gain_is_valid(*gain) {
+                *gain = default;
+            }
+        }
         self
     }
 }
@@ -133,6 +173,9 @@ impl Default for Config {
             waveform_colors: WaveformColors::default(),
             waveform_low_mid_hz: WAVEFORM_LOW_MID_HZ,
             waveform_mid_high_hz: WAVEFORM_MID_HIGH_HZ,
+            waveform_gain_low: WAVEFORM_GAIN_LOW,
+            waveform_gain_mid: WAVEFORM_GAIN_MID,
+            waveform_gain_high: WAVEFORM_GAIN_HIGH,
             reopen_library: true,
             restore_position: true,
         }
@@ -140,7 +183,7 @@ impl Default for Config {
 }
 
 /// One config layer: only the values it sets.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct Layer {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,6 +196,12 @@ struct Layer {
     waveform_low_mid_hz: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     waveform_mid_high_hz: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_gain_low: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_gain_mid: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_gain_high: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reopen_library: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -175,6 +224,15 @@ impl Layer {
         }
         if let Some(hz) = self.waveform_mid_high_hz {
             config.waveform_mid_high_hz = hz;
+        }
+        if let Some(gain) = self.waveform_gain_low {
+            config.waveform_gain_low = gain;
+        }
+        if let Some(gain) = self.waveform_gain_mid {
+            config.waveform_gain_mid = gain;
+        }
+        if let Some(gain) = self.waveform_gain_high {
+            config.waveform_gain_high = gain;
         }
         if let Some(reopen_library) = self.reopen_library {
             config.reopen_library = reopen_library;
@@ -284,6 +342,19 @@ impl ConfigStore {
 
     fn warn_about_unusable_values(&mut self) {
         let config = self.merged();
+        let gains = [
+            ("waveform_gain_low", config.waveform_gain_low),
+            ("waveform_gain_mid", config.waveform_gain_mid),
+            ("waveform_gain_high", config.waveform_gain_high),
+        ];
+        for (name, gain) in gains {
+            if !gain_is_valid(gain) {
+                self.warnings.push(format!(
+                    "Ignoring {name} = {gain}: it must be above 0 and at most {WAVEFORM_MAX_GAIN}. \
+                     Using the default."
+                ));
+            }
+        }
         if !config.waveform_split_is_valid() {
             self.warnings.push(format!(
                 "Ignoring the waveform split frequencies {} Hz and {} Hz: they must be between \
@@ -330,6 +401,24 @@ impl ConfigStore {
 
     pub fn set_waveform_colors(&mut self, colors: WaveformColors) -> io::Result<()> {
         self.edit(|layer| layer.waveform_colors = Some(colors))
+    }
+
+    /// Sets how much one band of the waveform is amplified.
+    pub fn set_waveform_gain(&mut self, band: WaveformBand, gain: f32) -> io::Result<()> {
+        self.edit(|layer| match band {
+            WaveformBand::Low => layer.waveform_gain_low = Some(gain),
+            WaveformBand::Mid => layer.waveform_gain_mid = Some(gain),
+            WaveformBand::High => layer.waveform_gain_high = Some(gain),
+        })
+    }
+
+    /// Sets all three gains back to the defaults.
+    pub fn reset_waveform_gains(&mut self) -> io::Result<()> {
+        self.edit(|layer| {
+            layer.waveform_gain_low = Some(WAVEFORM_GAIN_LOW);
+            layer.waveform_gain_mid = Some(WAVEFORM_GAIN_MID);
+            layer.waveform_gain_high = Some(WAVEFORM_GAIN_HIGH);
+        })
     }
 
     pub fn set_reopen_library(&mut self, reopen: bool) -> io::Result<()> {
@@ -529,6 +618,59 @@ mod tests {
             assert_eq!(store.warnings.len(), 1, "{low} / {high}");
             assert!(
                 store.warnings[0].contains("waveform split"),
+                "{}",
+                store.warnings[0]
+            );
+        }
+    }
+
+    #[test]
+    fn the_waveform_gains_are_a_saved_choice_with_a_reset() {
+        let dir = TempDir::new();
+        let mut store = ConfigStore::load(dir.locations());
+        let config = store.effective();
+        assert_eq!(
+            [
+                config.waveform_gain_low,
+                config.waveform_gain_mid,
+                config.waveform_gain_high
+            ],
+            [1.0, 1.0, 1.0]
+        );
+
+        store.set_waveform_gain(WaveformBand::Mid, 1.75).unwrap();
+        store.set_waveform_gain(WaveformBand::High, 3.0).unwrap();
+        let reloaded = ConfigStore::load(dir.locations()).effective();
+        assert_eq!(reloaded.waveform_gain(WaveformBand::Low), 1.0);
+        assert_eq!(reloaded.waveform_gain(WaveformBand::Mid), 1.75);
+        assert_eq!(reloaded.waveform_gain(WaveformBand::High), 3.0);
+
+        store.reset_waveform_gains().unwrap();
+        let reset = ConfigStore::load(dir.locations()).effective();
+        assert_eq!(reset.waveform_gain(WaveformBand::Mid), 1.0);
+        assert_eq!(reset.waveform_gain(WaveformBand::High), 1.0);
+    }
+
+    #[test]
+    fn a_nonsensical_gain_is_replaced_on_its_own_with_a_warning() {
+        for bad in ["0", "-2.0", "25.0", "nan", "inf"] {
+            let dir = TempDir::new();
+            fs::write(
+                dir.path("user.toml"),
+                format!("waveform_gain_low = 2.5\nwaveform_gain_mid = {bad}\n"),
+            )
+            .unwrap();
+            let store = ConfigStore::load(dir.locations());
+
+            let config = store.effective();
+            assert_eq!(config.waveform_gain_mid, 1.0, "{bad}");
+            assert_eq!(
+                config.waveform_gain_low, 2.5,
+                "the good one is kept ({bad})"
+            );
+            assert_eq!(store.warnings.len(), 1, "{bad}");
+            assert!(
+                store.warnings[0].contains("waveform_gain_mid"),
                 "{}",
                 store.warnings[0]
             );

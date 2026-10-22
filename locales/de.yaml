@@ -15,6 +15,12 @@ waveform_colors_short_mono: Mono
 waveform_colors_short_rgb: RGB
 waveform_colors_short_stacked: 3-Band
 waveform_colors_short_spectrum: Spektrum
+waveform_gains_heading: Wellenform-Pegel
+waveform_gains_hint: "Ein fester Maßstab, für jeden Titel gleich: 1,00× zeichnet ein Frequenzband in seiner tatsächlichen Höhe, mehr macht es höher."
+waveform_gain_low: Tiefen
+waveform_gain_mid: Mitten
+waveform_gain_high: Höhen
+reset_waveform_gains: Pegel zurücksetzen
 startup_heading: Start
 reopen_library: Letzte Bibliothek wieder öffnen
 restore_position: Auch zu Playlist, Titel und Position darin zurückkehren (pausiert)

@@ -7,8 +7,6 @@ use std::sync::Arc;
 pub const OVERVIEW_COLUMNS: usize = 1200;
 /// How many waveforms are kept: the track playing and a few it was switched from.
 const MAX_KEPT: usize = 6;
-/// The share of overview bins that are at or below full height.
-const OVERVIEW_FULL_SCALE_PERCENTILE: f64 = 0.98;
 /// More beats than any window shows; guards against a broken grid.
 const MAX_BEATS: usize = 4000;
 
@@ -146,41 +144,22 @@ impl Waveform {
 /// its loudest moment is. Keeping the peaks looks right when zoomed in, but a bin of a
 /// few seconds always holds a peak of every band (hi-hats are in nearly every one), so
 /// all three bands would reach full height everywhere and the front layer would cover
-/// the others. A common gain then brings the loudest bins back to full height, which
-/// keeps the bands in proportion to each other.
+/// the others. Nothing is scaled to the track: heights stay on the same fixed scale as
+/// the zoomed waveform, and the gains in the settings apply to both.
 fn pool(columns: &[Bands], count: usize) -> Vec<Bands> {
     if columns.len() <= count {
         return columns.to_vec();
     }
-
-    let rms: Vec<[f32; 3]> = (0..count)
+    (0..count)
         .map(|bin| {
             let from = bin * columns.len() / count;
             let to = ((bin + 1) * columns.len() / count).max(from + 1);
             let group = &columns[from..to];
             [0, 1, 2].map(|band| {
                 let energy: f32 = group.iter().map(|c| f32::from(c[band]).powi(2)).sum();
-                (energy / group.len() as f32).sqrt()
+                (energy / group.len() as f32).sqrt().round() as u8
             })
         })
-        .collect();
-
-    // The loudest few bins are left to clip, so one outlier can't dim everything else.
-    let mut loudest: Vec<f32> = rms
-        .iter()
-        .map(|bands| bands.iter().copied().fold(0.0, f32::max))
-        .collect();
-    loudest.sort_by(f32::total_cmp);
-    let reference = loudest
-        [((loudest.len() as f64 * OVERVIEW_FULL_SCALE_PERCENTILE) as usize).min(loudest.len() - 1)];
-    let gain = if reference > 0.0 {
-        255.0 / reference
-    } else {
-        1.0
-    };
-
-    rms.iter()
-        .map(|bands| bands.map(|level| (level * gain).round().min(255.0) as u8))
         .collect()
 }
 
@@ -409,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn the_overview_keeps_loud_and_quiet_parts_apart_and_the_bands_in_proportion() {
+    fn the_overview_keeps_the_fixed_scale_and_the_bands_in_proportion() {
         // A loud first half and a quiet second half, lows twice the mids.
         let columns: Vec<Bands> = (0..4000)
             .map(|index| {
@@ -422,19 +401,10 @@ mod tests {
             .collect();
         let overview = Waveform::new(40.0, 100.0, columns, None).overview;
 
-        let (loud, quiet) = (overview[100], overview[OVERVIEW_COLUMNS - 100]);
-        assert!(
-            loud[0] > 200,
-            "the loud part is brought up to full height: {loud:?}"
-        );
-        assert!(
-            quiet[0] * 5 < loud[0],
-            "and the quiet part stays small: {quiet:?}"
-        );
-        assert!(
-            u32::from(loud[0]).abs_diff(u32::from(loud[1]) * 2) <= 2,
-            "lows are still twice the mids: {loud:?}"
-        );
+        // Nothing is fitted to the track: steady levels come out as they went in, so a
+        // quiet part stays as quiet as it is.
+        assert_eq!(overview[100], [160, 80, 40]);
+        assert_eq!(overview[OVERVIEW_COLUMNS - 100], [16, 8, 4]);
     }
 
     #[test]

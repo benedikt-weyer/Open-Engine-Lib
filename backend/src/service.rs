@@ -17,7 +17,7 @@ use tonic::{Request, Response, Status};
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, Library, OpenError};
 use crate::player::Start;
-use crate::waveform::{self, AnalyzeError, Split, Waveform};
+use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 
 /// Tracks per message of `ListTracks`, to stay well below gRPC's message size limit.
 const TRACKS_PER_BATCH: usize = 500;
@@ -29,14 +29,14 @@ const WAVEFORMS_KEPT: usize = 8;
 struct WaveformCache {
     /// Paths, oldest first.
     order: VecDeque<WaveformKey>,
-    waveforms: HashMap<WaveformKey, Arc<Waveform>>,
+    waveforms: HashMap<WaveformKey, Arc<Peaks>>,
 }
 
 /// A waveform depends on where the bands were split, not just on the file.
 type WaveformKey = (PathBuf, Split);
 
 impl WaveformCache {
-    fn insert(&mut self, key: WaveformKey, waveform: Arc<Waveform>) {
+    fn insert(&mut self, key: WaveformKey, waveform: Arc<Peaks>) {
         if self.waveforms.insert(key.clone(), waveform).is_none() {
             self.order.push_back(key);
         }
@@ -212,6 +212,13 @@ impl LibraryService for Service {
             mid_high_hz: request.mid_high_hz.unwrap_or(waveform::DEFAULT_MID_HIGH_HZ),
         };
         split.validate().map_err(Status::invalid_argument)?;
+        let defaults = Gains::default();
+        let gains = Gains {
+            low: request.gain_low.unwrap_or(defaults.low),
+            mid: request.gain_mid.unwrap_or(defaults.mid),
+            high: request.gain_high.unwrap_or(defaults.high),
+        };
+        gains.validate().map_err(Status::invalid_argument)?;
         let track = library
             .tracks
             .get(id as usize)
@@ -225,7 +232,7 @@ impl LibraryService for Service {
 
         let shared = Arc::clone(&self.0);
         // Decoding a whole track takes a moment and must not block the async threads.
-        let (waveform, grid) = tokio::task::spawn_blocking(move || {
+        let (peaks, grid) = tokio::task::spawn_blocking(move || {
             let cached = shared
                 .waveforms
                 .lock()
@@ -263,9 +270,9 @@ impl LibraryService for Service {
         .map_err(|error| Status::internal(error.to_string()))??;
 
         Ok(Response::new(api::GetWaveformResponse {
-            duration_seconds: waveform.duration_seconds,
+            duration_seconds: peaks.duration_seconds,
             columns_per_second: waveform::COLUMNS_PER_SECOND,
-            columns: waveform.columns.iter().flatten().copied().collect(),
+            columns: peaks.scaled(gains).iter().flatten().copied().collect(),
             beat_grid: grid.map(|markers| api::BeatGrid {
                 markers: markers
                     .into_iter()

@@ -118,16 +118,23 @@ message GetWaveformRequest {
   // lowered for it.)
   optional uint32 low_mid_hz = 2;
   optional uint32 mid_high_hz = 3;
+  // How much each band is amplified before it is drawn, see `GetWaveformResponse.columns`.
+  // Unset means 1. Each must be above 0 and at most 20, else INVALID_ARGUMENT.
+  optional float gain_low = 4;
+  optional float gain_mid = 5;
+  optional float gain_high = 6;
 }
 
 message GetWaveformResponse {
   double duration_seconds = 1;
   // How many columns make up a second of the track (100: one per 10 ms).
   uint32 columns_per_second = 2;
-  // Three bytes per column, in time order: the loudness of the low, the mid and the
-  // high frequencies, from 0 (silent) to 255. The bands are scaled to the track's loud
-  // parts, with the quieter bands (usually the highs) boosted by at most 3.3x, so the
-  // levels of different bands are only roughly comparable.
+  // Three bytes per column, in time order: the height to draw the low, the mid and the
+  // high frequencies at, from 0 (nothing) to 255 (full height). A band's height is its
+  // loudest sample in the 10 ms (as a share of full scale: a full-scale sine wave in the
+  // band is 1) times the gain of the band, but at most 1, to the power of 0.8, times
+  // 255. The scale is fixed, the same for every track: it is not fitted to how loud the
+  // track is or to how much of each band it has.
   bytes columns = 3;
   // Unset if the library has no beatgrid for the track.
   optional BeatGrid beat_grid = 4;

@@ -15,6 +15,15 @@ pub const WAVEFORM_MID_HIGH_HZ: u32 = 4_000;
 pub const WAVEFORM_MIN_SPLIT_HZ: u32 = 20;
 pub const WAVEFORM_MAX_SPLIT_HZ: u32 = 20_000;
 
+/// How much each band of the waveform is amplified before it is drawn. A band's level
+/// is its loudest sample in a slice of the track, as a share of full scale; times the
+/// gain, that is the height it is drawn at (1 is full height). The same for every track.
+pub const WAVEFORM_GAIN_LOW: f32 = 1.0;
+pub const WAVEFORM_GAIN_MID: f32 = 1.0;
+pub const WAVEFORM_GAIN_HIGH: f32 = 1.0;
+/// The largest gain accepted.
+pub const WAVEFORM_MAX_GAIN: f32 = 20.0;
+
 /// The environment variable the UI uses to give the backend the secret that every
 /// request must carry as a bearer token (see [`AUTHORIZATION`]).
 pub const TOKEN_ENV: &str = "OPEN_ENGINE_BACKEND_TOKEN";

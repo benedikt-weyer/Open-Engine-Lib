@@ -1,8 +1,8 @@
 use iced::Element;
-use iced::widget::{button, checkbox, column, radio, text};
+use iced::widget::{button, checkbox, column, radio, row, slider, text};
 
 use crate::Message;
-use crate::config::{ConfigStore, Language, ThemeMode, WaveformColors};
+use crate::config::{ConfigStore, Language, ThemeMode, WaveformBand, WaveformColors};
 use crate::i18n::fill;
 
 fn theme_name(language: Language, theme: ThemeMode) -> &'static str {
@@ -23,7 +23,24 @@ fn waveform_colors_name(language: Language, colors: WaveformColors) -> &'static 
     }
 }
 
-pub fn view<'a>(config: &'a ConfigStore, error: Option<&'a str>) -> Element<'a, Message> {
+/// The range of the gain sliders. (The config file accepts more.)
+const GAIN_SLIDER: std::ops::RangeInclusive<f32> = 0.25..=4.0;
+
+fn band_label(language: Language, band: WaveformBand) -> &'static str {
+    let strings = language.strings();
+    match band {
+        WaveformBand::Low => &strings.waveform_gain_low,
+        WaveformBand::Mid => &strings.waveform_gain_mid,
+        WaveformBand::High => &strings.waveform_gain_high,
+    }
+}
+
+/// `draft` is the gain slider that is being dragged: it shows where it is before it is saved.
+pub fn view<'a>(
+    config: &'a ConfigStore,
+    error: Option<&'a str>,
+    draft: Option<(WaveformBand, f32)>,
+) -> Element<'a, Message> {
     let current = config.effective();
     let language = current.language;
     let strings = language.strings();
@@ -62,6 +79,35 @@ pub fn view<'a>(config: &'a ConfigStore, error: Option<&'a str>) -> Element<'a, 
             Message::WaveformColorsSelected,
         ));
     }
+
+    page = page.push(text(&strings.waveform_gains_heading).size(20));
+    page = page.push(
+        text(&strings.waveform_gains_hint)
+            .size(14)
+            .style(text::secondary),
+    );
+    for band in WaveformBand::ALL {
+        let gain = match draft {
+            Some((dragged, gain)) if dragged == band => gain,
+            _ => current.waveform_gain(band),
+        };
+        page = page.push(
+            row![
+                text(band_label(language, band)).width(150),
+                slider(GAIN_SLIDER, gain, move |gain| Message::WaveformGainDragged(
+                    band, gain
+                ))
+                .step(0.05f32)
+                .on_release(Message::WaveformGainReleased)
+                .width(250),
+                text(format!("{gain:.2}×")),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        );
+    }
+    page = page
+        .push(button(text(&strings.reset_waveform_gains)).on_press(Message::ResetWaveformGains));
 
     page = page.push(text(&strings.startup_heading).size(20));
     page = page.push(

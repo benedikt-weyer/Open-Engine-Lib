@@ -21,10 +21,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use backend::{Backend, Control};
+use backend::{Backend, Control, WaveformSettings};
 use browser::{Browser, Source};
 use clock::Clock;
-use config::{ConfigStore, Language, Locations, ThemeMode, WaveformColors};
+use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, WaveformColors};
 use covers::Covers;
 use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text};
@@ -105,6 +105,8 @@ struct State {
     seeking: Option<f32>,
     /// A failed request to the backend.
     backend_error: Option<String>,
+    /// The waveform gain slider being dragged and where it is.
+    gain_draft: Option<(WaveformBand, f32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +116,10 @@ pub enum Message {
     LanguageSelected(Language),
     ResetOverrides,
     WaveformColorsSelected(WaveformColors),
+    /// A waveform gain slider is being dragged to a value: not saved until it is let go.
+    WaveformGainDragged(WaveformBand, f32),
+    WaveformGainReleased,
+    ResetWaveformGains,
     ReopenLibraryToggled(bool),
     RestorePositionToggled(bool),
     CloseRequested(iced::window::Id),
@@ -189,6 +195,7 @@ impl State {
             play_source: None,
             seeking: None,
             backend_error: None,
+            gain_draft: None,
         };
         (state, start_backend())
     }
@@ -421,13 +428,16 @@ impl State {
             return Task::none();
         }
         let generation = self.waveforms.generation();
-        // Where the bands meet is a setting, read once per track.
+        // Where the bands meet and how much each is amplified are settings.
         let config = self.config.effective();
-        let (low_mid_hz, mid_high_hz) = (config.waveform_low_mid_hz, config.waveform_mid_high_hz);
-        Task::perform(
-            backend::waveform(backend, id, low_mid_hz, mid_high_hz),
-            move |result| Message::WaveformLoaded(generation, id, result),
-        )
+        let settings = WaveformSettings {
+            low_mid_hz: config.waveform_low_mid_hz,
+            mid_high_hz: config.waveform_mid_high_hz,
+            gains: WaveformBand::ALL.map(|band| config.waveform_gain(band)),
+        };
+        Task::perform(backend::waveform(backend, id, settings), move |result| {
+            Message::WaveformLoaded(generation, id, result)
+        })
     }
 
     fn is_stopped(&self) -> bool {
@@ -471,6 +481,27 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .set_waveform_colors(colors)
                 .err()
                 .map(|e| e.to_string());
+        }
+        Message::WaveformGainDragged(band, gain) => state.gain_draft = Some((band, gain)),
+        Message::WaveformGainReleased => {
+            if let Some((band, gain)) = state.gain_draft.take() {
+                state.config_error = state
+                    .config
+                    .set_waveform_gain(band, gain)
+                    .err()
+                    .map(|e| e.to_string());
+                // The waveform of the track in the player is drawn again with the new gain.
+                state.waveforms.clear();
+            }
+        }
+        Message::ResetWaveformGains => {
+            state.gain_draft = None;
+            state.config_error = state
+                .config
+                .reset_waveform_gains()
+                .err()
+                .map(|e| e.to_string());
+            state.waveforms.clear();
         }
         Message::ReopenLibraryToggled(reopen) => {
             state.config_error = state
@@ -673,7 +704,11 @@ fn view(state: &State) -> Element<'_, Message> {
     let language = state.config.effective().language;
     let page = match state.page {
         Page::Library => library_page(state, language),
-        Page::Settings => settings::view(&state.config, state.config_error.as_deref()),
+        Page::Settings => settings::view(
+            &state.config,
+            state.config_error.as_deref(),
+            state.gain_draft,
+        ),
     };
 
     column![
@@ -939,6 +974,7 @@ mod tests {
             play_source: None,
             seeking: None,
             backend_error: None,
+            gain_draft: None,
         }
     }
 

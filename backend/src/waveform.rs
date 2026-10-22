@@ -24,15 +24,9 @@ pub const MAX_SPLIT_HZ: u32 = open_engine_api::WAVEFORM_MAX_SPLIT_HZ;
 /// A filter can't work close to half the sample rate, so split points are kept below
 /// this share of it.
 const NYQUIST_SHARE: f32 = 0.45;
-/// Each band is scaled so that this share of its columns is at or below full height,
-/// which keeps a single loud click from flattening the rest.
-const FULL_SCALE_PERCENTILE: f64 = 0.99;
-/// Below 1, so that quiet parts stay visible next to loud ones.
+/// The curve from a band's level (0 to 1) to the height it is drawn at: below 1, so that
+/// quiet parts stay visible next to loud ones. The same for every track and band.
 const GAMMA: f32 = 0.8;
-/// A quiet band is boosted to show up next to a loud one (treble is always much softer
-/// than bass), but at most this far: otherwise a track with no treble at all would
-/// show its filter leakage at full height.
-const MIN_BAND_SCALE: f32 = 0.3;
 
 /// Where the low, mid and high bands meet, in Hz.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,11 +69,74 @@ impl Split {
     }
 }
 
+/// How much each band is amplified before it is drawn (see `Peaks::scaled`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gains {
+    pub low: f32,
+    pub mid: f32,
+    pub high: f32,
+}
+
+impl Gains {
+    /// Gains that leave the levels as they are.
+    #[cfg(test)]
+    pub const UNITY: Gains = Gains {
+        low: 1.0,
+        mid: 1.0,
+        high: 1.0,
+    };
+
+    /// Checks that every gain is a positive number that isn't absurd.
+    pub fn validate(self) -> Result<(), String> {
+        let sensible = |gain: f32| gain.is_finite() && gain > 0.0 && gain <= MAX_GAIN;
+        if [self.low, self.mid, self.high].into_iter().all(sensible) {
+            Ok(())
+        } else {
+            Err(format!("the gains must be above 0 and at most {MAX_GAIN}"))
+        }
+    }
+}
+
+impl Default for Gains {
+    fn default() -> Self {
+        Self {
+            low: open_engine_api::WAVEFORM_GAIN_LOW,
+            mid: open_engine_api::WAVEFORM_GAIN_MID,
+            high: open_engine_api::WAVEFORM_GAIN_HIGH,
+        }
+    }
+}
+
+const MAX_GAIN: f32 = open_engine_api::WAVEFORM_MAX_GAIN;
+
+/// The loudest sample of each band in every 10 ms of a track, as a share of full scale
+/// (a full-scale sine wave in a band is 1). Raw: nothing is scaled to the track.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Waveform {
+pub struct Peaks {
     pub duration_seconds: f64,
-    /// Low, mid and high loudness per column, 0 to 255.
-    pub columns: Vec<[u8; 3]>,
+    /// Low, mid and high peak per column.
+    pub columns: Vec<[f32; 3]>,
+}
+
+impl Peaks {
+    /// The heights to draw, 0 to 255 per band: the peak times the band's gain, up to full
+    /// height, then curved a little to show quiet parts. The scale is fixed, not fitted to
+    /// the track, so a quiet track is drawn lower than a loud one and a band the track
+    /// has little of is drawn low.
+    pub fn scaled(&self, gains: Gains) -> Vec<[u8; 3]> {
+        let gains = [gains.low, gains.mid, gains.high];
+        self.columns
+            .iter()
+            .map(|peak| {
+                let mut column = [0u8; 3];
+                for band in 0..3 {
+                    let level = (peak[band] * gains[band]).clamp(0.0, 1.0).powf(GAMMA);
+                    column[band] = (level * 255.0).round() as u8;
+                }
+                column
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -88,8 +145,8 @@ pub enum AnalyzeError {
     Failed(String),
 }
 
-/// Decodes the whole file at `path` and computes its waveform.
-pub fn analyze_file(path: &Path, split: Split) -> Result<Waveform, AnalyzeError> {
+/// Decodes the whole file at `path` and measures it.
+pub fn analyze_file(path: &Path, split: Split) -> Result<Peaks, AnalyzeError> {
     let file = File::open(path).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => AnalyzeError::NotFound,
         _ => AnalyzeError::Failed(error.to_string()),
@@ -101,13 +158,13 @@ pub fn analyze_file(path: &Path, split: Split) -> Result<Waveform, AnalyzeError>
     Ok(analyze(source, channels, sample_rate, split))
 }
 
-/// The waveform of interleaved `samples`.
+/// The peaks of interleaved `samples`.
 pub fn analyze(
     samples: impl Iterator<Item = f32>,
     channels: u16,
     sample_rate: u32,
     split: Split,
-) -> Waveform {
+) -> Peaks {
     let channels = usize::from(channels.max(1));
     let (low_mid_hz, mid_high_hz) = split.for_sample_rate(sample_rate);
     // Low is what gets through a low-pass at the first split, high what gets through
@@ -149,40 +206,10 @@ pub fn analyze(
         frame_count += 1;
     }
 
-    Waveform {
+    Peaks {
         duration_seconds: frame_count as f64 / f64::from(sample_rate),
-        columns: normalize(&peaks),
+        columns: peaks,
     }
-}
-
-/// Scales every band to its own loud parts (see `MIN_BAND_SCALE`) and to 0..=255.
-fn normalize(peaks: &[[f32; 3]]) -> Vec<[u8; 3]> {
-    let mut scale = [1.0f32; 3];
-    for (band, scale) in scale.iter_mut().enumerate() {
-        let mut values: Vec<f32> = peaks.iter().map(|peak| peak[band]).collect();
-        values.sort_by(f32::total_cmp);
-        let at = ((values.len() as f64 * FULL_SCALE_PERCENTILE) as usize)
-            .min(values.len().saturating_sub(1));
-        *scale = values.get(at).copied().unwrap_or(1.0);
-    }
-    let loudest = scale.iter().copied().fold(0.0, f32::max);
-    // The floor also keeps silence (all scales near 0) from being blown up.
-    let floor = (loudest * MIN_BAND_SCALE).max(1e-3);
-    for scale in &mut scale {
-        *scale = scale.max(floor);
-    }
-
-    peaks
-        .iter()
-        .map(|peak| {
-            let mut column = [0u8; 3];
-            for band in 0..3 {
-                let level = (peak[band] / scale[band]).clamp(0.0, 1.0).powf(GAMMA);
-                column[band] = (level * 255.0).round() as u8;
-            }
-            column
-        })
-        .collect()
 }
 
 /// A second-order (12 dB per octave) Butterworth filter, in transposed direct form II.
@@ -252,20 +279,22 @@ mod tests {
             .collect()
     }
 
-    /// The average of a band over a range of columns.
-    fn average(waveform: &Waveform, band: usize, columns: std::ops::Range<usize>) -> f32 {
-        let values: Vec<f32> = waveform.columns[columns]
-            .iter()
-            .map(|c| f32::from(c[band]))
-            .collect();
+    fn peaks(samples: Vec<f32>, split: Split) -> Peaks {
+        analyze(samples.into_iter(), 1, RATE, split)
+    }
+
+    /// The average of a band's drawn height over a range of columns, with unscaled gains.
+    fn average(peaks: &Peaks, band: usize, columns: std::ops::Range<usize>) -> f32 {
+        let scaled = peaks.scaled(Gains::UNITY);
+        let values: Vec<f32> = scaled[columns].iter().map(|c| f32::from(c[band])).collect();
         values.iter().sum::<f32>() / values.len() as f32
     }
 
     #[test]
     fn has_one_column_per_ten_milliseconds() {
-        let waveform = analyze(tone(440.0, 2.0).into_iter(), 1, RATE, Split::default());
-        assert_eq!(waveform.columns.len(), 200);
-        assert!((waveform.duration_seconds - 2.0).abs() < 1e-3);
+        let peaks = peaks(tone(440.0, 2.0), Split::default());
+        assert_eq!(peaks.columns.len(), 200);
+        assert!((peaks.duration_seconds - 2.0).abs() < 1e-3);
     }
 
     #[test]
@@ -275,34 +304,28 @@ mod tests {
             .into_iter()
             .chain(tone(6_000.0, 1.0))
             .collect();
-        let waveform = analyze(samples.into_iter(), 1, RATE, Split::default());
+        let peaks = peaks(samples, Split::default());
 
         // Skip the first columns of each half, where the filters are still settling.
         let (bass, treble) = (20..90, 120..190);
         assert!(
-            average(&waveform, 0, bass.clone()) > 200.0,
-            "bass is loud in the low band"
+            average(&peaks, 0, bass.clone()) > 150.0,
+            "bass is tall in the low band"
         );
+        assert!(average(&peaks, 2, bass) < 40.0, "and not in the high band");
         assert!(
-            average(&waveform, 2, bass.clone()) < 40.0,
-            "and not in the high band"
+            average(&peaks, 2, treble.clone()) > 150.0,
+            "treble is tall in the high band"
         );
-        assert!(
-            average(&waveform, 2, treble.clone()) > 200.0,
-            "treble is loud in the high band"
-        );
-        assert!(
-            average(&waveform, 0, treble) < 40.0,
-            "and not in the low band"
-        );
+        assert!(average(&peaks, 0, treble) < 40.0, "and not in the low band");
     }
 
     #[test]
     fn puts_a_midrange_tone_in_the_middle_band() {
-        let waveform = analyze(tone(1_500.0, 2.0).into_iter(), 1, RATE, Split::default());
-        let mid = average(&waveform, 1, 20..180);
-        assert!(mid > 200.0);
-        assert!(average(&waveform, 0, 20..180) < mid && average(&waveform, 2, 20..180) < mid);
+        let peaks = peaks(tone(1_500.0, 2.0), Split::default());
+        let mid = average(&peaks, 1, 20..180);
+        assert!(mid > 150.0);
+        assert!(average(&peaks, 0, 20..180) < mid / 2.0 && average(&peaks, 2, 20..180) < mid / 2.0);
     }
 
     #[test]
@@ -312,24 +335,102 @@ mod tests {
         assert_eq!(Split::default().mid_high_hz, 4_000);
 
         // A 300 Hz tone is low by default, but mid when the low band ends at 100 Hz.
-        let low_end_at_100 = Split {
-            low_mid_hz: 100,
-            mid_high_hz: 4_000,
-        };
-        let by_default = analyze(tone(300.0, 2.0).into_iter(), 1, RATE, Split::default());
-        let moved = analyze(tone(300.0, 2.0).into_iter(), 1, RATE, low_end_at_100);
+        let by_default = peaks(tone(300.0, 2.0), Split::default());
+        let moved = peaks(
+            tone(300.0, 2.0),
+            Split {
+                low_mid_hz: 100,
+                mid_high_hz: 4_000,
+            },
+        );
         assert!(average(&by_default, 0, 20..180) > average(&by_default, 1, 20..180));
         assert!(average(&moved, 1, 20..180) > average(&moved, 0, 20..180));
 
         // A 2.5 kHz tone is mid by default, but high when the high band starts at 1 kHz.
-        let high_from_1k = Split {
-            low_mid_hz: 200,
-            mid_high_hz: 1_000,
-        };
-        let by_default = analyze(tone(2_500.0, 2.0).into_iter(), 1, RATE, Split::default());
-        let moved = analyze(tone(2_500.0, 2.0).into_iter(), 1, RATE, high_from_1k);
+        let by_default = peaks(tone(2_500.0, 2.0), Split::default());
+        let moved = peaks(
+            tone(2_500.0, 2.0),
+            Split {
+                low_mid_hz: 200,
+                mid_high_hz: 1_000,
+            },
+        );
         assert!(average(&by_default, 1, 20..180) > average(&by_default, 2, 20..180));
         assert!(average(&moved, 2, 20..180) > average(&moved, 1, 20..180));
+    }
+
+    #[test]
+    fn the_scale_is_fixed_and_not_fitted_to_the_track() {
+        // The same tone, loud and at a fifth of the level: the quiet one is drawn lower
+        // (nothing makes it as tall as the loud one).
+        let loud = peaks(tone(80.0, 2.0), Split::default());
+        let quiet = peaks(
+            tone(80.0, 2.0).into_iter().map(|s| s * 0.2).collect(),
+            Split::default(),
+        );
+        let (loud_height, quiet_height) = (average(&loud, 0, 20..180), average(&quiet, 0, 20..180));
+        assert!(
+            quiet_height < loud_height * 0.6,
+            "{quiet_height} against {loud_height}"
+        );
+
+        // And a band is exactly as tall as its peak says: 0.5 gives 0.5^0.8 of full height.
+        let half = Peaks {
+            duration_seconds: 0.01,
+            columns: vec![[0.5, 0.5, 0.5]],
+        };
+        let expected = (0.5f32.powf(GAMMA) * 255.0).round() as u8;
+        assert_eq!(half.scaled(Gains::UNITY), [[expected; 3]]);
+    }
+
+    #[test]
+    fn the_gains_amplify_each_band_by_itself_and_stop_at_full_height() {
+        let columns = Peaks {
+            duration_seconds: 0.01,
+            columns: vec![[0.1, 0.1, 0.1]],
+        };
+        let plain = columns.scaled(Gains::UNITY)[0];
+        let boosted = columns.scaled(Gains {
+            low: 1.0,
+            mid: 3.0,
+            high: 10.0,
+        })[0];
+        assert_eq!(boosted[0], plain[0], "an untouched band stays");
+        assert!(boosted[1] > plain[1] && boosted[2] > boosted[1]);
+        assert_eq!(boosted[2], 255, "10 x 0.1 is full height, and no more");
+
+        let loud = Peaks {
+            duration_seconds: 0.01,
+            columns: vec![[0.9, 0.9, 0.9]],
+        };
+        assert_eq!(
+            loud.scaled(Gains {
+                low: 5.0,
+                mid: 5.0,
+                high: 5.0
+            })[0],
+            [255; 3]
+        );
+        assert_eq!(
+            loud.scaled(Gains {
+                low: 0.0001,
+                mid: 0.0001,
+                high: 0.0001
+            })[0],
+            [0; 3]
+        );
+    }
+
+    #[test]
+    fn checks_the_gains() {
+        let gains = |low, mid, high| Gains { low, mid, high };
+        assert!(Gains::default().validate().is_ok());
+        assert!(gains(0.5, 2.0, MAX_GAIN).validate().is_ok());
+        assert!(gains(0.0, 1.0, 1.0).validate().is_err(), "silences a band");
+        assert!(gains(-1.0, 1.0, 1.0).validate().is_err());
+        assert!(gains(1.0, MAX_GAIN + 1.0, 1.0).validate().is_err());
+        assert!(gains(1.0, f32::NAN, 1.0).validate().is_err());
+        assert!(gains(1.0, 1.0, f32::INFINITY).validate().is_err());
     }
 
     #[test]
@@ -358,11 +459,10 @@ mod tests {
 
     #[test]
     fn mixes_channels_down_and_follows_the_sample_rate() {
-        // Interleaved stereo at 22.05 kHz: a second is still 100 columns.
-        let mono = tone(440.0, 1.0);
-        let stereo: Vec<f32> = mono.iter().flat_map(|s| [*s, *s]).collect();
-        let waveform = analyze(stereo.into_iter(), 2, RATE, Split::default());
-        assert_eq!(waveform.columns.len(), 100);
+        // Interleaved stereo: a second is still 100 columns.
+        let stereo: Vec<f32> = tone(440.0, 1.0).iter().flat_map(|s| [*s, *s]).collect();
+        let peaks = analyze(stereo.into_iter(), 2, RATE, Split::default());
+        assert_eq!(peaks.columns.len(), 100);
 
         let slow = analyze(
             (0..22_050).map(|n| (n as f32 * 0.1).sin()),
@@ -377,7 +477,12 @@ mod tests {
     #[test]
     fn silence_and_empty_input_are_flat_and_empty() {
         let silent = analyze(std::iter::repeat_n(0.0, 44_100), 1, RATE, Split::default());
-        assert!(silent.columns.iter().all(|c| *c == [0, 0, 0]));
+        assert!(
+            silent
+                .scaled(Gains::default())
+                .iter()
+                .all(|c| *c == [0, 0, 0])
+        );
 
         let empty = analyze(std::iter::empty(), 2, RATE, Split::default());
         assert!(empty.columns.is_empty());
@@ -390,5 +495,34 @@ mod tests {
             analyze_file(Path::new("/nonexistent/track.flac"), Split::default()),
             Err(AnalyzeError::NotFound)
         ));
+    }
+
+    /// Prints the raw levels of real files, to choose sensible default gains. The variable
+    /// names a text file with one audio file per line:
+    /// `OPEN_ENGINE_TEST_AUDIO=/list.txt cargo test -p open-engine-backend levels -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs real audio files (OPEN_ENGINE_TEST_AUDIO)"]
+    fn levels_of_real_files() {
+        let list = std::env::var("OPEN_ENGINE_TEST_AUDIO").expect("OPEN_ENGINE_TEST_AUDIO");
+        let files = std::fs::read_to_string(list).unwrap();
+        for file in files.lines() {
+            let peaks = analyze_file(Path::new(file), Split::default()).unwrap();
+            let mut line = String::new();
+            for (band, name) in ["low", "mid", "high"].into_iter().enumerate() {
+                let mut levels: Vec<f32> = peaks.columns.iter().map(|c| c[band]).collect();
+                levels.sort_by(f32::total_cmp);
+                let at = |share: f64| {
+                    levels[((levels.len() as f64 * share) as usize).min(levels.len() - 1)]
+                };
+                line += &format!(
+                    "{name}: median {:.2} p90 {:.2} p99 {:.2} max {:.2}   ",
+                    at(0.5),
+                    at(0.9),
+                    at(0.99),
+                    at(1.0)
+                );
+            }
+            println!("{line}");
+        }
     }
 }

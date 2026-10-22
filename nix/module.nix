@@ -70,6 +70,31 @@ in
         '';
       };
 
+      waveform_gain_low = lib.mkOption {
+        type = lib.types.nullOr lib.types.float;
+        default = null;
+        example = 1.0;
+        description = ''
+          How much the low band of the waveform is amplified before it is drawn. A fixed
+          scale, the same for every track: 1.0 draws the band at its true level, more makes
+          it taller. Above 0 and at most 20. Unset means 1.0.
+        '';
+      };
+
+      waveform_gain_mid = lib.mkOption {
+        type = lib.types.nullOr lib.types.float;
+        default = null;
+        example = 1.0;
+        description = "Like `waveform_gain_low`, for the mid band.";
+      };
+
+      waveform_gain_high = lib.mkOption {
+        type = lib.types.nullOr lib.types.float;
+        default = null;
+        example = 1.5;
+        description = "Like `waveform_gain_low`, for the high band.";
+      };
+
       reopen_library = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
         default = null;

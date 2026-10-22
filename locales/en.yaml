@@ -15,6 +15,12 @@ waveform_colors_short_mono: Mono
 waveform_colors_short_rgb: RGB
 waveform_colors_short_stacked: 3-band
 waveform_colors_short_spectrum: Spectrum
+waveform_gains_heading: Waveform levels
+waveform_gains_hint: "A fixed scale, the same for every track: 1.00× draws a frequency band at its true level, more makes it taller."
+waveform_gain_low: Low
+waveform_gain_mid: Mid
+waveform_gain_high: High
+reset_waveform_gains: Reset the levels
 startup_heading: Startup
 reopen_library: Reopen the last library
 restore_position: Also go back to the playlist, song and position in it (paused)

@@ -9,7 +9,7 @@ The app never works on your library in place: it copies the databases to a cache
 
 ## Configuration
 
-Settings (light/dark theme, the English/German UI language, how the waveform is colored (mono, RGB, 3-band stacked or spectrum, also switchable from a menu next to the waveform), and whether the last library is reopened at startup, and with it the playlist, song and position) can be changed on the Settings page. They are stored in `~/.config/open-engine-lib/config.toml`.
+Settings (light/dark theme, the English/German UI language, how the waveform is colored (mono, RGB, 3-band stacked or spectrum, also switchable from a menu next to the waveform) and how tall each frequency band is drawn, and whether the last library is reopened at startup, and with it the playlist, song and position) can be changed on the Settings page. They are stored in `~/.config/open-engine-lib/config.toml`.
 
 On NixOS the config can be set declaratively with the flake's module:
 
@@ -22,6 +22,9 @@ programs.open-engine-lib = {
   settings.waveform_colors = "stacked"; # "mono" | "rgb" | "stacked" | "spectrum" (default: stacked)
   settings.waveform_low_mid_hz = 600;   # where the waveform's low band ends, in Hz (default: 600)
   settings.waveform_mid_high_hz = 4000; # where its high band starts, in Hz (default: 4000)
+  settings.waveform_gain_low = 1.0;     # how much each waveform band is amplified; a fixed scale, 1.0 = true level
+  settings.waveform_gain_mid = 1.0;
+  settings.waveform_gain_high = 1.0;
   settings.reopen_library = true;   # reopen the last library at startup (default: true)
   settings.restore_position = true; # ...and its playlist, song and position, paused (default: true)
 };
