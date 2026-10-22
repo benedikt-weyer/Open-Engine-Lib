@@ -19,7 +19,6 @@ const ROW_BUFFER: usize = 10;
 /// Window heights vary and resizing sends no scroll event, so always build at least
 /// enough rows for a tall window.
 const MIN_VIEWPORT: f32 = 1600.0;
-const SIDEBAR_WIDTH: f32 = 260.0;
 const INDENT: f32 = 16.0;
 
 /// Which list the track pane shows.
@@ -100,22 +99,8 @@ pub fn format_time(seconds: u32) -> String {
     }
 }
 
-/// `playing` is the row of the shown list that is playing, if it is the playing list.
-pub fn view<'a>(
-    browser: &'a Browser,
-    playing: Option<usize>,
-    language: Language,
-) -> Element<'a, Message> {
-    row![
-        container(sidebar(browser, language)).width(SIDEBAR_WIDTH),
-        tracks(browser, playing, language)
-    ]
-    .spacing(10)
-    .height(Fill)
-    .into()
-}
-
-fn sidebar<'a>(browser: &'a Browser, language: Language) -> Element<'a, Message> {
+/// The playlist tree: pick what the track list shows.
+pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Message> {
     let mut list = column![].spacing(2);
 
     list = list.push(
@@ -197,7 +182,8 @@ fn cell<'a>(content: impl iced::widget::text::IntoFragment<'a>) -> text::Text<'a
     text(content).size(14).wrapping(text::Wrapping::None)
 }
 
-fn tracks<'a>(
+/// The tracks of the shown list. `playing` is the row that is playing, if it is in this list.
+pub fn tracks<'a>(
     browser: &'a Browser,
     playing: Option<usize>,
     language: Language,

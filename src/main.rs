@@ -7,7 +7,9 @@ mod i18n;
 mod model;
 mod navbar;
 mod player_bar;
+mod recent;
 mod settings;
+mod sidebar;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,10 +19,11 @@ use backend::{Backend, Control};
 use browser::{Browser, Source};
 use config::{ConfigStore, Language, Locations, ThemeMode};
 use i18n::fill;
-use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use model::Library;
 use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
+use recent::Recents;
 
 /// How often the playback position is fetched from the backend while playing.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -65,6 +68,9 @@ struct State {
     /// A library to open as soon as the backend is up (from the command line).
     open_when_ready: Option<PathBuf>,
     library: LibraryState,
+    recents: Recents,
+    /// Why the recent libraries could not be saved.
+    recents_error: Option<String>,
     /// What the backend last said about playback.
     status: PlaybackStatus,
     /// The list the queue was made from, so its playing row can be marked.
@@ -90,6 +96,8 @@ pub enum Message {
     LibraryOpened(Result<Arc<Library>, String>),
     CloseLibrary,
     LibraryClosed(Result<(), String>),
+    OpenRecent(PathBuf),
+    ForgetRecent(PathBuf),
 
     ShowCollection,
     ShowPlaylist(usize),
@@ -117,6 +125,8 @@ impl State {
             backend: BackendState::Starting,
             open_when_ready: std::env::args_os().nth(1).map(PathBuf::from),
             library: LibraryState::Closed { error: None },
+            recents: Recents::discover(),
+            recents_error: None,
             status: PlaybackStatus::default(),
             play_source: None,
             seeking: None,
@@ -269,7 +279,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::LibraryOpened(result) => {
             if matches!(state.library, LibraryState::Opening(_)) {
                 state.library = match result {
-                    Ok(library) => LibraryState::Open(Browser::new(library)),
+                    Ok(library) => {
+                        state.recents_error = state
+                            .recents
+                            .add(PathBuf::from(&library.path))
+                            .err()
+                            .map(|error| error.to_string());
+                        LibraryState::Open(Browser::new(library))
+                    }
                     Err(error) => LibraryState::Closed { error: Some(error) },
                 };
             }
@@ -282,6 +299,19 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::LibraryClosed(result) => state.backend_error = result.err(),
+        Message::OpenRecent(path) => {
+            // One library at a time: the backend would end up with the other one.
+            if !matches!(state.library, LibraryState::Opening(_)) {
+                return state.open(path);
+            }
+        }
+        Message::ForgetRecent(path) => {
+            state.recents_error = state
+                .recents
+                .forget(&path)
+                .err()
+                .map(|error| error.to_string());
+        }
 
         Message::ShowCollection | Message::ShowPlaylist(_) => {
             if let LibraryState::Open(browser) = &mut state.library {
@@ -367,11 +397,12 @@ fn view(state: &State) -> Element<'_, Message> {
 fn library_page(state: &State, language: Language) -> Element<'_, Message> {
     let strings = language.strings();
 
-    match (&state.backend, &state.library) {
-        (BackendState::Starting, _) => {
+    // Until the backend is up there is nothing to open, so no sidebar either.
+    match &state.backend {
+        BackendState::Starting => {
             return centered(vec![text(&strings.backend_starting).into()]);
         }
-        (BackendState::Failed(error), _) => {
+        BackendState::Failed(error) => {
             return centered(vec![
                 text(fill(&strings.backend_failed, &[("error", error)]))
                     .style(text::danger)
@@ -381,12 +412,17 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
                     .into(),
             ]);
         }
-        (BackendState::Ready(_), LibraryState::Opening(path)) => {
-            return centered(vec![
+        BackendState::Ready(_) => {}
+    }
+
+    let (browser, content) = match &state.library {
+        LibraryState::Opening(path) => (
+            None,
+            centered(vec![
                 text(fill(&strings.opening_library, &[("path", &path.display())])).into(),
-            ]);
-        }
-        (BackendState::Ready(_), LibraryState::Closed { error }) => {
+            ]),
+        ),
+        LibraryState::Closed { error } => {
             let mut lines: Vec<Element<'_, Message>> = vec![
                 text(&strings.library_closed_title).size(30).into(),
                 text(&strings.library_closed_hint).into(),
@@ -404,14 +440,34 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
             if let Some(error) = &state.backend_error {
                 lines.push(backend_error(language, error));
             }
-            return centered(lines);
+            (None, centered(lines))
         }
-        (BackendState::Ready(_), LibraryState::Open(_)) => {}
-    }
-
-    let LibraryState::Open(browser) = &state.library else {
-        unreachable!("handled above");
+        LibraryState::Open(browser) => (Some(browser), open_library(state, browser, language)),
     };
+
+    row![
+        sidebar::view(
+            browser,
+            &state.recents,
+            state.recents_error.as_deref(),
+            browser.map(|browser| browser.library.path.as_str()),
+            !matches!(state.library, LibraryState::Opening(_)),
+            language,
+        ),
+        content
+    ]
+    .spacing(10)
+    .height(Fill)
+    .into()
+}
+
+/// The open library: its summary, the shown list, the player and any errors.
+fn open_library<'a>(
+    state: &'a State,
+    browser: &'a Browser,
+    language: Language,
+) -> Element<'a, Message> {
+    let strings = language.strings();
     let library = &browser.library;
 
     let header = row![
@@ -450,10 +506,12 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
 
     let mut page = column![
         header,
-        browser::view(browser, state.playing_row(browser), language),
+        browser::tracks(browser, state.playing_row(browser), language),
         bar
     ]
-    .spacing(10);
+    .spacing(10)
+    .width(Fill)
+    .height(Fill);
 
     if let Some(error) = &state.status.error {
         page = page.push(text(playback_error(language, error, library)).style(text::danger));
@@ -461,7 +519,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
     if let Some(error) = &state.backend_error {
         page = page.push(backend_error(language, error));
     }
-    page.push(Space::new().height(0)).into()
+    page.into()
 }
 
 /// Messages shown in the middle of the page while there is no library to show.

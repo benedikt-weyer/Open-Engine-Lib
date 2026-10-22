@@ -22,6 +22,10 @@ open_library: Bibliothek öffnen…
 choose_library: Engine-Bibliothek auswählen
 opening_library: "{path} wird geöffnet…"
 open_failed: "Die Bibliothek konnte nicht geöffnet werden: {error}"
+recent_libraries: Zuletzt geöffnet
+no_recent_libraries: Hier erscheinen die Bibliotheken, die du öffnest.
+forget_library: Aus der Liste entfernen
+recents_save_failed: "Die zuletzt geöffneten Bibliotheken konnten nicht gespeichert werden: {error}"
 close_library: Bibliothek schließen
 library_summary: "{path} · Titel: {tracks} · Playlists: {playlists}"
 collection: Alle Titel
