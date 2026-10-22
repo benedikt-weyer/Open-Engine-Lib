@@ -9,10 +9,11 @@ Findings from inspecting a real Engine DJ library on an external drive (a Denon 
 | `Database2/*.db` | Plain SQLite 3 (no SQLCipher, no key) | Yes, with any SQLite client |
 | Track metadata, playlists, history, smartlists | Ordinary SQL columns, UTF-8 text | Yes |
 | Cues, loops, beat grid, waveform | BLOBs: a 4-byte length plus zlib, or raw binary | Yes, after decoding (see below) |
-| Album art | PNG BLOBs | Yes |
+| Album art | 256×256 PNG BLOBs in `AlbumArt`, or 256×256 JPEG files in `Artwork/` | Yes |
 | Overview `.rgb` files | The same zlib BLOB format as the waveform column | Yes |
 | `user.profile` | Plain JSON | Yes |
-| `.stems` files | MP4 container with AAC audio | Yes (ffprobe reads them) |
+| `.stems` files | Plain MP4 container, one 8-channel AAC stream | Container yes. The audio would not decode in ffmpeg 9.0.2 (see [Stems](#stems)) |
+| `coredumps/` | zstd-compressed crash dump, journal and a text metadata file | Yes (zstd + ELF core + text) |
 
 I did not find any encryption, DRM or deliberate obfuscation. All 3,285 tracks that had performance data decoded without a single failure, for every BLOB type. The only "opaque" values are 64-bit random-looking integers (`playedIndicator`, `Information.currentPlayedIndiciator`). They are change/play markers, not scrambled data.
 
@@ -30,11 +31,13 @@ The one real catch: BLOB layouts are undocumented by the vendor, and **endiannes
 │   │   ├── stm.db          same schema, empty here (likely streaming library)
 │   │   ├── *.db-journal    SQLite rollback journals (0 bytes when closed cleanly)
 │   │   └── OverviewData/<database-uuid>/<trackId>.rgb
-│   ├── Artwork/            ~800 JPEGs named by a base64url hash
-│   ├── Stems/<trackId> <database-uuid>.stems
-│   ├── coredumps/          crash dumps from the player (not part of the library)
+│   ├── Artwork/<base64url-sha1>.jpg
+│   ├── Stems/<originTrackId> <originDatabaseUuid>.stems
+│   ├── coredumps/<product>_-_<version>.<commit>/   crash dumps from the player
 │   └── user.profile        player settings (JSON)
-└── <music folders>/        the audio files, referenced by relative path
+├── <music folders>/        the audio files, referenced by relative path
+├── SoundSwitch/            SoundSwitch lighting projects (*.ssproj, *.plfix), not Engine data
+└── System Volume Information/   Windows, not Engine data
 ```
 
 The names of `sm.db` and `stm.db` are my guess from their position and emptiness. They share the schema, and each holds its own database UUID.
@@ -69,7 +72,15 @@ Triggers keep `lastEditTime` current, forbid changing or recycling `id`, fill in
 One row per track (`trackId` is the primary key and a foreign key with cascade). The analysis results are all BLOBs, decoded in the next section: `trackData`, `overviewWaveFormData`, `beatData`, `quickCues`, `loops`. Also `thirdPartySourceId` and `activeOnLoadLoops`.
 
 ### `AlbumArt`
-`id`, `hash` (40-hex SHA-1 style string, indexed), `albumArt` (a PNG BLOB; NULL for some rows). `Track.albumArtId` points here.
+`id`, `hash` (indexed), `albumArt` (BLOB). `Track.albumArtId` points here. The rows come in three kinds, told apart by the SQLite type of `hash`:
+
+| Kind | `hash` | `albumArt` | Where the image lives | Rows in `m.db` / `hm.db` |
+| --- | --- | --- | --- | --- |
+| In-database | 40-char hex **text** | 256×256 PNG | In the BLOB | 2,138 / 326 |
+| On disk | **20-byte BLOB** (raw SHA-1 digest) | NULL | `Artwork/<base64url(hash)>.jpg` | 490 / 448 |
+| Empty | NULL | NULL | none | 1 / 1 |
+
+For the hex-text rows I could not work out what is hashed. It is not the SHA-1 of the stored PNG in `m.db` (0 of 2,138), nor in `hm.db` in general (118 of 326), and it did not equal the SHA-1 of the cover embedded in the audio file either (tested on 3 tracks). `Track.albumArt` is the constant string `image://planck/0` on 2,455 tracks and NULL on the rest. `Track.albumArtSourceHash` was NULL on every row.
 
 ### Playlists
 - `Playlist`: `id`, `title`, `parentListId` (0 = top level), `nextListId` (0 = last sibling), `isPersisted`, `lastEditTime`, `isExplicitlyExported`. Siblings form a **singly linked list** through `nextListId` (unique per parent), not an order column.
@@ -122,15 +133,79 @@ Nine trailing bytes after the adjusted markers were not identified. Sanity check
 `i64 count` (8), then per loop: `u8 label length`, label bytes, `f64 start`, `f64 end` (both -1.0 when unset), `u8 start-set`, `u8 end-set`, `4 bytes ARGB colour`. The parse consumed every byte of the BLOB exactly.
 
 ### `overviewWaveFormData` and `OverviewData/*.rgb` (big-endian header)
-Header: `i64` (1024), `i64` (1024), `f64` samples per entry (total samples / 1024). Then 3 bytes per entry. There are 1025 entries for a declared count of 1024. The meaning of the 3 bytes per entry (likely low, mid and high band heights) was not verified. A sample `.rgb` file decompressed to exactly the same size as the database BLOB, so the `.rgb` files appear to duplicate it.
+Header: `i64` (1024), `i64` (1024), `f64` samples per entry (total samples / 1024). Then 3 bytes per entry. There are 1025 entries for a declared count of 1024. The meaning of the 3 bytes per entry (likely low, mid and high band heights) was not verified. The `.rgb` overview files use this same layout (see [OverviewData](#overviewdata)), but their entry values are not the same as the database BLOB.
 
 ## Files outside the databases
 
-- **`Artwork/`**: JPEGs named with a base64url hash. I did not check how they relate to `AlbumArt.hash`.
-- **`OverviewData/<uuid>/<trackId>.rgb`**: one folder per origin database UUID, file named by the track id in that database.
-- **`Stems/<trackId> <uuid>.stems`**: an MP4 container with a single AAC stream of **8 channels** (presumably four stereo stems). ffprobe opens it directly. Stem names/order were not checked.
-- **`user.profile`**: JSON, `{"data":{"User":{"childorder":[...],"children":{...}}}}`. Each setting is an object like `{"string":"88-175","type":4}` or `{"state":true,"type":1}`.
-- **`coredumps/`**: player crash dumps (`.core.zst`, `.log.zst`, `.metadata`). The metadata names the hardware and firmware that wrote the library. Not part of the library format.
+### Artwork
+
+`Artwork/` holds 808 JPEG files, all 256×256 baseline JFIF (749 colour with DPI density, 33 colour with DPCM density, 22 grayscale, 4 with a JPEG comment segment).
+
+- **Filename:** the **SHA-1 digest (20 bytes) of the original cover image as embedded in the audio file, base64url-encoded without padding** (`-` and `_` alphabet, 27 characters, then `.jpg`). I verified this on 5 of 5 tracks by extracting the embedded picture with ffmpeg, hashing it and finding the file.
+- **Link to the database:** an `AlbumArt` row whose `hash` is a 20-byte BLOB and whose `albumArt` is NULL. Base64url-encode the `hash` bytes to get the filename. All 490 such rows in `m.db` and all 448 in `hm.db` resolve to an existing file, and every one of the 808 files is referenced by at least one row, so there are no orphans in this library.
+- **Image size:** the files are re-encoded thumbnails, not the original images. The in-database PNGs are 256×256 too.
+- Both databases can point at the same file, so the 938 rows share the 808 files.
+
+### OverviewData
+
+`Database2/OverviewData/<database-uuid>/<trackId>.rgb`.
+
+- **Folders:** 16 UUID folders, 4 with files and 12 empty. The folder UUID is a database UUID: either the library's own (`Information.uuid` of `m.db` or `hm.db`) or the UUID of a database a track originally came from (`Track.originDatabaseUuid`). `3ea790a9…` held 450 files and is the origin of 3,273 of the 3,294 tracks. `a422b480…` is `m.db` itself (47 files, while only 21 tracks have it as their origin, so I could not explain the rest), and `febbed2a…` is `hm.db` (43 files). The fourth non-empty folder (82 files) matches no database in this library.
+- **File name:** the track id **in the database named by the folder**, i.e. `originTrackId` for an origin UUID. That is why a track's `.rgb` cannot be found by `Track.id` alone.
+- **Content:** the same format as `PerformanceData.overviewWaveFormData`: 4-byte big-endian length, then zlib, decompressing to 3,099 bytes (24-byte header and 1,025 three-byte entries). The first 24 bytes (header) were identical to the database BLOB. The entry bytes were not: the maximum of each channel is roughly 0.65× the value in the database BLOB, but the shape is similar. My reading is that it is the same waveform with different gain or normalisation, but I did not establish what each one is used for.
+- **Coverage:** 622 files in total. 469 matched a track in `m.db` through `(originDatabaseUuid, originTrackId)`, and none was byte-identical to the database BLOB. The other 153 matched no track in `m.db`. I did not check whether they belong to `hm.db`, so I cannot say if they are stale.
+
+### Stems
+
+`Stems/<originTrackId> <originDatabaseUuid>.stems`, 351 files, 8.2 GB, about 13 to 36 MB each.
+
+- **Key:** the name is `originTrackId` and `originDatabaseUuid` from `Track`, separated by a space. All 351 files matched exactly one `Track` row, and all carry the UUID `3ea790a9…`. There is no stems column or table in `m.db`, so the filename is the only link.
+- **Container:** plain MP4 (`ftyp` brand `isom`, compatible `iso2`, `mp41`). Top-level boxes in order: `ftyp`, `free`, `mdat`, `moov`. `moov` holds `mvhd`, a single `trak` and `udta`.
+  - `trak` has `tkhd`, `edts/elst`, and `mdia` with `mdhd`, `hdlr` (handler `soun`, name `SoundHandler`), `minf/smhd`, `dinf/dref` and `stbl`.
+  - `stbl` has `stsd` (one `mp4a` entry: 8 channels, 16-bit field, 44,100 Hz), `stts`, `stsc`, `stsz`, `stco` and `sgpd`/`sbgp` (`roll` grouping).
+  - `udta/meta/ilst` holds only the tag `©too = Lavf58.76.100`.
+- **Audio:** **one** AAC-LC stream, 44.1 kHz, 8 channels, about 645 kbit/s, same duration as the track. Written with ffmpeg (`Lavf58.76.100`, encoder `Lavc58.134.100`).
+- **Channel configuration:** the AudioSpecificConfig has channel configuration 0 and a program config element (PCE) listing five elements: CPE, SCE, CPE, CPE and SCE (3 pairs and 2 mono channels, 8 channels in total). I expected four stereo pairs, which is what the player's stems feature suggests, but the PCE does not say that.
+- **No stem metadata:** there are no stem names, colours or order stored in the file, and I found none in the database. Which channels hold drums, bass, melody and vocals is **unknown**.
+- **Decoding:** ffmpeg 9.0.2 identifies the file but could not decode it. About 99.9% of packets failed with `Prediction is not allowed in AAC-LC` / `Reserved bit set`, with both the `aac` and `aac_fixed` decoders. I did not find the cause. One guess is that the real element order in the bitstream differs from the PCE. So I could not confirm the channel layout or play the audio.
+
+### user.profile
+
+JSON, 9.1 KB, one object:
+
+```json
+{ "data": { "User": { "childorder": ["Name", "..."], "children": { "<Key>": { "type": 4, "string": "Cue Position" } } } } }
+```
+
+`childorder` is the display order of the settings and lists exactly the same 58 keys as `children`. Each entry has a numeric `type` that decides which other field holds the value:
+
+| `type` | Value field | Meaning | Keys (count) |
+| --- | --- | --- | --- |
+| 0 | `value` (number) | Integer | `TrackEndWarningTime` (1) |
+| 1 | `state` (bool) | On/off switch | 21 |
+| 4 | `string` | One choice from a fixed list, stored as its display text | 23 |
+| 8 | `string` | Free text | `Name` (1) |
+| 16 | `color` | `#AARRGGBB` colour | 12 |
+
+The keys, by type:
+
+- **Type 1 (switches):** `OnAirMode`, `NeedleLock`, `ColorizeKey`, `CueToLoopIn`, `SavedLoopBehaviour`, `PausedSavedLoopBehavior`, `LinkBeatJumpLoopSize`, `TimeDisplayMode`, `PadLock`, `IntegrateDemoContent`, `IntegrateSamplerDemoContent`, `DisplayFileName`, `RemoteStartStop`, `PausedHotCueBehaviour`, `PlatterMode`, `MaintainPlayState`, `CensorBehavior`, `MotorizedPlatterTorque`, `TurntableMode`, `StemFxBehavior`, `ShowStemsList`.
+- **Type 4 (choices, with the values seen):** `DefaultPlayBackPosition` (`Cue Position`), `LockPlayingDeck` (`On`), `KeyDisplayMode` (`Camelot`), `QuantizeToGrid` (`1`), `LoopOutMode` (`Off`), `SyncMode` (`Beat`), `SyncButtonAction` (`Shift Disable`), `SyncIndicator` (`Beat Phase`), `PitchBendAction`, `PitchBendBehavior`, `KeySyncMode`, `BpmTolerance` (`±3`), `KeyCompatibility`, `DefaultSpeedRange` (`±8`), `DefaultLoopSize` (`4`), `DefaultBeatJump` (`4`), `BPMRange` (`88-175`), `KeyAdjust`, `CollectionBrowseBehavior`, `Product` (`4 Deck Consoles`), `NudgeSensitivity`, `TrackSpeed` (`33 RPM`), `WaveformStyle` (`Tri-Band`).
+- **Type 16 (colours):** `PlayerColor1` to `PlayerColor4` and `PlayerColor1A`/`1B` to `4A`/`4B`.
+
+Numbers such as loop size are stored as **strings**, and the allowed values per key are not in the file. The profile is device-specific (`Product`, `TrackSpeed`, platter and turntable keys), so a settings editor should keep unknown keys and types intact.
+
+### coredumps
+
+`coredumps/<ProductName>_-_<version>.<commit>/` (here `SC LIVE 4_-_4.3.4.8e09db28ef`) holds one crash with three files sharing the stem `<process>.<UTC timestamp>`:
+
+| File | Content |
+| --- | --- |
+| `.metadata` | Plain `KEY=value` text in sections: process (`PID`, `comm`, `signal`, `timestamp`), `# Hardware` (`PRODUCT`, `PCB_REV`, `SERIAL`), `# /etc/az01-release`, `# /etc/os-release`, `# uname -r`, and a `# Planck` JSON block (`Commit`, `ProductCode`, `ProductName`, `Version`, `airAppReleaseType`). |
+| `.log.zst` | zstd-compressed system journal of the player, 1,105 lines from kernel boot to the crash. |
+| `.core.zst` | zstd-compressed 32-bit ARM ELF core dump of `/usr/SoundSwitch/SoundSwitch -platform offscreen`. |
+
+The crashed process was `SoundSwitch` (the lighting-control app that runs on the player), killed by signal 6 (SIGABRT). The metadata and the log show the player firmware, which is a Buildroot Linux 6.1.111 PREEMPT_RT on ARMv7 with a dm-verity read-only rootfs. These files describe the device, not the library, so a library manager does not need them. The metadata contains the **device serial number** and the log may contain other personal data, so do not publish them or commit them to the repository.
 
 ## Gotchas for an implementation
 
@@ -144,4 +219,4 @@ Header: `i64` (1024), `i64` (1024), `f64` samples per entry (total samples / 102
 
 ## Method
 
-The four databases were copied to a scratch directory and opened read-only with Python's `sqlite3`. Nothing on the drive was modified. Decoding was cross-checked: beat-grid BPM against `bpmAnalyzed`, sample counts against the track data, and exact-length parsing for the cue and loop BLOBs.
+The four databases were copied to a scratch directory and opened read-only with Python's `sqlite3`. Nothing on the drive was modified. Decoding was cross-checked: beat-grid BPM against `bpmAnalyzed`, sample counts against the track data, and exact-length parsing for the cue and loop BLOBs. The other files were inspected with `ffprobe`/`ffmpeg` (stems, and extracting embedded covers to hash them), `zstd` and `file` (coredumps), and short Python scripts (MP4 boxes, the AAC config, JSON, SHA-1/base64url matching).
