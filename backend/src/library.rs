@@ -9,13 +9,16 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::cache::{self, DATABASE_DIR};
 
 const DATABASE: &str = "Database2/m.db";
 const LIBRARY_DIR: &str = "Engine Library";
+const ARTWORK_DIR: &str = "Artwork";
 
 #[derive(Debug)]
 pub enum OpenError {
@@ -64,6 +67,8 @@ pub struct Track {
     pub path: PathBuf,
     /// Streaming tracks (e.g. TIDAL) only exist on the player, never as a file here.
     pub streaming: bool,
+    /// `AlbumArt.id` of the track's cover, for `Library::album_art`.
+    pub album_art: Option<u32>,
 }
 
 /// A playlist or playlist folder. The playlists are stored depth first in display
@@ -88,6 +93,15 @@ pub struct Library {
     pub cache: PathBuf,
     pub tracks: Vec<Track>,
     pub playlists: Vec<Playlist>,
+    /// Kept open to read cover images on demand: they are not loaded with the tracks.
+    art: Mutex<Connection>,
+}
+
+/// A cover image as the file it is stored as.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AlbumArt {
+    pub data: Vec<u8>,
+    pub mime_type: &'static str,
 }
 
 impl Library {
@@ -104,19 +118,86 @@ impl Library {
             cache.join(DATABASE),
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        Self::load(&connection, dir, cache)
+        Self::load(connection, dir, cache)
     }
 
-    fn load(connection: &Connection, dir: PathBuf, cache: PathBuf) -> Result<Self, OpenError> {
-        let (tracks, by_id, by_origin) = load_tracks(connection, &dir)?;
-        let playlists = load_playlists(connection, &by_id, &by_origin)?;
+    fn load(connection: Connection, dir: PathBuf, cache: PathBuf) -> Result<Self, OpenError> {
+        let (tracks, by_id, by_origin) = load_tracks(&connection, &dir)?;
+        let playlists = load_playlists(&connection, &by_id, &by_origin)?;
         Ok(Self {
             dir,
             cache,
             tracks,
             playlists,
+            art: Mutex::new(connection),
         })
     }
+
+    /// The cover image with the `AlbumArt` id `id`, if there is one on this machine.
+    ///
+    /// Covers are stored in one of three ways (see `docs/engine-library-format.md`):
+    /// as an image in the database, as a JPEG in the library's `Artwork` folder named
+    /// after the row's raw hash, or as a streaming URL, which has no image to give.
+    pub fn album_art(&self, id: u32) -> rusqlite::Result<Option<AlbumArt>> {
+        let (hash, image): (Value, Value) = {
+            let connection = self.art.lock().expect("database lock");
+            let row = connection.query_row(
+                "SELECT hash, albumArt FROM AlbumArt WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            );
+            match row {
+                Ok(row) => row,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        };
+
+        let data = match (image, hash) {
+            (Value::Blob(data), _) => data,
+            (Value::Null, Value::Blob(hash)) => {
+                let file = self
+                    .dir
+                    .join(ARTWORK_DIR)
+                    .join(format!("{}.jpg", base64_url(&hash)));
+                match std::fs::read(file) {
+                    Ok(data) => data,
+                    Err(_) => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        };
+        // Judge by the content, not by where it came from: a streaming row's "image"
+        // is a URL, not a picture.
+        Ok(image_type(&data).map(|mime_type| AlbumArt { data, mime_type }))
+    }
+}
+
+fn image_type(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else {
+        None
+    }
+}
+
+/// URL-safe base64 without padding, which is how `Artwork` files are named after a hash.
+fn base64_url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, byte)| n | u32::from(*byte) << (16 - 8 * i));
+        // 1 byte gives 2 characters, 2 bytes give 3, 3 bytes give 4.
+        for i in 0..=chunk.len() {
+            out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
 }
 
 /// Finds the `Engine Library` folder for a user-chosen path.
@@ -139,7 +220,7 @@ fn load_tracks(
 ) -> rusqlite::Result<(Vec<Track>, TrackIds, TrackOrigins)> {
     let mut statement = connection.prepare(
         "SELECT id, title, artist, album, genre, bpmAnalyzed, bpm, length, path, \
-                streamingSource, originDatabaseUuid, originTrackId \
+                streamingSource, originDatabaseUuid, originTrackId, albumArtId \
          FROM Track ORDER BY id",
     )?;
     let mut rows = statement.query([])?;
@@ -184,6 +265,7 @@ fn load_tracks(
             streaming: row
                 .get::<_, Option<String>>(9)?
                 .is_some_and(|source| !source.is_empty()),
+            album_art: number(12)?.filter(|id| *id > 0.0).map(|id| id as u32),
         });
     }
 
@@ -315,15 +397,23 @@ mod tests {
 
     const FIXTURE: &str = "CREATE TABLE Track (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, album TEXT,
                     genre TEXT, bpmAnalyzed REAL, bpm INTEGER, length INTEGER, path TEXT,
-                    streamingSource TEXT, originDatabaseUuid TEXT, originTrackId INTEGER);
+                    streamingSource TEXT, originDatabaseUuid TEXT, originTrackId INTEGER, albumArtId INTEGER);
+                 CREATE TABLE AlbumArt (id INTEGER PRIMARY KEY, hash, albumArt);
                  CREATE TABLE Playlist (id INTEGER PRIMARY KEY, title TEXT, parentListId INTEGER,
                     nextListId INTEGER);
                  CREATE TABLE PlaylistEntity (id INTEGER PRIMARY KEY, listId INTEGER,
                     trackId INTEGER, databaseUuid TEXT, nextEntityId INTEGER);
                  INSERT INTO Track VALUES
-                    (1, 'One', 'A', 'X', 'House', 124.0, 124, 200, '../Music/one.flac', NULL, 'db', 1),
-                    (2, NULL, NULL, NULL, NULL, NULL, 90, NULL, '../Music/two.mp3', NULL, 'db', 2),
-                    (3, 'Three', 'C', 'Z', 'Techno', 0.0, 0, 61, '../tidal/three.mp4', 'TIDAL', 'other', 7);
+                    (1, 'One', 'A', 'X', 'House', 124.0, 124, 200, '../Music/one.flac', NULL, 'db', 1, 1),
+                    (2, NULL, NULL, NULL, NULL, NULL, 90, NULL, '../Music/two.mp3', NULL, 'db', 2, 2),
+                    (3, 'Three', 'C', 'Z', 'Techno', 0.0, 0, 61, '../tidal/three.mp4', 'TIDAL', 'other', 7, 3);
+                 -- Covers: an image in the database, a raw hash (the image is a file in
+                 -- Artwork/), a streaming URL, and a hash with no file.
+                 INSERT INTO AlbumArt VALUES
+                    (1, 'abc123', x'89504e470d0a1a0a0001'),
+                    (2, x'fbff0011223344556677889900aabbccddeeff00', NULL),
+                    (3, 'URI:12ab', CAST('image://streaming/https%3A%2F%2Fexample.com%2Fa.jpg' AS BLOB)),
+                    (4, x'0000000000000000000000000000000000000000', NULL);
                  -- Roots in order: Beta (2) -> Alpha (1). Alpha holds Child (3).
                  INSERT INTO Playlist VALUES (1, 'Alpha', 0, 0), (2, 'Beta', 0, 1), (3, 'Child', 1, 0);
                  -- Beta lists tracks 3, 1, 2 (3 by its origin id 7).
@@ -356,7 +446,7 @@ mod tests {
     #[test]
     fn loads_tracks_with_fallbacks() {
         let library =
-            Library::load(&database(), PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
+            Library::load(database(), PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
 
         assert_eq!(library.tracks.len(), 3);
         let one = &library.tracks[0];
@@ -378,12 +468,15 @@ mod tests {
         let three = &library.tracks[2];
         assert_eq!(three.bpm, None, "a bpm of 0 means unknown");
         assert!(three.streaming);
+
+        let covers: Vec<_> = library.tracks.iter().map(|t| t.album_art).collect();
+        assert_eq!(covers, [Some(1), Some(2), Some(3)]);
     }
 
     #[test]
     fn orders_playlists_depth_first_by_sibling_links() {
         let library =
-            Library::load(&database(), PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
+            Library::load(database(), PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
 
         let shape: Vec<_> = library
             .playlists
@@ -403,7 +496,7 @@ mod tests {
     #[test]
     fn orders_playlist_tracks_and_resolves_origin_ids() {
         let library =
-            Library::load(&database(), PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
+            Library::load(database(), PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
 
         // Entity 12 -> 10 -> 11, and the entity for the missing track 99 is dropped.
         // Track 3 is found through its origin ('other', 7), not its own id.
@@ -454,6 +547,71 @@ mod tests {
             Library::open(&root.join("nowhere"), &root.join("cache")),
             Err(OpenError::NotALibrary(_))
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn encodes_base64_without_padding_in_the_url_alphabet() {
+        assert_eq!(base64_url(b""), "");
+        assert_eq!(base64_url(b"f"), "Zg");
+        assert_eq!(base64_url(b"fo"), "Zm8");
+        assert_eq!(base64_url(b"foobar"), "Zm9vYmFy");
+        // The two characters that differ from standard base64.
+        assert_eq!(base64_url(&[0xfb, 0xff, 0xbf]), "-_-_");
+    }
+
+    #[test]
+    fn recognises_images_by_their_content() {
+        assert_eq!(image_type(b"\x89PNG\r\n\x1a\n...."), Some("image/png"));
+        assert_eq!(image_type(&[0xff, 0xd8, 0xff, 0xe0]), Some("image/jpeg"));
+        assert_eq!(image_type(b"image://streaming/x"), None);
+        assert_eq!(image_type(b""), None);
+    }
+
+    #[test]
+    fn finds_covers_in_the_database_and_the_artwork_folder() {
+        let root = std::env::temp_dir().join(format!("open-engine-lib-art-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = root.join(LIBRARY_DIR);
+        std::fs::create_dir_all(library.join(DATABASE_DIR)).unwrap();
+        std::fs::create_dir_all(library.join(ARTWORK_DIR)).unwrap();
+        Connection::open(library.join(DATABASE))
+            .unwrap()
+            .execute_batch(FIXTURE)
+            .unwrap();
+        // The file for cover 2 is named after its hash.
+        let hash = [
+            0xfb, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00, 0xaa,
+            0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
+        ];
+        std::fs::write(
+            library
+                .join(ARTWORK_DIR)
+                .join(format!("{}.jpg", base64_url(&hash))),
+            [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3],
+        )
+        .unwrap();
+
+        let opened = Library::open(&root, &root.join("cache")).unwrap();
+
+        let in_database = opened.album_art(1).unwrap().unwrap();
+        assert_eq!(in_database.mime_type, "image/png");
+        assert_eq!(
+            in_database.data,
+            [0x89, b'P', b'N', b'G', 13, 10, 26, 10, 0, 1]
+        );
+
+        let on_disk = opened.album_art(2).unwrap().unwrap();
+        assert_eq!(on_disk.mime_type, "image/jpeg");
+        assert_eq!(on_disk.data, [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+
+        assert_eq!(
+            opened.album_art(3).unwrap(),
+            None,
+            "a streaming url is not an image"
+        );
+        assert_eq!(opened.album_art(4).unwrap(), None, "the file is missing");
+        assert_eq!(opened.album_art(99).unwrap(), None, "no such cover");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

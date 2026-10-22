@@ -11,8 +11,8 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, GetInfoRequest, ListPlaylistsRequest, ListTracksRequest,
-    OpenLibraryRequest, PlayRequest, PlaybackErrorKind, PlaybackState,
+    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, ListPlaylistsRequest,
+    ListTracksRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind, PlaybackState,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -23,14 +23,17 @@ const TOKEN: &str = "test-token";
 
 const FIXTURE: &str = "CREATE TABLE Track (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, album TEXT,
         genre TEXT, bpmAnalyzed REAL, bpm INTEGER, length INTEGER, path TEXT,
-        streamingSource TEXT, originDatabaseUuid TEXT, originTrackId INTEGER);
+        streamingSource TEXT, originDatabaseUuid TEXT, originTrackId INTEGER, albumArtId INTEGER);
+    CREATE TABLE AlbumArt (id INTEGER PRIMARY KEY, hash, albumArt);
     CREATE TABLE Playlist (id INTEGER PRIMARY KEY, title TEXT, parentListId INTEGER, nextListId INTEGER);
     CREATE TABLE PlaylistEntity (id INTEGER PRIMARY KEY, listId INTEGER, trackId INTEGER,
         databaseUuid TEXT, nextEntityId INTEGER);
     INSERT INTO Track VALUES
-        (1, 'One', 'A', 'X', 'House', 124.0, 124, 200, '../Music/one.flac', NULL, 'db', 1),
-        (2, 'Two', 'B', 'Y', 'Techno', 130.5, 130, 61, '../Music/two.mp3', NULL, 'db', 2),
-        (3, 'Three', 'C', 'Z', 'Pop', 0.0, 0, 90, '../tidal/three.mp4', 'TIDAL', 'db', 3);
+        (1, 'One', 'A', 'X', 'House', 124.0, 124, 200, '../Music/one.flac', NULL, 'db', 1, 1),
+        (2, 'Two', 'B', 'Y', 'Techno', 130.5, 130, 61, '../Music/two.mp3', NULL, 'db', 2, 1),
+        (3, 'Three', 'C', 'Z', 'Pop', 0.0, 0, 90, '../tidal/three.mp4', 'TIDAL', 'db', 3, 2);
+    INSERT INTO AlbumArt VALUES (1, 'abc', x'89504e470d0a1a0a0001'),
+        (2, 'URI:1', CAST('image://streaming/x' AS BLOB));
     -- Roots in order: Beta -> Alpha, Alpha holds Child.
     INSERT INTO Playlist VALUES (1, 'Alpha', 0, 0), (2, 'Beta', 0, 1), (3, 'Child', 1, 0);
     INSERT INTO PlaylistEntity VALUES (10, 2, 3, 'db', 11), (11, 2, 1, 'db', 0);";
@@ -220,6 +223,28 @@ async fn serves_the_api_over_grpc() {
     );
     assert_eq!(tracks[2].bpm, None);
     assert!(tracks[2].streaming && !tracks[0].streaming);
+    // Tracks of one album share a cover.
+    assert_eq!(
+        tracks.iter().map(|t| t.album_art_id).collect::<Vec<_>>(),
+        [Some(1), Some(1), Some(2)]
+    );
+
+    let cover = library
+        .get_album_art(GetAlbumArtRequest { id: 1 })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(cover.mime_type, "image/png");
+    assert!(cover.data.starts_with(b"\x89PNG"));
+    // A streaming track's cover is only a URL, and unknown ids don't exist.
+    assert_eq!(
+        code(library.get_album_art(GetAlbumArtRequest { id: 2 }).await),
+        Code::NotFound
+    );
+    assert_eq!(
+        code(library.get_album_art(GetAlbumArtRequest { id: 77 }).await),
+        Code::NotFound
+    );
 
     let playlists = library
         .list_playlists(ListPlaylistsRequest {})
@@ -432,4 +457,79 @@ async fn plays_from_a_real_library() {
         .unwrap()
         .into_inner();
     assert_eq!(status.state(), PlaybackState::Stopped);
+}
+
+/// Fetches every cover of a real library: `OPEN_ENGINE_TEST_LIBRARY=... cargo test -p
+/// open-engine-backend --test grpc covers -- --ignored --nocapture`. Silent, unlike the
+/// playback test.
+#[tokio::test]
+#[ignore = "needs a real library (OPEN_ENGINE_TEST_LIBRARY)"]
+async fn serves_covers_from_a_real_library() {
+    let path = std::env::var("OPEN_ENGINE_TEST_LIBRARY").expect("OPEN_ENGINE_TEST_LIBRARY");
+    let temp = TempDir::new("covers");
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    library
+        .open_library(OpenLibraryRequest { path })
+        .await
+        .unwrap();
+
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let mut tracks = Vec::new();
+    while let Some(batch) = stream.message().await.unwrap() {
+        tracks.extend(batch.tracks);
+    }
+
+    let mut ids: Vec<u32> = tracks
+        .iter()
+        .filter_map(|track| track.album_art_id)
+        .collect();
+    let without = tracks.len() - ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let (mut png, mut jpeg, mut missing, mut bytes) = (0, 0, 0, 0);
+    let started = Instant::now();
+    for id in &ids {
+        match library.get_album_art(GetAlbumArtRequest { id: *id }).await {
+            Ok(cover) => {
+                let cover = cover.into_inner();
+                bytes += cover.data.len();
+                match cover.mime_type.as_str() {
+                    "image/png" => {
+                        assert!(cover.data.starts_with(b"\x89PNG"));
+                        png += 1;
+                    }
+                    "image/jpeg" => {
+                        assert!(cover.data.starts_with(&[0xff, 0xd8, 0xff]));
+                        jpeg += 1;
+                    }
+                    other => panic!("unexpected type {other}"),
+                }
+            }
+            Err(status) => {
+                assert_eq!(status.code(), Code::NotFound);
+                missing += 1;
+            }
+        }
+    }
+    println!(
+        "{} tracks: {} without a cover id; {} distinct covers: {png} png, {jpeg} jpeg, \
+         {missing} not available; {bytes} bytes in {:?}",
+        tracks.len(),
+        without,
+        ids.len(),
+        started.elapsed()
+    );
+    let streaming_missing = tracks
+        .iter()
+        .filter(|track| track.streaming && track.album_art_id.is_some())
+        .count();
+    println!("{streaming_missing} streaming tracks have a cover id (their covers are URLs)");
 }

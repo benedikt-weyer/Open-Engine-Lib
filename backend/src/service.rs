@@ -149,6 +149,25 @@ impl LibraryService for Service {
             .collect();
         Ok(Response::new(api::ListPlaylistsResponse { playlists }))
     }
+
+    async fn get_album_art(
+        &self,
+        request: Request<api::GetAlbumArtRequest>,
+    ) -> Result<Response<api::GetAlbumArtResponse>, Status> {
+        let library = self.library()?;
+        let id = request.into_inner().id;
+
+        // Reads a file, so keep it off the async threads.
+        let art = tokio::task::spawn_blocking(move || library.album_art(id))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(|error| Status::internal(error.to_string()))?
+            .ok_or_else(|| Status::not_found(format!("no image for cover {id}")))?;
+        Ok(Response::new(api::GetAlbumArtResponse {
+            data: art.data,
+            mime_type: art.mime_type.to_owned(),
+        }))
+    }
 }
 
 fn track_message(id: u32, track: &library::Track) -> api::Track {
@@ -161,6 +180,7 @@ fn track_message(id: u32, track: &library::Track) -> api::Track {
         bpm: track.bpm,
         length_seconds: track.length,
         streaming: track.streaming,
+        album_art_id: track.album_art,
     }
 }
 

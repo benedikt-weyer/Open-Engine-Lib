@@ -3,6 +3,7 @@
 mod backend;
 mod browser;
 mod config;
+mod covers;
 mod i18n;
 mod model;
 mod navbar;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use backend::{Backend, Control};
 use browser::{Browser, Source};
 use config::{ConfigStore, Language, Locations, ThemeMode};
+use covers::Covers;
 use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
@@ -69,6 +71,8 @@ struct State {
     open_when_ready: Option<PathBuf>,
     library: LibraryState,
     recents: Recents,
+    /// Cover images fetched for the tracks in view and the one playing.
+    covers: Covers,
     /// Why the recent libraries could not be saved.
     recents_error: Option<String>,
     /// What the backend last said about playback.
@@ -114,6 +118,8 @@ pub enum Message {
     SeekDragged(f32),
     SeekReleased,
     Status(Result<PlaybackStatus, String>),
+    /// A fetched cover: the covers' generation it was asked in, its id and its image.
+    CoverLoaded(u32, u32, Result<Option<Vec<u8>>, String>),
 }
 
 impl State {
@@ -126,6 +132,7 @@ impl State {
             open_when_ready: std::env::args_os().nth(1).map(PathBuf::from),
             library: LibraryState::Closed { error: None },
             recents: Recents::discover(),
+            covers: Covers::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
             play_source: None,
@@ -172,6 +179,7 @@ impl State {
             return Task::none();
         };
         self.reset_playback();
+        self.covers.clear();
         self.library = LibraryState::Opening(path.clone());
         Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
     }
@@ -210,6 +218,27 @@ impl State {
         self.status.queue_position.map(|position| position as usize)
     }
 
+    /// Asks the backend for the covers of the rows in view and of the playing track
+    /// that have not been asked for yet.
+    fn fetch_covers(&mut self) -> Task<Message> {
+        let (Some(backend), LibraryState::Open(browser)) = (self.backend(), &self.library) else {
+            return Task::none();
+        };
+        let playing = self
+            .status
+            .track_id
+            .and_then(|id| browser.library.track_by_id(id))
+            .and_then(|track| track.album_art);
+        let wanted = browser.visible_covers().chain(playing);
+
+        let generation = self.covers.generation();
+        Task::batch(self.covers.claim_unrequested(wanted).into_iter().map(|id| {
+            Task::perform(backend::album_art(backend.clone(), id), move |result| {
+                Message::CoverLoaded(generation, id, result)
+            })
+        }))
+    }
+
     fn is_stopped(&self) -> bool {
         !matches!(
             self.status.state(),
@@ -225,7 +254,13 @@ fn start_backend() -> Task<Message> {
     )
 }
 
+/// Handles a message, then fetches whatever covers the result has put on screen.
 fn update(state: &mut State, message: Message) -> Task<Message> {
+    let task = handle(state, message);
+    Task::batch([task, state.fetch_covers()])
+}
+
+fn handle(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::Navigate(page) => state.page = page,
         Message::ThemeSelected(theme) => {
@@ -294,6 +329,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::CloseLibrary => {
             state.library = LibraryState::Closed { error: None };
             state.reset_playback();
+            state.covers.clear();
             if let Some(backend) = state.backend() {
                 return Task::perform(backend::close_library(backend), Message::LibraryClosed);
             }
@@ -374,6 +410,13 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::Status(Err(error)) => state.backend_error = Some(error),
+        Message::CoverLoaded(generation, id, result) => match result {
+            Ok(image) => state.covers.set(generation, id, image),
+            Err(error) => {
+                state.covers.set(generation, id, None);
+                state.backend_error = Some(error);
+            }
+        },
     }
     Task::none()
 }
@@ -508,6 +551,10 @@ fn open_library<'a>(
     let bar = player_bar::view(
         language,
         player_bar::Bar {
+            cover: now
+                .as_ref()
+                .and_then(|now| now.track.album_art)
+                .and_then(|id| state.covers.get(id)),
             now,
             can_start: !browser.tracks().is_empty(),
         },
@@ -515,7 +562,7 @@ fn open_library<'a>(
 
     let mut page = column![
         header,
-        browser::tracks(browser, state.playing_row(browser), language),
+        browser::tracks(browser, state.playing_row(browser), &state.covers, language),
         bar
     ]
     .spacing(10)

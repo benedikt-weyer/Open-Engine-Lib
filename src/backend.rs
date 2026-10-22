@@ -18,9 +18,9 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, GetInfoRequest, ListPlaylistsRequest, ListTracksRequest, NextRequest,
-    OpenLibraryRequest, PlayRequest, PlaybackStatus, PreviousRequest, SeekRequest, StopRequest,
-    TogglePauseRequest,
+    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, ListPlaylistsRequest,
+    ListTracksRequest, NextRequest, OpenLibraryRequest, PlayRequest, PlaybackStatus,
+    PreviousRequest, SeekRequest, StopRequest, TogglePauseRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -214,6 +214,7 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
             bpm: track.bpm,
             length: track.length_seconds,
             streaming: track.streaming,
+            album_art: track.album_art_id,
         }));
     }
 
@@ -248,6 +249,19 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
         tracks,
         playlists,
     )))
+}
+
+/// Fetches a cover image: `None` if the backend has no image for it.
+pub async fn album_art(mut backend: Backend, id: u32) -> Result<Option<Vec<u8>>, String> {
+    match backend
+        .library
+        .get_album_art(GetAlbumArtRequest { id })
+        .await
+    {
+        Ok(response) => Ok(Some(response.into_inner().data)),
+        Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+        Err(status) => Err(describe(status)),
+    }
 }
 
 pub async fn close_library(mut backend: Backend) -> Result<(), String> {

@@ -19,6 +19,10 @@ service LibraryService {
   // All playlists, depth first in display order, each with its tracks.
   // Error: FAILED_PRECONDITION if no library is open.
   rpc ListPlaylists(ListPlaylistsRequest) returns (ListPlaylistsResponse);
+  // The cover image with the given `Track.album_art_id`.
+  // Errors: FAILED_PRECONDITION if no library is open, NOT_FOUND if the id is unknown
+  // or its image is not available on this machine (e.g. covers of streaming tracks).
+  rpc GetAlbumArt(GetAlbumArtRequest) returns (GetAlbumArtResponse);
 }
 
 message OpenLibraryRequest {
@@ -58,6 +62,21 @@ message Track {
   optional uint32 length_seconds = 7;
   // Streaming tracks (e.g. TIDAL) have no file on this machine and can't be played.
   bool streaming = 8;
+  // Which cover the track has, for GetAlbumArt. Tracks that share a cover (an album)
+  // share the id. Unset if the track has none. The image may still turn out not to be
+  // available, see GetAlbumArt.
+  optional uint32 album_art_id = 9;
+}
+
+message GetAlbumArtRequest {
+  uint32 id = 1;
+}
+
+message GetAlbumArtResponse {
+  // The encoded image file.
+  bytes data = 1;
+  // `image/png` or `image/jpeg`.
+  string mime_type = 2;
 }
 
 message ListPlaylistsRequest {}

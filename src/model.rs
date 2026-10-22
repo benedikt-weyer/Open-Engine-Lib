@@ -15,6 +15,8 @@ pub struct Track {
     pub length: Option<u32>,
     /// Streaming tracks have no file on this machine, so they can't be played.
     pub streaming: bool,
+    /// The cover's id for the backend. Tracks of one album share it.
+    pub album_art: Option<u32>,
 }
 
 /// A playlist or playlist folder. Playlists are stored depth first in display order,
@@ -80,6 +82,7 @@ mod tests {
             bpm: None,
             length: None,
             streaming: false,
+            album_art: None,
         };
         let library = Library::new(
             "/lib".into(),

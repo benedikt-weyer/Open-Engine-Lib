@@ -1,12 +1,16 @@
 //! The playback controls at the bottom of the library page.
 
-use iced::widget::{button, row, slider, text};
+use iced::widget::image::Handle;
+use iced::widget::{button, container, image, row, slider, text};
 use iced::{Element, Fill};
 
 use crate::Message;
 use crate::browser::format_time;
 use crate::config::Language;
 use crate::model::Track;
+
+/// Side of the cover next to the controls.
+const COVER: f32 = 56.0;
 
 pub struct NowPlaying<'a> {
     pub track: &'a Track,
@@ -17,6 +21,8 @@ pub struct NowPlaying<'a> {
 
 pub struct Bar<'a> {
     pub now: Option<NowPlaying<'a>>,
+    /// The cover of the playing track, if it has one and it has been fetched.
+    pub cover: Option<&'a Handle>,
     /// The play button also starts the selected track, so it is enabled whenever
     /// there is something to start.
     pub can_start: bool,
@@ -47,7 +53,16 @@ pub fn view<'a>(language: Language, bar: Bar<'a>) -> Element<'a, Message> {
         None => (strings.nothing_playing.clone(), 0.0, 0.0),
     };
 
+    let cover: iced::Element<'a, Message> = match bar.cover {
+        Some(handle) => image(handle.clone()).into(),
+        None => iced::widget::Space::new().into(),
+    };
+
     row![
+        container(cover)
+            .width(COVER)
+            .height(COVER)
+            .style(container::bordered_box),
         control(&strings.previous, Message::Previous, playing),
         control(
             if running {

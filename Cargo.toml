@@ -18,7 +18,7 @@ default-run = "open-engine-lib"
 [dependencies]
 dirs = "7.0.0"
 getrandom = "0.4.3"
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "image"] }
 open-engine-api = { version = "0.1.0", path = "api" }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }

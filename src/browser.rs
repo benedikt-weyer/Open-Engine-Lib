@@ -2,18 +2,23 @@
 //! tracks of the chosen playlist on the right.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Arc;
 
-use iced::widget::{Space, button, column, container, mouse_area, row, scrollable, text};
-use iced::{Element, Fill, Length, Theme};
+use iced::widget::image::Handle;
+use iced::widget::{Space, button, column, container, image, mouse_area, row, scrollable, text};
+use iced::{ContentFit, Element, Fill, Length, Theme};
 
 use crate::Message;
 use crate::config::Language;
+use crate::covers::Covers;
 use crate::i18n::fill;
 use crate::model::{Library, Track};
 
 /// Height of one track row. Fixed, so only the rows in view have to be built.
-const ROW_HEIGHT: f32 = 28.0;
+const ROW_HEIGHT: f32 = 32.0;
+/// Side of the cover thumbnail in a row.
+const THUMBNAIL: f32 = 28.0;
 /// Rows built above and below the visible ones, so scrolling doesn't show gaps.
 const ROW_BUFFER: usize = 10;
 /// Window heights vary and resizing sends no scroll event, so always build at least
@@ -62,6 +67,21 @@ impl Browser {
             Source::Collection => &self.all,
             Source::Playlist(index) => &self.library.playlists[index].tracks,
         }
+    }
+
+    /// The rows of the shown list that are built: the ones in view plus a margin.
+    pub fn visible_rows(&self) -> Range<usize> {
+        let first = ((self.scroll / ROW_HEIGHT) as usize).saturating_sub(ROW_BUFFER);
+        let visible = (self.viewport_height.max(MIN_VIEWPORT) / ROW_HEIGHT).ceil() as usize;
+        let last = (first + visible + 2 * ROW_BUFFER).min(self.tracks().len());
+        first.min(last)..last
+    }
+
+    /// The covers of the rows that are built, which are the ones to have ready.
+    pub fn visible_covers(&self) -> impl Iterator<Item = u32> + '_ {
+        let list = self.tracks();
+        self.visible_rows()
+            .filter_map(move |row| self.library.tracks[list[row]].album_art)
     }
 
     pub fn show(&mut self, source: Source) {
@@ -160,8 +180,9 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
 }
 
 /// Column widths, shared by the header and the rows. The first is the "now playing" marker.
-const WIDTHS: [Length; 7] = [
+const WIDTHS: [Length; 8] = [
     Length::Fixed(24.0),
+    Length::Fixed(THUMBNAIL),
     Length::FillPortion(5),
     Length::FillPortion(3),
     Length::FillPortion(3),
@@ -170,7 +191,7 @@ const WIDTHS: [Length; 7] = [
     Length::Fixed(64.0),
 ];
 
-fn line<'a>(cells: [Element<'a, Message>; 7]) -> row::Row<'a, Message> {
+fn line<'a>(cells: [Element<'a, Message>; 8]) -> row::Row<'a, Message> {
     let mut line = row![].spacing(8).align_y(iced::Center).padding([0, 8]);
     for (cell, width) in cells.into_iter().zip(WIDTHS) {
         line = line.push(container(cell).width(width).clip(true));
@@ -186,6 +207,7 @@ fn cell<'a>(content: impl iced::widget::text::IntoFragment<'a>) -> text::Text<'a
 pub fn tracks<'a>(
     browser: &'a Browser,
     playing: Option<usize>,
+    covers: &Covers,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -198,6 +220,7 @@ pub fn tracks<'a>(
     .size(20);
 
     let header = container(line([
+        Space::new().into(),
         Space::new().into(),
         cell(&strings.col_title).style(text::secondary).into(),
         cell(&strings.col_artist).style(text::secondary).into(),
@@ -218,10 +241,10 @@ pub fn tracks<'a>(
     }
 
     // Only the rows near the viewport exist; spacers stand in for the rest.
-    let first = ((browser.scroll / ROW_HEIGHT) as usize).saturating_sub(ROW_BUFFER);
-    let visible = (browser.viewport_height.max(MIN_VIEWPORT) / ROW_HEIGHT).ceil() as usize;
-    let last = (first + visible + 2 * ROW_BUFFER).min(list.len());
-    let first = first.min(last);
+    let Range {
+        start: first,
+        end: last,
+    } = browser.visible_rows();
 
     let mut body = column![Space::new().height(first as f32 * ROW_HEIGHT)];
     for (row_index, &track_index) in list.iter().enumerate().take(last).skip(first) {
@@ -231,6 +254,7 @@ pub fn tracks<'a>(
             row_index,
             browser.selected == Some(row_index),
             playing == Some(row_index),
+            track.album_art.and_then(|id| covers.get(id)),
         ));
     }
     body = body.push(Space::new().height((list.len() - last) as f32 * ROW_HEIGHT));
@@ -264,6 +288,7 @@ fn track_row<'a>(
     row_index: usize,
     selected: bool,
     playing: bool,
+    cover: Option<&Handle>,
 ) -> Element<'a, Message> {
     // Streaming tracks have no file here, so they can be seen but not played.
     let style = |content: text::Text<'a>| -> Element<'a, Message> {
@@ -277,8 +302,19 @@ fn track_row<'a>(
     let bpm = track.bpm.map(|bpm| format!("{bpm:.1}")).unwrap_or_default();
     let length = track.length.map(format_time).unwrap_or_default();
 
+    // Covers that are still loading, or that don't exist, leave the space empty.
+    let thumbnail: Element<'a, Message> = match cover {
+        Some(handle) => image(handle.clone())
+            .width(THUMBNAIL)
+            .height(THUMBNAIL)
+            .content_fit(ContentFit::Contain)
+            .into(),
+        None => Space::new().into(),
+    };
+
     let cells = line([
         cell(if playing { "▶" } else { "" }).into(),
+        thumbnail,
         style(cell(&track.title)),
         style(cell(&track.artist)),
         style(cell(&track.album)),
