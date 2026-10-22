@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use iced::mouse;
 use std::ops::Range;
 
-use iced::widget::canvas::{Action, Frame, Geometry, Path};
+use iced::widget::canvas::{Action, Frame, Geometry, Path, Text};
 use iced::widget::{canvas, column, container, pick_list, row, text};
-use iced::{Color, Element, Event, Fill, Point, Rectangle, Renderer, Size, Theme, window};
+use iced::{Color, Element, Event, Fill, Pixels, Point, Rectangle, Renderer, Size, Theme, window};
 
 use crate::Message;
 use crate::clock::Clock;
@@ -226,6 +226,38 @@ fn paint_colored(
     }
 }
 
+/// Writes a beat's number at the top, just right of its line, on a dim backing so it
+/// can be read over the waveform.
+fn paint_beat_number(frame: &mut Frame, line_x: f32, label: String, bar_start: bool) {
+    let (size, alpha) = if bar_start {
+        (13.0, 0.95)
+    } else {
+        (11.0, 0.65)
+    };
+    // About as wide as the text is, which is a bit over half its size per character.
+    let width = label.chars().count() as f32 * size * 0.6 + 6.0;
+    let origin = Point::new(line_x + 3.0, 2.0);
+
+    frame.fill_rectangle(
+        origin,
+        Size::new(width, size + 4.0),
+        Color {
+            a: 0.7,
+            ..BACKGROUND
+        },
+    );
+    frame.fill_text(Text {
+        content: label,
+        position: Point::new(origin.x + 3.0, origin.y + 2.0),
+        color: Color {
+            a: alpha,
+            ..Color::WHITE
+        },
+        size: Pixels(size),
+        ..Text::default()
+    });
+}
+
 /// The scrolling waveform around the playhead.
 struct Zoomed<'a> {
     waveform: &'a Waveform,
@@ -296,14 +328,26 @@ impl canvas::Program<Message> for Zoomed<'_> {
                 } else {
                     (0.4, 1.0)
                 };
+                let x = x_of(beat.time);
                 frame.fill_rectangle(
-                    Point::new(x_of(beat.time) - line / 2.0, 0.0),
+                    Point::new(x - line / 2.0, 0.0),
                     Size::new(line, height),
                     Color {
                         a: alpha,
                         ..Color::WHITE
                     },
                 );
+
+                // The bar and the beat in it ("17.1" is the first beat of bar 17). The
+                // first beat of a bar is brighter and larger.
+                if let Some((bar, in_bar)) = beat.bar_and_beat() {
+                    paint_beat_number(
+                        &mut frame,
+                        x,
+                        format!("{bar}.{in_bar}"),
+                        beat.is_bar_start(),
+                    );
+                }
             }
         }
 

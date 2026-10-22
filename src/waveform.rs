@@ -32,6 +32,13 @@ impl Beat {
     pub fn is_bar_start(&self) -> bool {
         self.number.rem_euclid(4) == 0
     }
+
+    /// Where the beat is in the song as a bar and the beat in it, both counted from 1:
+    /// beat 0 is the first beat of bar 1. `None` for the beats before the first one,
+    /// which are not in the song.
+    pub fn bar_and_beat(&self) -> Option<(i64, i64)> {
+        (self.number >= 0).then(|| (self.number / 4 + 1, self.number % 4 + 1))
+    }
 }
 
 /// Where the beats are: evenly spaced between two markers, and carried on at the
@@ -300,6 +307,18 @@ mod tests {
             times(&grid.beats(2.0, 3.0)),
             [(2.0, 4), (2.25, 5), (2.5, 6), (2.75, 7), (3.0, 8)]
         );
+    }
+
+    #[test]
+    fn beats_are_counted_in_bars_from_one() {
+        let at = |number| Beat { time: 0.0, number }.bar_and_beat();
+        assert_eq!(at(0), Some((1, 1)));
+        assert_eq!(at(3), Some((1, 4)));
+        assert_eq!(at(4), Some((2, 1)));
+        assert_eq!(at(9), Some((3, 2)));
+        assert_eq!(at(127), Some((32, 4)));
+        assert_eq!(at(-1), None, "before the song");
+        assert_eq!(at(-4), None);
     }
 
     #[test]

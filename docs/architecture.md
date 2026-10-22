@@ -52,7 +52,7 @@ The `.proto` files are compiled in pure Rust (`protox`), so building needs no `p
 
 ## Waveform and beatgrid
 
-While a song is loaded in the player, the UI shows a DJ-style deck above the player bar: a zoomed waveform (6 seconds) scrolling past a fixed playhead with the beatgrid drawn over it, the first beat of every bar stronger, and the whole track below it. Clicking the overview jumps there. How it is colored is a setting (`waveform_colors`, on the Settings page and in the NixOS module) that can also be changed from a menu right under the waveform:
+While a song is loaded in the player, the UI shows a DJ-style deck above the player bar: a zoomed waveform (6 seconds) scrolling past a fixed playhead with the beatgrid drawn over it, the first beat of every bar stronger and numbered (`17.1` is the first beat of bar 17, `17.2` the second; beat 0 of the grid is the first beat of bar 1, and beats before it are not numbered), and the whole track below it. Clicking the overview jumps there. How it is colored is a setting (`waveform_colors`, on the Settings page and in the NixOS module) that can also be changed from a menu right under the waveform:
 
   | Scheme | Look |
   | --- | --- |
