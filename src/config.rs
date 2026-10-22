@@ -29,10 +29,42 @@ pub enum ThemeMode {
     Dark,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Language {
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "de")]
+    German,
+}
+
+impl Language {
+    pub const ALL: [Language; 2] = [Language::English, Language::German];
+
+    /// Picks the language from the locale environment, defaulting to English.
+    fn from_locale(locale: &str) -> Self {
+        if locale.starts_with("de") {
+            Language::German
+        } else {
+            Language::English
+        }
+    }
+}
+
+impl Default for Language {
+    fn default() -> Self {
+        ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .filter_map(|name| std::env::var(name).ok())
+            .find(|value| !value.is_empty())
+            .map_or(Language::English, |locale| Language::from_locale(&locale))
+    }
+}
+
 /// The fully resolved settings the app runs with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     pub theme: ThemeMode,
+    pub language: Language,
 }
 
 /// One config layer: only the values it sets.
@@ -41,12 +73,17 @@ pub struct Config {
 struct Layer {
     #[serde(skip_serializing_if = "Option::is_none")]
     theme: Option<ThemeMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<Language>,
 }
 
 impl Layer {
     fn apply_to(&self, config: &mut Config) {
         if let Some(theme) = self.theme {
             config.theme = theme;
+        }
+        if let Some(language) = self.language {
+            config.language = language;
         }
     }
 }
@@ -168,13 +205,23 @@ impl ConfigStore {
     }
 
     pub fn set_theme(&mut self, theme: ThemeMode) -> io::Result<()> {
-        if self.layered {
-            self.overrides.theme = Some(theme);
-            write_layer(&self.overrides_path, &self.overrides)
+        self.edit(|layer| layer.theme = Some(theme))
+    }
+
+    pub fn set_language(&mut self, language: Language) -> io::Result<()> {
+        self.edit(|layer| layer.language = Some(language))
+    }
+
+    /// Applies a change to the layer edits belong in (the override layer when
+    /// layered, else the base) and saves it.
+    fn edit(&mut self, change: impl FnOnce(&mut Layer)) -> io::Result<()> {
+        let (layer, path) = if self.layered {
+            (&mut self.overrides, &self.overrides_path)
         } else {
-            self.base.theme = Some(theme);
-            write_layer(&self.base_path, &self.base)
-        }
+            (&mut self.base, &self.base_path)
+        };
+        change(layer);
+        write_layer(path, layer)
     }
 
     /// Drop all overrides so the underlying config applies again. A no-op
@@ -317,6 +364,37 @@ mod tests {
         assert_eq!(store.effective().theme, ThemeMode::Light);
         assert!(!store.has_overrides());
         assert!(!dir.path("state/overrides.toml").exists());
+    }
+
+    #[test]
+    fn language_is_saved_and_layered_independently_of_theme() {
+        let dir = TempDir::new();
+        fs::write(
+            dir.path("etc.toml"),
+            "theme = \"light\"\nlanguage = \"de\"\n",
+        )
+        .unwrap();
+        make_read_only(&dir.path("etc.toml"));
+
+        let mut store = ConfigStore::load(dir.locations());
+        // Skip when running with privileges that ignore read-only files.
+        if !store.is_layered() {
+            return;
+        }
+        assert_eq!(store.effective().language, Language::German);
+
+        store.set_language(Language::English).unwrap();
+        let reloaded = ConfigStore::load(dir.locations());
+        assert_eq!(reloaded.effective().language, Language::English);
+        assert_eq!(reloaded.effective().theme, ThemeMode::Light);
+        assert_eq!(reloaded.underlying().language, Language::German);
+    }
+
+    #[test]
+    fn language_follows_locale() {
+        assert_eq!(Language::from_locale("de_DE.UTF-8"), Language::German);
+        assert_eq!(Language::from_locale("en_US.UTF-8"), Language::English);
+        assert_eq!(Language::from_locale("C"), Language::English);
     }
 
     #[test]

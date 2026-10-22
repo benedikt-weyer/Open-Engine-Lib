@@ -3,7 +3,7 @@ Open Engine Lib for managing your engine dj library on open source software with
 
 ## Configuration
 
-Settings (currently the light/dark theme) can be changed on the Settings page. They are stored in `~/.config/open-engine-lib/config.toml`.
+Settings (light/dark theme and the English/German UI language) can be changed on the Settings page. They are stored in `~/.config/open-engine-lib/config.toml`.
 
 On NixOS the config can be set declaratively with the flake's module:
 
@@ -11,7 +11,8 @@ On NixOS the config can be set declaratively with the flake's module:
 imports = [ inputs.open-engine-lib.nixosModules.default ];
 programs.open-engine-lib = {
   enable = true;
-  settings.theme = "dark";
+  settings.theme = "dark";   # "light" | "dark"
+  settings.language = "de";  # "en" | "de"; unset follows the system locale
 };
 ```
 

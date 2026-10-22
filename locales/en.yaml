@@ -1,0 +1,17 @@
+native_name: English
+nav_home: Home
+nav_settings: Settings
+increment: Increment
+decrement: Decrement
+settings_title: Settings
+theme: Theme
+theme_light: Light
+theme_dark: Dark
+language_heading: Language
+config_read_only_notice: The config is read-only (declarative). Changes are saved as overrides on top of it.
+config_file: "Config file: {path}"
+underlying_theme: "Underlying theme: {theme}"
+underlying_language: "Underlying language: {language}"
+reset_overrides: Reset to underlying config
+save_failed: "Could not save settings: {error}"
+counter_status: "The counter is at {value}."

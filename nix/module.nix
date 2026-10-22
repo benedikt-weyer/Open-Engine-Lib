@@ -30,6 +30,13 @@ in
           on top of this config and can be reset to it from the settings page.
         '';
       };
+
+      language = lib.mkOption {
+        type = lib.types.nullOr (lib.types.enum [ "en" "de" ]);
+        default = null;
+        example = "de";
+        description = "UI language. Unset follows the system locale (German for de_*, else English).";
+      };
     };
   };
 

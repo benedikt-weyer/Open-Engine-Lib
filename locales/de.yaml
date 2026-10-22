@@ -1,0 +1,17 @@
+native_name: Deutsch
+nav_home: Start
+nav_settings: Einstellungen
+increment: Erhöhen
+decrement: Verringern
+settings_title: Einstellungen
+theme: Design
+theme_light: Hell
+theme_dark: Dunkel
+language_heading: Sprache
+config_read_only_notice: Die Konfiguration ist schreibgeschützt (deklarativ). Änderungen werden als Überschreibungen darüber gespeichert.
+config_file: "Konfigurationsdatei: {path}"
+underlying_theme: "Zugrunde liegendes Design: {theme}"
+underlying_language: "Zugrunde liegende Sprache: {language}"
+reset_overrides: Auf zugrunde liegende Konfiguration zurücksetzen
+save_failed: "Einstellungen konnten nicht gespeichert werden: {error}"
+counter_status: "Der Zähler steht bei {value}."

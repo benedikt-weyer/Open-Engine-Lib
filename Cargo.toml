@@ -8,3 +8,4 @@ dirs = "7.0.0"
 iced = "0.14"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
+yaml_serde = "0.10.7"

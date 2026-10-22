@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod i18n;
 mod navbar;
 mod settings;
 
-use config::{ConfigStore, Locations, ThemeMode};
+use config::{ConfigStore, Language, Locations, ThemeMode};
+use i18n::fill;
 use iced::widget::{button, column, container, text};
 use iced::{Center, Element, Fill, Theme};
 
@@ -36,6 +38,7 @@ pub enum Message {
     Increment,
     Decrement,
     ThemeSelected(ThemeMode),
+    LanguageSelected(Language),
     ResetOverrides,
 }
 
@@ -65,6 +68,13 @@ fn update(state: &mut State, message: Message) {
         Message::ThemeSelected(theme) => {
             state.config_error = state.config.set_theme(theme).err().map(|e| e.to_string());
         }
+        Message::LanguageSelected(language) => {
+            state.config_error = state
+                .config
+                .set_language(language)
+                .err()
+                .map(|e| e.to_string());
+        }
         Message::ResetOverrides => {
             state.config_error = state.config.reset_overrides().err().map(|e| e.to_string());
         }
@@ -72,13 +82,14 @@ fn update(state: &mut State, message: Message) {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
+    let language = state.config.effective().language;
     let page = match state.page {
-        Page::Home => home(state),
+        Page::Home => home(state, language),
         Page::Settings => settings::view(&state.config, state.config_error.as_deref()),
     };
 
     column![
-        navbar::view(state.page),
+        navbar::view(state.page, language),
         container(page).padding(20).width(Fill)
     ]
     .width(Fill)
@@ -86,11 +97,15 @@ fn view(state: &State) -> Element<'_, Message> {
     .into()
 }
 
-fn home(state: &State) -> Element<'_, Message> {
+fn home(state: &State, language: Language) -> Element<'_, Message> {
     column![
-        button("Increment").on_press(Message::Increment),
+        button(text(&language.strings().increment)).on_press(Message::Increment),
         text(state.value).size(50),
-        button("Decrement").on_press(Message::Decrement),
+        text(fill(
+            &language.strings().counter_status,
+            &[("value", &state.value)],
+        )),
+        button(text(&language.strings().decrement)).on_press(Message::Decrement),
     ]
     .spacing(10)
     .align_x(Center)
