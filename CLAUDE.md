@@ -19,3 +19,13 @@ Development uses a Nix flake (`flake.nix`) activated by direnv (`.envrc`: `use f
 - `nix flake check`: validates the flake (only x86_64-linux is evaluated locally)
 
 Newly added files must be `git add`ed (at least `-N`) before Nix flake commands can see them, because flakes only read tracked files.
+
+## Versioning and releases
+
+Every push to `main` runs `.github/workflows/tag.yml`, which tags each new commit sequentially via `.github/scripts/create-tags.sh` (`DRY_RUN=1 .github/scripts/create-tags.sh` previews locally) and then calls `release.yml` once per new tag. Commit messages decide the bump, and lower components reset to 0:
+
+- `type!:`, `type(scope)!:` or a `BREAKING CHANGE:` footer: major
+- `feat:` / `feat(scope):`: minor
+- anything else: patch
+
+Existing `vX.Y.Z` tags are respected (the running version resets to them), and with no tags it starts at `v0.0.0`. Because every commit on `main` gets a tag and a release, prefer squash merges. `release.yml` patches the `Cargo.toml` version from the tag at build time (not committed) and publishes Linux tarball, AppImage and Windows zip/exe assets.

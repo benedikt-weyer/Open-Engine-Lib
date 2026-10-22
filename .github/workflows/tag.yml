@@ -1,0 +1,58 @@
+name: Tag
+
+# Creates a version tag for every new commit on main (see
+# .github/scripts/create-tags.sh), then builds and releases each new tag.
+# Tags pushed with GITHUB_TOKEN don't trigger other workflows, so the release
+# workflow is called directly instead of listening for tag pushes.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tag-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.create.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create tags
+        id: create
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          .github/scripts/create-tags.sh "$GITHUB_SHA"
+
+      - name: Push tags
+        env:
+          TAGS: ${{ steps.create.outputs.tags }}
+        run: |
+          jq -r '.[]' <<<"$TAGS" | while read -r tag; do
+            git push origin "refs/tags/$tag"
+          done
+
+  release:
+    needs: tag
+    if: needs.tag.outputs.tags != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        tag: ${{ fromJSON(needs.tag.outputs.tags) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ matrix.tag }}
+    permissions:
+      contents: write

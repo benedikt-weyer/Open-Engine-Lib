@@ -1,0 +1,157 @@
+name: Release
+
+# Builds the app for the given tag and publishes a GitHub Release named after
+# it. Called by tag.yml after tags are created; can also be run manually for an
+# existing tag.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing tag to build and release (e.g. v1.2.3)
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and release (e.g. v1.2.3)
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  BIN: open-engine-lib
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev
+
+      - name: Set version from tag
+        shell: bash
+        run: sed -i "0,/^version = .*/s//version = \"${TAG#v}\"/" Cargo.toml
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package tarball
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          name="$BIN-$TAG-linux-x86_64"
+          mkdir "$name"
+          cp "target/release/$BIN" LICENSE README.md "$name/"
+          tar -czf "$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ inputs.tag }}
+          path: |
+            ${{ env.BIN }}-${{ inputs.tag }}-linux-x86_64.tar.gz
+            target/release/${{ env.BIN }}
+          if-no-files-found: error
+
+  build-appimage:
+    needs: build-linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ inputs.tag }}
+
+      - name: Assemble AppDir
+        run: |
+          mkdir -p AppDir/usr/bin
+          install -m755 "target/release/$BIN" "AppDir/usr/bin/$BIN"
+          cp packaging/open-engine-lib.desktop packaging/open-engine-lib.svg AppDir/
+          ln -s "usr/bin/$BIN" AppDir/AppRun
+
+      - name: Build AppImage
+        env:
+          TAG: ${{ inputs.tag }}
+          ARCH: x86_64
+        run: |
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract-and-run AppDir "$BIN-$TAG-x86_64.AppImage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage-${{ inputs.tag }}
+          path: ${{ env.BIN }}-${{ inputs.tag }}-x86_64.AppImage
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Set version from tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: sed -i "0,/^version = .*/s//version = \"${TAG#v}\"/" Cargo.toml
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          name="$BIN-$TAG-windows-x86_64"
+          mkdir "$name"
+          cp "target/release/$BIN.exe" LICENSE README.md "$name/"
+          7z a "$name.zip" "$name"
+          cp "target/release/$BIN.exe" "$BIN-$TAG-windows-x86_64.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ inputs.tag }}
+          path: |
+            ${{ env.BIN }}-${{ inputs.tag }}-windows-x86_64.zip
+            ${{ env.BIN }}-${{ inputs.tag }}-windows-x86_64.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [build-linux, build-appimage, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          files=(artifacts/*.tar.gz artifacts/*.AppImage artifacts/*.zip artifacts/*.exe)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" --verify-tag --title "$TAG" --generate-notes
+          fi
