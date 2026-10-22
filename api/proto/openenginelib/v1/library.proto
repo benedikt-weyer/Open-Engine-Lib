@@ -111,6 +111,13 @@ message Playlist {
 
 message GetWaveformRequest {
   uint32 track_id = 1;
+  // Where the low, mid and high bands meet, in Hz: the low band is below `low_mid_hz`,
+  // the high band above `mid_high_hz`, the mid band in between. Unset means 600 Hz and
+  // 4000 Hz. Both must be between 20 and 20000 and the first below the second, else
+  // INVALID_ARGUMENT. (A file with a low sample rate can't hold the high ones; they are
+  // lowered for it.)
+  optional uint32 low_mid_hz = 2;
+  optional uint32 mid_high_hz = 3;
 }
 
 message GetWaveformResponse {

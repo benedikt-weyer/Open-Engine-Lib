@@ -268,10 +268,19 @@ pub async fn album_art(mut backend: Backend, id: u32) -> Result<Option<Vec<u8>>,
 
 /// Fetches the waveform and beatgrid of a track: `None` if there is none, because the
 /// track is a streaming track or its file is missing or can't be decoded.
-pub async fn waveform(mut backend: Backend, id: u32) -> Result<Option<Arc<Waveform>>, String> {
+pub async fn waveform(
+    mut backend: Backend,
+    id: u32,
+    low_mid_hz: u32,
+    mid_high_hz: u32,
+) -> Result<Option<Arc<Waveform>>, String> {
     let response = match backend
         .library
-        .get_waveform(GetWaveformRequest { track_id: id })
+        .get_waveform(GetWaveformRequest {
+            track_id: id,
+            low_mid_hz: Some(low_mid_hz),
+            mid_high_hz: Some(mid_high_hz),
+        })
         .await
     {
         Ok(response) => response.into_inner(),

@@ -421,9 +421,13 @@ impl State {
             return Task::none();
         }
         let generation = self.waveforms.generation();
-        Task::perform(backend::waveform(backend, id), move |result| {
-            Message::WaveformLoaded(generation, id, result)
-        })
+        // Where the bands meet is a setting, read once per track.
+        let config = self.config.effective();
+        let (low_mid_hz, mid_high_hz) = (config.waveform_low_mid_hz, config.waveform_mid_high_hz);
+        Task::perform(
+            backend::waveform(backend, id, low_mid_hz, mid_high_hz),
+            move |result| Message::WaveformLoaded(generation, id, result),
+        )
     }
 
     fn is_stopped(&self) -> bool {

@@ -17,7 +17,7 @@ use tonic::{Request, Response, Status};
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, Library, OpenError};
 use crate::player::Start;
-use crate::waveform::{self, AnalyzeError, Waveform};
+use crate::waveform::{self, AnalyzeError, Split, Waveform};
 
 /// Tracks per message of `ListTracks`, to stay well below gRPC's message size limit.
 const TRACKS_PER_BATCH: usize = 500;
@@ -28,14 +28,17 @@ const WAVEFORMS_KEPT: usize = 8;
 #[derive(Default)]
 struct WaveformCache {
     /// Paths, oldest first.
-    order: VecDeque<PathBuf>,
-    waveforms: HashMap<PathBuf, Arc<Waveform>>,
+    order: VecDeque<WaveformKey>,
+    waveforms: HashMap<WaveformKey, Arc<Waveform>>,
 }
 
+/// A waveform depends on where the bands were split, not just on the file.
+type WaveformKey = (PathBuf, Split);
+
 impl WaveformCache {
-    fn insert(&mut self, path: PathBuf, waveform: Arc<Waveform>) {
-        if self.waveforms.insert(path.clone(), waveform).is_none() {
-            self.order.push_back(path);
+    fn insert(&mut self, key: WaveformKey, waveform: Arc<Waveform>) {
+        if self.waveforms.insert(key.clone(), waveform).is_none() {
+            self.order.push_back(key);
         }
         while self.order.len() > WAVEFORMS_KEPT {
             if let Some(oldest) = self.order.pop_front() {
@@ -202,7 +205,13 @@ impl LibraryService for Service {
         request: Request<api::GetWaveformRequest>,
     ) -> Result<Response<api::GetWaveformResponse>, Status> {
         let library = self.library()?;
-        let id = request.into_inner().track_id;
+        let request = request.into_inner();
+        let id = request.track_id;
+        let split = Split {
+            low_mid_hz: request.low_mid_hz.unwrap_or(waveform::DEFAULT_LOW_MID_HZ),
+            mid_high_hz: request.mid_high_hz.unwrap_or(waveform::DEFAULT_MID_HIGH_HZ),
+        };
+        split.validate().map_err(Status::invalid_argument)?;
         let track = library
             .tracks
             .get(id as usize)
@@ -222,23 +231,24 @@ impl LibraryService for Service {
                 .lock()
                 .expect("waveform lock")
                 .waveforms
-                .get(&path)
+                .get(&(path.clone(), split))
                 .cloned();
             let waveform = match cached {
                 Some(waveform) => waveform,
                 None => {
-                    let waveform =
-                        Arc::new(waveform::analyze_file(&path).map_err(|error| match error {
+                    let waveform = Arc::new(waveform::analyze_file(&path, split).map_err(
+                        |error| match error {
                             AnalyzeError::NotFound => {
                                 Status::not_found(format!("{} does not exist", path.display()))
                             }
                             AnalyzeError::Failed(error) => Status::internal(error),
-                        })?);
+                        },
+                    )?);
                     shared
                         .waveforms
                         .lock()
                         .expect("waveform lock")
-                        .insert(path, Arc::clone(&waveform));
+                        .insert((path, split), Arc::clone(&waveform));
                     waveform
                 }
             };

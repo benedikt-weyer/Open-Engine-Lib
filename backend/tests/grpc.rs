@@ -671,7 +671,7 @@ async fn serves_waveforms_and_beatgrids() {
         &temp.0.join("Music/tone.wav"),
         &[(80.0, 1.0), (5_000.0, 1.0)],
     );
-    wav(&temp.0.join("Music/plain.wav"), &[(800.0, 1.0)]);
+    wav(&temp.0.join("Music/plain.wav"), &[(2_000.0, 1.0)]);
     {
         let db = rusqlite::Connection::open(library_dir.join("Database2/m.db")).unwrap();
         db.execute_batch(
@@ -691,7 +691,10 @@ async fn serves_waveforms_and_beatgrids() {
     assert_eq!(
         code(
             library
-                .get_waveform(GetWaveformRequest { track_id: 0 })
+                .get_waveform(GetWaveformRequest {
+                    track_id: 0,
+                    ..Default::default()
+                })
                 .await
         ),
         Code::FailedPrecondition,
@@ -706,7 +709,10 @@ async fn serves_waveforms_and_beatgrids() {
 
     // Track ids are positions: 0..=2 are the fixture's, 3 is Tone, 4 is Plain.
     let tone = library
-        .get_waveform(GetWaveformRequest { track_id: 3 })
+        .get_waveform(GetWaveformRequest {
+            track_id: 3,
+            ..Default::default()
+        })
         .await
         .unwrap()
         .into_inner();
@@ -732,18 +738,67 @@ async fn serves_waveforms_and_beatgrids() {
 
     // The same waveform without a beatgrid for a track that has none.
     let plain = library
-        .get_waveform(GetWaveformRequest { track_id: 4 })
+        .get_waveform(GetWaveformRequest {
+            track_id: 4,
+            ..Default::default()
+        })
         .await
         .unwrap()
         .into_inner();
     assert_eq!(plain.columns.len(), 100 * 3);
     assert!(plain.beat_grid.is_none());
 
+    // The bands meet at 600 Hz and 4 kHz unless told otherwise: a 2 kHz tone is mid. With
+    // the high band starting at 1 kHz it is high, and with the low band reaching up to
+    // 6 kHz it is low.
+    let band_at_50 = |response: &open_engine_api::v1::GetWaveformResponse, band: usize| {
+        u32::from(response.columns[50 * 3 + band])
+    };
+    assert!(
+        band_at_50(&plain, 1) > band_at_50(&plain, 0)
+            && band_at_50(&plain, 1) > band_at_50(&plain, 2)
+    );
+    let waveform_with = |low_mid_hz, mid_high_hz| GetWaveformRequest {
+        track_id: 4,
+        low_mid_hz: Some(low_mid_hz),
+        mid_high_hz: Some(mid_high_hz),
+    };
+    let high = library
+        .get_waveform(waveform_with(200, 1_000))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        band_at_50(&high, 2) > band_at_50(&high, 1),
+        "high from 1 kHz"
+    );
+    let low = library
+        .get_waveform(waveform_with(6_000, 9_000))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(band_at_50(&low, 0) > band_at_50(&low, 1), "low up to 6 kHz");
+    // Split points that make no sense are refused.
+    for (low_mid_hz, mid_high_hz) in [(4_000, 600), (600, 600), (5, 4_000), (600, 40_000)] {
+        assert_eq!(
+            code(
+                library
+                    .get_waveform(waveform_with(low_mid_hz, mid_high_hz))
+                    .await
+            ),
+            Code::InvalidArgument,
+            "{low_mid_hz} / {mid_high_hz}"
+        );
+    }
+
     // Tracks without a usable file, and unknown ids.
     assert_eq!(
         code(
             library
-                .get_waveform(GetWaveformRequest { track_id: 0 })
+                .get_waveform(GetWaveformRequest {
+                    track_id: 0,
+                    ..Default::default()
+                })
                 .await
         ),
         Code::NotFound
@@ -751,7 +806,10 @@ async fn serves_waveforms_and_beatgrids() {
     assert_eq!(
         code(
             library
-                .get_waveform(GetWaveformRequest { track_id: 2 })
+                .get_waveform(GetWaveformRequest {
+                    track_id: 2,
+                    ..Default::default()
+                })
                 .await
         ),
         Code::FailedPrecondition
@@ -759,7 +817,10 @@ async fn serves_waveforms_and_beatgrids() {
     assert_eq!(
         code(
             library
-                .get_waveform(GetWaveformRequest { track_id: 99 })
+                .get_waveform(GetWaveformRequest {
+                    track_id: 99,
+                    ..Default::default()
+                })
                 .await
         ),
         Code::InvalidArgument
@@ -796,7 +857,10 @@ async fn serves_waveforms_from_a_real_library() {
     for track in tracks.iter().filter(|track| !track.streaming).take(25) {
         let started = Instant::now();
         match library
-            .get_waveform(GetWaveformRequest { track_id: track.id })
+            .get_waveform(GetWaveformRequest {
+                track_id: track.id,
+                ..Default::default()
+            })
             .await
         {
             Ok(response) => {

@@ -20,6 +20,8 @@ programs.open-engine-lib = {
   settings.theme = "dark";   # "light" | "dark"
   settings.language = "de";  # "en" | "de"; unset follows the system locale
   settings.waveform_colors = "stacked"; # "mono" | "rgb" | "stacked" | "spectrum" (default: stacked)
+  settings.waveform_low_mid_hz = 600;   # where the waveform's low band ends, in Hz (default: 600)
+  settings.waveform_mid_high_hz = 4000; # where its high band starts, in Hz (default: 4000)
   settings.reopen_library = true;   # reopen the last library at startup (default: true)
   settings.restore_position = true; # ...and its playlist, song and position, paused (default: true)
 };

@@ -15,6 +15,9 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use open_engine_api::{
+    WAVEFORM_LOW_MID_HZ, WAVEFORM_MAX_SPLIT_HZ, WAVEFORM_MID_HIGH_HZ, WAVEFORM_MIN_SPLIT_HZ,
+};
 use serde::{Deserialize, Serialize};
 
 const APP_DIR: &str = "open-engine-lib";
@@ -92,10 +95,34 @@ pub struct Config {
     pub theme: ThemeMode,
     pub language: Language,
     pub waveform_colors: WaveformColors,
+    /// Where the waveform's low band ends and its mid band starts, in Hz.
+    pub waveform_low_mid_hz: u32,
+    /// Where its mid band ends and its high band starts, in Hz.
+    pub waveform_mid_high_hz: u32,
     /// Open the library that was open when the app was last closed.
     pub reopen_library: bool,
     /// When reopening it, also go back to the playlist, the song and its position.
     pub restore_position: bool,
+}
+
+impl Config {
+    /// Whether the waveform's split points are in range and in order.
+    fn waveform_split_is_valid(&self) -> bool {
+        let range = WAVEFORM_MIN_SPLIT_HZ..=WAVEFORM_MAX_SPLIT_HZ;
+        range.contains(&self.waveform_low_mid_hz)
+            && range.contains(&self.waveform_mid_high_hz)
+            && self.waveform_low_mid_hz < self.waveform_mid_high_hz
+    }
+
+    /// Makes the config safe to use: split points that make no sense are replaced by the
+    /// default ones (`ConfigStore::load` has already warned about them).
+    fn sanitized(mut self) -> Self {
+        if !self.waveform_split_is_valid() {
+            self.waveform_low_mid_hz = WAVEFORM_LOW_MID_HZ;
+            self.waveform_mid_high_hz = WAVEFORM_MID_HIGH_HZ;
+        }
+        self
+    }
 }
 
 impl Default for Config {
@@ -104,6 +131,8 @@ impl Default for Config {
             theme: ThemeMode::default(),
             language: Language::default(),
             waveform_colors: WaveformColors::default(),
+            waveform_low_mid_hz: WAVEFORM_LOW_MID_HZ,
+            waveform_mid_high_hz: WAVEFORM_MID_HIGH_HZ,
             reopen_library: true,
             restore_position: true,
         }
@@ -121,6 +150,10 @@ struct Layer {
     #[serde(skip_serializing_if = "Option::is_none")]
     waveform_colors: Option<WaveformColors>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_low_mid_hz: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_mid_high_hz: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reopen_library: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     restore_position: Option<bool>,
@@ -136,6 +169,12 @@ impl Layer {
         }
         if let Some(waveform_colors) = self.waveform_colors {
             config.waveform_colors = waveform_colors;
+        }
+        if let Some(hz) = self.waveform_low_mid_hz {
+            config.waveform_low_mid_hz = hz;
+        }
+        if let Some(hz) = self.waveform_mid_high_hz {
+            config.waveform_mid_high_hz = hz;
         }
         if let Some(reopen_library) = self.reopen_library {
             config.reopen_library = reopen_library;
@@ -223,29 +262,48 @@ impl ConfigStore {
             Layer::default()
         };
 
-        Self {
+        let mut store = Self {
             base_path,
             overrides_path: locations.overrides,
             base,
             overrides,
             layered,
             warnings,
-        }
+        };
+        store.warn_about_unusable_values();
+        store
     }
 
-    /// The merged config: defaults, then the base layer, then overrides.
-    pub fn effective(&self) -> Config {
+    /// The merged config as written: defaults, then the base layer, then overrides.
+    fn merged(&self) -> Config {
         let mut config = Config::default();
         self.base.apply_to(&mut config);
         self.overrides.apply_to(&mut config);
         config
     }
 
+    fn warn_about_unusable_values(&mut self) {
+        let config = self.merged();
+        if !config.waveform_split_is_valid() {
+            self.warnings.push(format!(
+                "Ignoring the waveform split frequencies {} Hz and {} Hz: they must be between \
+                 {WAVEFORM_MIN_SPLIT_HZ} and {WAVEFORM_MAX_SPLIT_HZ} Hz, the first below the \
+                 second. Using {WAVEFORM_LOW_MID_HZ} Hz and {WAVEFORM_MID_HIGH_HZ} Hz.",
+                config.waveform_low_mid_hz, config.waveform_mid_high_hz
+            ));
+        }
+    }
+
+    /// The merged config: defaults, then the base layer, then overrides.
+    pub fn effective(&self) -> Config {
+        self.merged().sanitized()
+    }
+
     /// The config as it would be without overrides.
     pub fn underlying(&self) -> Config {
         let mut config = Config::default();
         self.base.apply_to(&mut config);
-        config
+        config.sanitized()
     }
 
     /// Whether the base config is read-only and edits are layered on top.
@@ -415,6 +473,66 @@ mod tests {
         let broken = ConfigStore::load(dir.locations());
         assert_eq!(broken.effective().waveform_colors, WaveformColors::Stacked);
         assert!(!broken.warnings.is_empty());
+    }
+
+    #[test]
+    fn the_waveform_bands_meet_at_600_hz_and_4_khz_unless_configured() {
+        let dir = TempDir::new();
+        let store = ConfigStore::load(dir.locations());
+        let config = store.effective();
+        assert_eq!(
+            (config.waveform_low_mid_hz, config.waveform_mid_high_hz),
+            (600, 4_000)
+        );
+        assert!(store.warnings.is_empty());
+
+        fs::write(
+            dir.path("user.toml"),
+            "waveform_low_mid_hz = 250\nwaveform_mid_high_hz = 3000\n",
+        )
+        .unwrap();
+        let configured = ConfigStore::load(dir.locations());
+        let config = configured.effective();
+        assert_eq!(
+            (config.waveform_low_mid_hz, config.waveform_mid_high_hz),
+            (250, 3_000)
+        );
+        assert!(configured.warnings.is_empty());
+
+        // Editing something else keeps them.
+        let mut configured = ConfigStore::load(dir.locations());
+        configured.set_theme(ThemeMode::Light).unwrap();
+        let reloaded = ConfigStore::load(dir.locations()).effective();
+        assert_eq!(
+            (reloaded.waveform_low_mid_hz, reloaded.waveform_mid_high_hz),
+            (250, 3_000)
+        );
+    }
+
+    #[test]
+    fn nonsensical_split_frequencies_are_replaced_by_the_defaults_with_a_warning() {
+        for (low, high) in [(4_000, 600), (600, 600), (5, 4_000), (600, 40_000), (0, 0)] {
+            let dir = TempDir::new();
+            fs::write(
+                dir.path("user.toml"),
+                format!("waveform_low_mid_hz = {low}\nwaveform_mid_high_hz = {high}\n"),
+            )
+            .unwrap();
+            let store = ConfigStore::load(dir.locations());
+
+            let config = store.effective();
+            assert_eq!(
+                (config.waveform_low_mid_hz, config.waveform_mid_high_hz),
+                (600, 4_000),
+                "{low} / {high}"
+            );
+            assert_eq!(store.warnings.len(), 1, "{low} / {high}");
+            assert!(
+                store.warnings[0].contains("waveform split"),
+                "{}",
+                store.warnings[0]
+            );
+        }
     }
 
     #[test]

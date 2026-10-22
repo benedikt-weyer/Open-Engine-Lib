@@ -50,6 +50,26 @@ in
         '';
       };
 
+      waveform_low_mid_hz = lib.mkOption {
+        type = lib.types.nullOr (lib.types.ints.between 20 20000);
+        default = null;
+        example = 600;
+        description = ''
+          Where the low band of the waveform ends and the mid band starts, in Hz. Must be
+          below `waveform_mid_high_hz`. Unset means 600.
+        '';
+      };
+
+      waveform_mid_high_hz = lib.mkOption {
+        type = lib.types.nullOr (lib.types.ints.between 20 20000);
+        default = null;
+        example = 4000;
+        description = ''
+          Where the mid band of the waveform ends and the high band starts, in Hz. Unset
+          means 4000.
+        '';
+      };
+
       reopen_library = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
         default = null;

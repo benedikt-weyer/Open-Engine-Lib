@@ -8,6 +8,13 @@
 /// The API version this build of the UI and backend speak.
 pub const API_VERSION: u32 = 1;
 
+/// Where the waveform's low, mid and high bands meet by default, in Hz.
+pub const WAVEFORM_LOW_MID_HZ: u32 = 600;
+pub const WAVEFORM_MID_HIGH_HZ: u32 = 4_000;
+/// The range the split points may be in.
+pub const WAVEFORM_MIN_SPLIT_HZ: u32 = 20;
+pub const WAVEFORM_MAX_SPLIT_HZ: u32 = 20_000;
+
 /// The environment variable the UI uses to give the backend the secret that every
 /// request must carry as a bearer token (see [`AUTHORIZATION`]).
 pub const TOKEN_ENV: &str = "OPEN_ENGINE_BACKEND_TOKEN";
