@@ -11,6 +11,19 @@ service LibraryService {
   // from there.
   // Errors: NOT_FOUND if no Engine library is there, INTERNAL if it can't be read.
   rpc OpenLibrary(OpenLibraryRequest) returns (OpenLibraryResponse);
+  // Opens a plain folder of music as the library, closing the current one (and stopping
+  // playback). The tracks are the audio files the player can play anywhere below `path`
+  // (hidden files and folders are skipped) with what their tags say, and the playlists are
+  // the folders that have music below them, each holding the tracks of all the folders
+  // below it too. There is no Engine library behind it: the things only an Engine library
+  // has (ratings, cues, loops, SoundSwitch lighting, origins, covers, beatgrids) are empty,
+  // and the calls that change or sync a library (`SaveLibraryAs`, `GetSyncDiff`,
+  // `SyncToSource`, `PullFromSource`, `SetRating`, the playlist and smart playlist edits,
+  // `MigrateOrigins`, `GetLibrarySyncDiff`, `SyncToLibrary`) are FAILED_PRECONDITION, and
+  // `SetCues` and `SetLoops` too. Nothing is written to the folder or copied. The answer
+  // has no `cache_path`.
+  // Errors: NOT_FOUND if `path` is not a folder that can be read.
+  rpc OpenLocalFolder(OpenLocalFolderRequest) returns (OpenLibraryResponse);
   // Saves the open library to a new place and makes that its location from now on: the
   // old location is no longer used. The working copy of the databases is cloned into a
   // new `Engine Library` folder there (created inside `path`, unless `path` is itself
@@ -164,6 +177,11 @@ message OpenLibraryResponse {
   uint32 playlist_count = 3;
   // The backend's cached copy of the databases, which is what it reads.
   string cache_path = 4;
+}
+
+message OpenLocalFolderRequest {
+  // The folder with the music.
+  string path = 1;
 }
 
 message SaveLibraryAsRequest {

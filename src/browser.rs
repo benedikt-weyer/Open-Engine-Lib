@@ -17,7 +17,7 @@ use crate::columns::{Column, ColumnWidths};
 use crate::config::Language;
 use crate::covers::Covers;
 use crate::i18n::fill;
-use crate::model::{Library, Lighting, Playlist, Track, stars_of};
+use crate::model::{Kind, Library, Lighting, Playlist, Track, stars_of};
 use crate::reachable::Reachability;
 
 /// Height of one track row. Fixed, so only the rows in view have to be built.
@@ -391,7 +391,7 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
         };
         if playlist.is_smart {
             line = line.push(small("✎", &strings.smart_edit, Message::SmartEdit(index)));
-        } else if selected {
+        } else if selected && browser.library.is_engine() {
             line = line
                 .push(small(
                     "✎",
@@ -472,6 +472,7 @@ fn line<'a>(
     cells: [Element<'a, Message>; Column::COUNT],
     location: Element<'a, Message>,
     widths: &ColumnWidths,
+    kind: Kind,
     gap: impl Fn(Option<Column>) -> Element<'a, Message>,
 ) -> row::Row<'a, Message> {
     let mut line = row![container(marker).width(MARKER_WIDTH), gap(None)]
@@ -479,6 +480,10 @@ fn line<'a>(
         .padding([0, 8]);
     line = line.push(container(cover).width(THUMBNAIL)).push(gap(None));
     for (column, cell) in Column::ALL.into_iter().zip(cells) {
+        // A folder of music has no ratings, cues and so on to show.
+        if kind == Kind::Folder && column.is_engine_only() {
+            continue;
+        }
         line = line
             .push(container(cell).width(widths.get(column)).clip(true))
             .push(gap(Some(column)));
@@ -518,7 +523,7 @@ fn cell<'a>(content: impl iced::widget::text::IntoFragment<'a>) -> text::Text<'a
 
 /// The bar of column titles. Its height is that of its text and the handles in it,
 /// whatever the height of the window.
-fn header<'a>(language: Language, widths: &ColumnWidths) -> Element<'a, Message> {
+fn header<'a>(language: Language, widths: &ColumnWidths, kind: Kind) -> Element<'a, Message> {
     let strings = language.strings();
     let heading_cell =
         |label: &'a str| -> Element<'a, Message> { cell(label).style(text::secondary).into() };
@@ -540,6 +545,7 @@ fn header<'a>(language: Language, widths: &ColumnWidths) -> Element<'a, Message>
         ],
         heading_cell(&strings.col_location),
         widths,
+        kind,
         handle,
     ))
     .padding([4, 0])
@@ -566,7 +572,7 @@ pub fn tracks<'a>(
     ))
     .size(20);
 
-    let header = header(language, widths);
+    let header = header(language, widths, browser.library.kind);
 
     if list.is_empty() {
         return column![heading, header, text(&strings.no_tracks)]
@@ -598,6 +604,7 @@ pub fn tracks<'a>(
                 stars: stars_of(browser.rating(track.id)),
                 cues: browser.cue_count(track.id),
                 loops: browser.loop_count(track.id),
+                kind: browser.library.kind,
             },
             track.album_art.and_then(|id| covers.get(id)),
             widths,
@@ -804,6 +811,8 @@ struct RowState<'a> {
     cues: u32,
     /// How many loops the track has saved.
     loops: u32,
+    /// What the track's library is made of, which decides the columns.
+    kind: Kind,
 }
 
 fn track_row<'a>(
@@ -823,6 +832,7 @@ fn track_row<'a>(
         stars,
         cues,
         loops,
+        kind,
     } = state;
     // Streaming tracks have no file here, so they can be seen but not played.
     let style = |content: text::Text<'a>| -> Element<'a, Message> {
@@ -874,6 +884,7 @@ fn track_row<'a>(
         ],
         location,
         widths,
+        kind,
         plain_gap,
     );
 
@@ -926,7 +937,7 @@ mod tests {
         );
 
         for language in Language::ALL {
-            let header = header(language, &ColumnWidths::default());
+            let header = header(language, &ColumnWidths::default(), Kind::Engine);
             assert!(
                 height_of(&header).is_some(),
                 "the header must not fill the height"

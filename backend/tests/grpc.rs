@@ -14,9 +14,9 @@ use open_engine_api::v1::{
     CloseLibraryRequest, CreateSmartPlaylistRequest, Cue, GetAlbumArtRequest, GetCuesRequest,
     GetInfoRequest, GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest,
     ListPlaylistsRequest, ListTracksRequest, Loop, MigrateOriginsRequest, OpenLibraryRequest,
-    PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest, SaveLibraryAsRequest,
-    SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest,
-    UpdateSmartPlaylistRequest,
+    OpenLocalFolderRequest, PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest,
+    SaveLibraryAsRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule, SmartRules,
+    SyncToSourceRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -2562,5 +2562,233 @@ async fn reads_the_loops_of_a_real_library() {
                 saved.color_argb
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn opens_a_plain_folder_of_music_as_a_library() {
+    let temp = TempDir::new("local-folder");
+    let music = temp.0.join("Music");
+    std::fs::create_dir_all(music.join("House/Deep")).unwrap();
+    wav(&music.join("top.wav"), &[(440.0, 1.0)]);
+    wav(&music.join("House/one.wav"), &[(220.0, 2.0)]);
+    wav(&music.join("House/Deep/two.wav"), &[(330.0, 1.0)]);
+    std::fs::write(music.join("House/notes.txt"), b"not music").unwrap();
+
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    let folder = |path: &Path| OpenLocalFolderRequest {
+        path: path.display().to_string(),
+    };
+
+    assert_eq!(
+        code(
+            library
+                .open_local_folder(folder(&temp.0.join("missing")))
+                .await
+        ),
+        Code::NotFound
+    );
+
+    let opened = library
+        .open_local_folder(folder(&music))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(opened.path, music.display().to_string());
+    assert_eq!((opened.track_count, opened.playlist_count), (3, 2));
+    assert_eq!(opened.cache_path, "");
+
+    // The tracks are the files, with the path relative to the folder.
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let tracks = stream.message().await.unwrap().unwrap().tracks;
+    assert_eq!(
+        tracks
+            .iter()
+            .map(|track| track.path.as_str())
+            .collect::<Vec<_>>(),
+        ["top.wav", "House/one.wav", "House/Deep/two.wav"]
+    );
+    assert_eq!(tracks[1].title, "one");
+    assert_eq!(tracks[1].length_seconds, Some(2));
+    assert!(tracks.iter().all(|track| {
+        !track.streaming
+            && track.rating.is_none()
+            && track.cue_count == 0
+            && track.loop_count == 0
+            && track.origin.is_none()
+            && track.album_art_id.is_none()
+    }));
+
+    // The folders are the playlists, each with the tracks below it.
+    let playlists = library
+        .list_playlists(ListPlaylistsRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .playlists;
+    let shape: Vec<_> = playlists
+        .iter()
+        .map(|playlist| {
+            (
+                playlist.title.as_str(),
+                playlist.depth,
+                playlist.has_children,
+                playlist.track_ids.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [("House", 0, true, vec![1, 2]), ("Deep", 1, false, vec![2])]
+    );
+
+    // The waveform comes from the file, and has no beatgrid and no cues.
+    let waveform = library
+        .get_waveform(GetWaveformRequest {
+            track_id: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!((waveform.duration_seconds - 2.0).abs() < 0.01);
+    assert!(waveform.beat_grid.is_none());
+    assert!(
+        library
+            .get_cues(GetCuesRequest { track_id: 1 })
+            .await
+            .unwrap()
+            .into_inner()
+            .cues
+            .is_empty()
+    );
+    assert!(
+        library
+            .get_loops(GetLoopsRequest { track_id: 1 })
+            .await
+            .unwrap()
+            .into_inner()
+            .loops
+            .is_empty()
+    );
+
+    // What only an Engine library has is refused, and nothing is written to the folder.
+    assert_eq!(
+        code(
+            library
+                .set_rating(SetRatingRequest {
+                    track_id: 0,
+                    rating: 20
+                })
+                .await
+        ),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        code(
+            library
+                .set_cues(SetCuesRequest {
+                    track_id: 0,
+                    cues: vec![]
+                })
+                .await
+        ),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        code(library.get_sync_diff(GetSyncDiffRequest::default()).await),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        code(
+            library
+                .save_library_as(SaveLibraryAsRequest {
+                    path: temp.0.join("copy").display().to_string()
+                })
+                .await
+        ),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        code(library.migrate_origins(MigrateOriginsRequest {}).await),
+        Code::FailedPrecondition
+    );
+    let mut names: Vec<_> = std::fs::read_dir(&music)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["House", "top.wav"]);
+
+    // Opening an Engine library afterwards replaces it, as one library replaces another.
+    let engine = fixture_library(&temp.0);
+    library
+        .open_library(OpenLibraryRequest {
+            path: engine.display().to_string(),
+        })
+        .await
+        .unwrap();
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(stream.message().await.unwrap().unwrap().tracks.len(), 3);
+}
+
+/// A real folder of music, counted and timed:
+/// `OPEN_ENGINE_TEST_FOLDER=... cargo test -p open-engine-backend --test grpc real_music_folder -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs a real folder of music (OPEN_ENGINE_TEST_FOLDER)"]
+async fn scans_a_real_music_folder() {
+    let path = std::env::var("OPEN_ENGINE_TEST_FOLDER").expect("OPEN_ENGINE_TEST_FOLDER");
+    let temp = TempDir::new("real-folder");
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    let started = Instant::now();
+    let opened = library
+        .open_local_folder(OpenLocalFolderRequest { path })
+        .await
+        .unwrap()
+        .into_inner();
+    println!(
+        "{} tracks in {} folders, opened in {:?}",
+        opened.track_count,
+        opened.playlist_count,
+        started.elapsed()
+    );
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let mut tracks = Vec::new();
+    while let Some(batch) = stream.message().await.unwrap() {
+        tracks.extend(batch.tracks);
+    }
+    let with =
+        |field: fn(&open_engine_api::v1::Track) -> bool| tracks.iter().filter(|t| field(t)).count();
+    println!(
+        "with artist {}, album {}, genre {}, bpm {}, length {}",
+        with(|t| !t.artist.is_empty()),
+        with(|t| !t.album.is_empty()),
+        with(|t| !t.genre.is_empty()),
+        with(|t| t.bpm.is_some()),
+        with(|t| t.length_seconds.is_some()),
+    );
+    for track in tracks.iter().take(5) {
+        println!(
+            "  {} — {} [{}] {:?} BPM, {:?} s ({})",
+            track.artist, track.title, track.album, track.bpm, track.length_seconds, track.path
+        );
     }
 }

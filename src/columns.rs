@@ -33,6 +33,15 @@ pub enum Column {
 }
 
 impl Column {
+    /// Whether the column is about what an Engine library has (ratings, cues, loops,
+    /// SoundSwitch lighting, where a track came from), so a plain folder of music has none.
+    pub fn is_engine_only(self) -> bool {
+        matches!(
+            self,
+            Column::Rating | Column::Cues | Column::Loops | Column::Lighting | Column::Origin
+        )
+    }
+
     /// How many there are.
     pub const COUNT: usize = 11;
     /// In the order they are shown.
@@ -196,6 +205,24 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(self.0.parent().unwrap().parent().unwrap());
         }
+    }
+
+    #[test]
+    fn the_columns_about_an_engine_library_are_told_apart() {
+        let engine_only: Vec<Column> = Column::ALL
+            .into_iter()
+            .filter(|column| column.is_engine_only())
+            .collect();
+        assert_eq!(
+            engine_only,
+            [
+                Column::Rating,
+                Column::Cues,
+                Column::Loops,
+                Column::Lighting,
+                Column::Origin
+            ]
+        );
     }
 
     #[test]

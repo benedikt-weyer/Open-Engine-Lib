@@ -100,6 +100,18 @@ impl Service {
             .ok_or_else(|| Status::failed_precondition("no library is open"))
     }
 
+    /// The open library, which must be an Engine library: what only those have (syncing,
+    /// playlists to edit, ratings) is not there for a plain folder of music.
+    fn engine_library(&self) -> Result<Arc<Library>, Status> {
+        let library = self.library()?;
+        if library.is_folder() {
+            return Err(Status::failed_precondition(
+                "the open library is a folder of music, not an Engine library",
+            ));
+        }
+        Ok(library)
+    }
+
     /// Stops playback, releases the audio device and forgets the library.
     async fn close(&self) {
         self.0.engine.send(Command::Close).await;
@@ -134,7 +146,9 @@ impl LibraryService for Service {
             .await
             .map_err(|error| Status::internal(error.to_string()))?
             .map_err(|error| match error {
-                OpenError::NotALibrary(_) => Status::not_found(error.to_string()),
+                OpenError::NotALibrary(_) | OpenError::NotAFolder(..) => {
+                    Status::not_found(error.to_string())
+                }
                 OpenError::Cache(_) | OpenError::Database(_) => Status::internal(error.to_string()),
             })?;
 
@@ -148,11 +162,41 @@ impl LibraryService for Service {
         Ok(Response::new(response))
     }
 
+    async fn open_local_folder(
+        &self,
+        request: Request<api::OpenLocalFolderRequest>,
+    ) -> Result<Response<api::OpenLibraryResponse>, Status> {
+        let path = PathBuf::from(request.into_inner().path);
+        // Where an edit would be noted, which a folder of music never gets.
+        let scratch = self.0.cache_root.join("local-folder");
+        self.close().await;
+
+        // Looking at every file takes a moment and must not block the async threads.
+        let library = tokio::task::spawn_blocking(move || Library::open_folder(&path, scratch))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(|error| match error {
+                OpenError::NotAFolder(..) | OpenError::NotALibrary(_) => {
+                    Status::not_found(error.to_string())
+                }
+                OpenError::Cache(_) | OpenError::Database(_) => Status::internal(error.to_string()),
+            })?;
+
+        let response = api::OpenLibraryResponse {
+            path: library.dir.display().to_string(),
+            cache_path: String::new(),
+            track_count: library.tracks.len() as u32,
+            playlist_count: library.playlists().len() as u32,
+        };
+        *self.0.library.write().expect("library lock") = Some(Arc::new(library));
+        Ok(Response::new(response))
+    }
+
     async fn save_library_as(
         &self,
         request: Request<api::SaveLibraryAsRequest>,
     ) -> Result<Response<api::SaveLibraryAsResponse>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let destination = PathBuf::from(request.into_inner().path);
         let cache_root = self.0.cache_root.clone();
 
@@ -190,7 +234,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::GetSyncDiffRequest>,
     ) -> Result<Response<api::GetSyncDiffResponse>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let reverse = request.into_inner().reverse;
         // Compares files, possibly on a slow drive: not on the async threads.
         let diff = tokio::task::spawn_blocking(move || sync::diff(&library, reverse))
@@ -204,7 +248,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::SyncToSourceRequest>,
     ) -> Result<Response<api::SyncToSourceResponse>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let overwrite = request.into_inner().overwrite_outside_changes;
         let progress = self.0.progress.clone();
         let done = tokio::task::spawn_blocking(move || {
@@ -221,7 +265,7 @@ impl LibraryService for Service {
         &self,
         _: Request<api::PullFromSourceRequest>,
     ) -> Result<Response<api::PullFromSourceResponse>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let dir = library.dir.clone();
         let progress = self.0.progress.clone();
         let done = tokio::task::spawn_blocking(move || {
@@ -240,7 +284,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::SetRatingRequest>,
     ) -> Result<Response<api::SetRatingResponse>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let request = request.into_inner();
         if request.rating > 100 {
             return Err(Status::invalid_argument(format!(
@@ -264,7 +308,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::CreateSmartPlaylistRequest>,
     ) -> Result<Response<api::SmartPlaylistEdited>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let request = request.into_inner();
         let rules = rules_from(request.rules)?;
         edited(library, move |library| {
@@ -277,7 +321,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::UpdateSmartPlaylistRequest>,
     ) -> Result<Response<api::SmartPlaylistEdited>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let request = request.into_inner();
         let rules = rules_from(request.rules)?;
         edited(library, move |library| {
@@ -290,7 +334,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::CreatePlaylistRequest>,
     ) -> Result<Response<api::PlaylistsEdited>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let request = request.into_inner();
         playlists_edited(library, move |library| {
             library
@@ -304,7 +348,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::RenamePlaylistRequest>,
     ) -> Result<Response<api::PlaylistsEdited>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let request = request.into_inner();
         playlists_edited(library, move |library| {
             library
@@ -318,7 +362,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::DeletePlaylistRequest>,
     ) -> Result<Response<api::PlaylistsEdited>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let request = request.into_inner();
         playlists_edited(library, move |library| {
             library
@@ -332,7 +376,7 @@ impl LibraryService for Service {
         &self,
         _: Request<api::MigrateOriginsRequest>,
     ) -> Result<Response<api::MigrateOriginsResponse>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         // Reads and writes a file: not on the async threads.
         tokio::task::spawn_blocking(move || {
             let locations = library.locations();
@@ -374,7 +418,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::GetLibrarySyncDiffRequest>,
     ) -> Result<Response<api::GetLibrarySyncDiffResponse>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let request = request.into_inner();
         let scratch = self.0.cache_root.clone();
         // Copies a database and reads it: not on the async threads.
@@ -403,7 +447,7 @@ impl LibraryService for Service {
         &self,
         request: Request<api::SyncToLibraryRequest>,
     ) -> Result<Response<api::SyncToLibraryResponse>, Status> {
-        let library = self.library()?;
+        let library = self.engine_library()?;
         let request = request.into_inner();
         let scratch = self.0.cache_root.clone();
         let progress = self.0.progress.clone();
@@ -862,6 +906,7 @@ fn edit_status(error: EditError) -> Status {
         | EditError::BadLoop(_) => Status::invalid_argument(error.to_string()),
         EditError::TitleTaken => Status::already_exists(error.to_string()),
         EditError::NoSmartlists
+        | EditError::NotEngine
         | EditError::NoAnalysis
         | EditError::UnreadableCues
         | EditError::UnreadableLoops => Status::failed_precondition(error.to_string()),

@@ -23,11 +23,11 @@ use open_engine_api::v1::{
     GetLibrarySyncDiffResponse, GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest,
     GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest,
     MigrateOriginsRequest, MigrateOriginsResponse, NextRequest, OpenLibraryRequest,
-    OperationProgress, PlayRequest, PlaybackStatus, PreviousRequest, PullFromSourceRequest,
-    PullFromSourceResponse, RenamePlaylistRequest, SaveLibraryAsRequest, SeekRequest,
-    SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
-    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
-    TogglePauseRequest, UpdateSmartPlaylistRequest,
+    OpenLocalFolderRequest, OperationProgress, PlayRequest, PlaybackStatus, PreviousRequest,
+    PullFromSourceRequest, PullFromSourceResponse, RenamePlaylistRequest, SaveLibraryAsRequest,
+    SeekRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState,
+    StopRequest, SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest,
+    SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -38,7 +38,7 @@ use tonic::{Request, Status};
 
 use crate::cues::Cue;
 use crate::loops::Loop;
-use crate::model::{Library, Lighting, Playlist, Track};
+use crate::model::{Kind, Library, Lighting, Playlist, Track};
 use crate::waveform::{BeatGrid, Marker, Waveform};
 
 /// Overrides where to find the backend executable.
@@ -214,6 +214,36 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
         opened.track_count,
     )
     .await
+}
+
+/// Has the backend open the plain folder of music at `path` as the library and fetches its
+/// tracks and the folders as playlists.
+pub async fn open_local_folder(
+    mut backend: Backend,
+    path: PathBuf,
+) -> Result<Arc<Library>, String> {
+    let opened = backend
+        .library
+        .open_local_folder(OpenLocalFolderRequest {
+            path: path.display().to_string(),
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+
+    let library = load_library(
+        &mut backend,
+        opened.path,
+        opened.cache_path,
+        opened.track_count,
+    )
+    .await?;
+    // (Nothing else holds the library yet, so it is not shared.)
+    Ok(Arc::new(
+        Arc::into_inner(library)
+            .expect("the library was just made")
+            .of_kind(Kind::Folder),
+    ))
 }
 
 /// Saves the open library to a new place, which becomes its location, and fetches it

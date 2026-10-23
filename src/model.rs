@@ -99,9 +99,21 @@ pub struct Playlist {
     pub tracks: Vec<usize>,
 }
 
+/// What a library is made from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Kind {
+    /// An Engine DJ library: its databases, with ratings, cues, playlists to edit and so on.
+    #[default]
+    Engine,
+    /// A plain folder of music files, whose folders are the playlists. It has nothing but
+    /// what the files say, and nothing to sync.
+    Folder,
+}
+
 #[derive(Debug)]
 pub struct Library {
-    /// The `Engine Library` folder that was opened.
+    pub kind: Kind,
+    /// The `Engine Library` folder that was opened (or the folder of music).
     pub path: String,
     /// The backend's cached copy of the library's databases, which is what it reads.
     pub cache_path: String,
@@ -123,12 +135,25 @@ impl Library {
             .map(|(index, track)| (track.id, index))
             .collect();
         Self {
+            kind: Kind::Engine,
             path,
             cache_path,
             tracks,
             playlists,
             index_of_id,
         }
+    }
+
+    /// The same library, of another kind.
+    pub fn of_kind(mut self, kind: Kind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Whether this is an Engine library, which is what has ratings, cues and loops to
+    /// show and edit, playlists to change, and a source to sync with.
+    pub fn is_engine(&self) -> bool {
+        self.kind == Kind::Engine
     }
 
     /// The playlists from the top-level one down to `index`, as indices into `playlists`.

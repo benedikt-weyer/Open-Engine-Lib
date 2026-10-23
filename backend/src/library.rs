@@ -17,6 +17,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use crate::beatgrid::{self, Marker};
 use crate::cache::{self, DATABASE_DIR};
 use crate::cues::{self, Cue, QuickCues};
+use crate::folder;
 use crate::loops::{self, Loop, QuickLoops};
 use crate::origins::{self, Origins, TrackKey};
 use crate::smartlist::Rules;
@@ -30,6 +31,8 @@ pub const ARTWORK_DIR: &str = "Artwork";
 pub enum OpenError {
     /// No `Database2/m.db` was found at or just below the chosen folder.
     NotALibrary(PathBuf),
+    /// The path is not a folder that can be read.
+    NotAFolder(PathBuf, std::io::Error),
     /// The databases could not be copied into the cache.
     Cache(std::io::Error),
     Database(rusqlite::Error),
@@ -43,6 +46,13 @@ impl fmt::Display for OpenError {
                 "{} does not contain an Engine library (Database2/m.db)",
                 path.display()
             ),
+            OpenError::NotAFolder(path, error) => {
+                write!(
+                    f,
+                    "{} is not a folder that can be read: {error}",
+                    path.display()
+                )
+            }
             OpenError::Cache(error) => {
                 write!(
                     f,
@@ -70,6 +80,9 @@ pub enum EditError {
     TitleTaken,
     /// The library has no table for smart playlists (it is from an older version).
     NoSmartlists,
+    /// The library is a plain folder of music, which has none of what an Engine library
+    /// has to change.
+    NotEngine,
     /// The track has no analysis to keep cues in.
     NoAnalysis,
     /// The track has cues stored in a way that isn't understood, which are left alone.
@@ -96,6 +109,9 @@ impl fmt::Display for EditError {
             EditError::TitleTaken => write!(f, "there is already a playlist with that title"),
             EditError::NoSmartlists => {
                 write!(f, "this library has no smart playlists (it is too old)")
+            }
+            EditError::NotEngine => {
+                write!(f, "this is a folder of music, not an Engine library")
             }
             EditError::NoAnalysis => {
                 write!(f, "the track has not been analysed, so it has no cues")
@@ -197,6 +213,9 @@ pub struct Library {
     legacy_origins: PathBuf,
     /// Ratings set since the library was opened, by index in `tracks`.
     ratings: Mutex<HashMap<usize, u32>>,
+    /// A plain folder of music (see `folder`): there is no database behind it, and what
+    /// reads or writes one (cues, beatgrids, ratings) finds nothing or refuses.
+    folder: bool,
     /// How many cues each track has (by index in `tracks`), as of now.
     cue_counts: Mutex<Vec<u32>>,
     /// The same for loops.
@@ -228,6 +247,40 @@ impl Library {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         Self::load(connection, dir, cache)
+    }
+
+    /// Opens the plain folder of music at `path` as a library: its audio files are the
+    /// tracks and its folders the playlists. Nothing is copied or written; `scratch` is
+    /// only where an edit would be noted, and nothing here can be edited.
+    pub fn open_folder(path: &Path, scratch: PathBuf) -> Result<Self, OpenError> {
+        let scanned =
+            folder::scan(path).map_err(|error| OpenError::NotAFolder(path.to_path_buf(), error))?;
+        let by_id = scanned
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.db_id, index))
+            .collect();
+        let counts = vec![0; scanned.tracks.len()];
+        Ok(Self {
+            dir: path.to_path_buf(),
+            cache: scratch,
+            tracks: scanned.tracks,
+            playlists: Mutex::new(scanned.playlists),
+            by_id,
+            by_origin: HashMap::new(),
+            legacy_origins: origins::legacy_path(),
+            ratings: Mutex::default(),
+            folder: true,
+            cue_counts: Mutex::new(counts.clone()),
+            loop_counts: Mutex::new(counts),
+            connection: Mutex::new(Connection::open_in_memory()?),
+        })
+    }
+
+    /// Whether this is a plain folder of music rather than an Engine library.
+    pub fn is_folder(&self) -> bool {
+        self.folder
     }
 
     fn load(connection: Connection, dir: PathBuf, cache: PathBuf) -> Result<Self, OpenError> {
@@ -268,6 +321,7 @@ impl Library {
             by_origin,
             legacy_origins: origins::legacy_path(),
             ratings: Mutex::default(),
+            folder: false,
             cue_counts: Mutex::new(cue_counts),
             loop_counts: Mutex::new(loop_counts),
             connection: Mutex::new(connection),
@@ -770,6 +824,9 @@ impl Library {
     /// The source only gets it when the working copy is written to it (`sync::push`).
     pub fn set_rating(&self, index: usize, rating: u32) -> Result<(), EditError> {
         let track = self.tracks.get(index).ok_or(EditError::NoSuchTrack)?;
+        if self.folder {
+            return Err(EditError::NotEngine);
+        }
         // Noted first: were the edit to be made and the note not, a later open could
         // replace the working copy without keeping the edit.
         cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
@@ -797,7 +854,7 @@ impl Library {
     /// The cues of the track at `index` in `tracks`, in slot order. None if the track has
     /// none, has not been analysed, or has them stored in a way that isn't understood.
     pub fn cues(&self, index: usize) -> rusqlite::Result<Vec<Cue>> {
-        let Some(track) = self.tracks.get(index) else {
+        let Some(track) = self.tracks.get(index).filter(|_| !self.folder) else {
             return Ok(Vec::new());
         };
         let connection = self.connection.lock().expect("database lock");
@@ -818,6 +875,9 @@ impl Library {
     /// main cue point and what else is stored with the cues is left as it was.
     pub fn set_cues(&self, index: usize, cues: &[Cue]) -> Result<Vec<Cue>, EditError> {
         let track = self.tracks.get(index).ok_or(EditError::NoSuchTrack)?;
+        if self.folder {
+            return Err(EditError::NotEngine);
+        }
         let connection = self.connection.lock().expect("database lock");
         let blobs = read_analysis(&connection, track.db_id)?.ok_or(EditError::NoAnalysis)?;
         let rate = blobs.sample_rate().ok_or(EditError::NoAnalysis)?;
@@ -865,7 +925,7 @@ impl Library {
     /// track has none, has not been analysed, or has them stored in a way that isn't
     /// understood.
     pub fn loops(&self, index: usize) -> rusqlite::Result<Vec<Loop>> {
-        let Some(track) = self.tracks.get(index) else {
+        let Some(track) = self.tracks.get(index).filter(|_| !self.folder) else {
             return Ok(Vec::new());
         };
         let connection = self.connection.lock().expect("database lock");
@@ -884,6 +944,9 @@ impl Library {
     /// The source only gets them when the working copy is written to it (`sync::push`).
     pub fn set_loops(&self, index: usize, loops: &[Loop]) -> Result<Vec<Loop>, EditError> {
         let track = self.tracks.get(index).ok_or(EditError::NoSuchTrack)?;
+        if self.folder {
+            return Err(EditError::NotEngine);
+        }
         let connection = self.connection.lock().expect("database lock");
         let blobs = read_analysis(&connection, track.db_id)?.ok_or(EditError::NoAnalysis)?;
         let rate = blobs.sample_rate().ok_or(EditError::NoAnalysis)?;
@@ -923,7 +986,7 @@ impl Library {
 
     /// The beatgrid of the track at `index` in `tracks`, if the library has analysed one.
     pub fn beat_grid(&self, index: usize) -> rusqlite::Result<Option<Vec<Marker>>> {
-        let Some(track) = self.tracks.get(index) else {
+        let Some(track) = self.tracks.get(index).filter(|_| !self.folder) else {
             return Ok(None);
         };
         let connection = self.connection.lock().expect("database lock");
@@ -945,6 +1008,9 @@ impl Library {
     /// as an image in the database, as a JPEG in the library's `Artwork` folder named
     /// after the row's raw hash, or as a streaming URL, which has no image to give.
     pub fn album_art(&self, id: u32) -> rusqlite::Result<Option<AlbumArt>> {
+        if self.folder {
+            return Ok(None);
+        }
         let (hash, image): (Value, Value) = {
             let connection = self.connection.lock().expect("database lock");
             let row = connection.query_row(

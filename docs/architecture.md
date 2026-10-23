@@ -38,7 +38,7 @@ If the backend is missing or fails to start, the library page says so and offers
 The protocol lives in `api/proto/openenginelib/v1/`:
 
 - `backend.proto`: `BackendService.GetInfo`, the version handshake.
-- `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `SetRating`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`, `GetWaveform`, `GetCues`, `SetCues`, `GetLoops`, `SetLoops`.
+- `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `SetRating`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`, `GetWaveform`, `GetCues`, `SetCues`, `GetLoops`, `SetLoops`, `OpenLocalFolder`.
 - `playback.proto`: `PlaybackService`: `Play`, `TogglePause`, `Stop`, `Next`, `Previous`, `Seek`, `GetStatus`. The backend owns the queue and moves on to the next track by itself; the UI polls `GetStatus` while playing.
 
 Versioning rules:
@@ -152,6 +152,16 @@ A track also has eight loop pads (Engine's saved loops), stored in `PerformanceD
 - **Pads:** a second row of eight pads under the cue pads. A pad with a loop is shown in the loop's color; clicking jumps to its start, right-clicking removes it. Clicking an empty pad saves a loop at the playhead that is four beats long (at the tempo of the track's beatgrid, else of the library, else 2 seconds), moved back if it would pass the end of the track. "Edit loops…" opens a window like the cues' one, with a start and an end per loop, each with a button to take it from the playhead, and "Go to the start". Nothing is written until **Save**, and the end must be after the start.
 - **Writing:** `SetLoops` replaces the loops of a track in the working copy like `SetCues` does: the slots in the request are the loops the track has afterwards, loops in other slots are removed, and a slot that was only half set is left alone. It checks the slots (0 to 7, once each), the positions (the start 0 or more, the end after the start and not past the end of the track) and the names (255 bytes), and refuses a track without analysis or with a `loops` blob it can't read. The source gets the change when you sync, where it shows as changed "loops". Not while the library is being saved elsewhere or while another change to the loops is being written.
 - **Not done:** as for the cues: only the track in the player, no snapping to the beatgrid, and writing has not been tried on a real player. The backend reads the loops of a real library correctly (`reads_the_loops_of_a_real_library`, ignored).
+
+## Local music
+
+Besides Engine libraries, a plain folder of music files can be opened. The **Local music** section of the sidebar lists the folders that were added (kept in `<state dir>/open-engine-lib/local-folders.toml`, in the order they were added); **Add local music folder…** asks for a folder, adds it to the list and opens it, clicking a folder opens it, and the × next to it takes it out of the list (closing it if it is the open one). **Close folder** in the page header closes the open one.
+
+- **One library at a time:** a folder of music replaces the open library, like another Engine library would (the backend holds one). Closing it leaves no library open, and the next start doesn't reopen it; if the app is left with a folder open, the next start goes back to it (`Session.folder`).
+- **Tracks:** `OpenLocalFolder` scans the folder (`backend/src/folder.rs`): every file below it that the player can decode (`mp3`, `flac`, `wav`, `ogg`, `m4a`, `mp4`; by extension) is a track. Hidden files and folders (names starting with a dot, like the `._` files macOS leaves on drives) are skipped, and so are links to folders. The tags give the title (else the file name), artist, album, genre and BPM (`BPM` or `TBPM`/`tmpo`), and the file's properties the length; they are read with the `lofty` crate on as many threads as there are cores, without covers. A file that can't be read is still a track, with only its name. A real USB drive with 5,300 files in 3,800 folders took about 20 seconds cold, which the UI shows as "Opening…" meanwhile.
+- **Folders:** each folder with music below it is a playlist, in the tree in the sidebar like the playlists of an Engine library, and shows the tracks of all folders below it too (so a folder like `Artist` shows all its albums). "All tracks" is every file, including those directly in the chosen folder. Folders and files are ordered by name, ignoring case.
+- **What is missing:** a folder has nothing but what the files say. The track list leaves out the Rating, Cues, Loops, Lighting and Origin columns, there are no cue and loop pads or covers, the waveform has no beatgrid, and nothing can be edited or synced: the buttons for playlists, smart playlists, syncing and saving origins are not shown, and the backend refuses (`FAILED_PRECONDITION`) `SaveLibraryAs`, the sync and playlist calls, `SetRating`, `SetCues` and `SetLoops` for such a library. Nothing is written to the folder or copied.
+- **Not done:** covers from the files' embedded pictures, a rescan when the folder changes (close and open it again), and audio formats the player can't decode (AIFF, Opus, ...).
 
 ## Restoring the last session
 

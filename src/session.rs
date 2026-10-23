@@ -22,6 +22,8 @@ pub struct Session {
     /// The library that was open. `None` if none was, or it was closed on purpose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub library: Option<PathBuf>,
+    /// `library` is a plain folder of music, not an Engine library.
+    pub folder: bool,
     /// Titles from the top-level playlist down to the one that was shown. Empty for
     /// the list of all tracks. Titles are unique within their parent, so this is
     /// enough to find the playlist again even if the library was edited.
@@ -129,6 +131,7 @@ mod tests {
     fn playing() -> Session {
         Session {
             library: Some("/media/DRIVE/Engine Library".into()),
+            folder: false,
             playlist: vec!["House".into(), "Deep".into()],
             track: Some("../House/a.flac".into()),
             loaded: true,

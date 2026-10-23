@@ -7,6 +7,7 @@ description = "Open Engine Lib backend: reads the Engine library and plays track
 [dependencies]
 dirs = "7.0.0"
 flate2 = "1.1.10"
+lofty = "0.25.4"
 open-engine-api = { path = "../api" }
 rodio = { version = "0.23.0", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

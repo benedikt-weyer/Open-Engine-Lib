@@ -1,5 +1,6 @@
-//! The left side of the library page: the playlists of the open library, if there is
-//! one, the connected USB drives and the recently opened libraries.
+//! The left side of the library page: the playlists of the open library (the folders, for
+//! a folder of music), if there is one, the local music folders that were added, the
+//! connected USB drives and the recently opened libraries.
 
 use std::path::Path;
 
@@ -10,6 +11,7 @@ use crate::Message;
 use crate::browser::{self, Browser};
 use crate::config::Language;
 use crate::drives::Drive;
+use crate::local_folders::LocalFolders;
 use crate::recent::{Recents, display_name};
 
 const WIDTH: f32 = 260.0;
@@ -17,6 +19,8 @@ const WIDTH: f32 = 260.0;
 const RECENT_MAX_HEIGHT: f32 = 220.0;
 /// And so do the drives.
 const DRIVES_MAX_HEIGHT: f32 = 160.0;
+/// And the local music folders.
+const LOCAL_MAX_HEIGHT: f32 = 200.0;
 
 /// Where libraries can be opened from, besides the open dialog.
 pub struct Sources<'a> {
@@ -24,6 +28,8 @@ pub struct Sources<'a> {
     /// Why the recent libraries could not be saved.
     pub recents_error: Option<&'a str>,
     pub drives: &'a [Drive],
+    /// The folders of music that were added.
+    pub local: &'a LocalFolders,
 }
 
 /// `current` is the open library, to mark it in the list. Libraries can't be opened
@@ -40,6 +46,7 @@ pub fn view<'a>(
         recents,
         recents_error,
         drives,
+        local,
     } = sources;
     let strings = language.strings();
 
@@ -74,7 +81,17 @@ pub fn view<'a>(
         drive_section = drive_section.push(scrollable(list));
     }
 
+    let local_section = local_section(local, current, can_open, language);
+
     let content = match browser {
+        // The folders of a folder of music, with the local music below them. There is
+        // nothing to edit or sync.
+        Some(browser) if !browser.library.is_engine() => column![
+            browser::playlists(browser, language),
+            container(local_section).max_height(LOCAL_MAX_HEIGHT),
+            container(drive_section).max_height(DRIVES_MAX_HEIGHT),
+            container(section).max_height(RECENT_MAX_HEIGHT)
+        ],
         Some(browser) => column![
             browser::playlists(browser, language),
             button(text(&strings.playlist_new))
@@ -92,13 +109,75 @@ pub fn view<'a>(
             button(text(&strings.libsync_button))
                 .width(Fill)
                 .on_press_maybe(can_sync.then_some(Message::LibrarySyncOpen)),
+            container(local_section).max_height(LOCAL_MAX_HEIGHT),
             container(drive_section).max_height(DRIVES_MAX_HEIGHT),
             container(section).max_height(RECENT_MAX_HEIGHT)
         ],
-        None => column![drive_section, section, Space::new().height(Fill)],
+        None => column![
+            container(local_section).max_height(LOCAL_MAX_HEIGHT),
+            drive_section,
+            section,
+            Space::new().height(Fill)
+        ],
     };
     container(content.spacing(16).height(Fill))
         .width(WIDTH)
+        .into()
+}
+
+/// The folders of music that were added, with the button to add one. Clicking a folder opens
+/// it (the open one is marked); the × takes it out of the list, closing it if it is open.
+fn local_section<'a>(
+    local: &'a LocalFolders,
+    current: Option<&str>,
+    can_open: bool,
+    language: Language,
+) -> Element<'a, Message> {
+    let strings = language.strings();
+
+    let mut section = column![text(&strings.local_music).size(16)].spacing(6);
+    if local.paths().is_empty() {
+        section = section.push(text(&strings.no_local_music).style(text::secondary));
+    } else {
+        let mut list = column![].spacing(2);
+        for path in local.paths() {
+            let is_current = current.is_some_and(|current| Path::new(current) == path);
+            let open = button(text(display_name(path)).wrapping(text::Wrapping::None))
+                .width(Fill)
+                .style(if is_current {
+                    button::primary
+                } else {
+                    button::text
+                })
+                .on_press_maybe(can_open.then(|| Message::OpenLocalFolder(path.to_path_buf())));
+            let remove = tooltip(
+                button(text("×"))
+                    .padding([4, 8])
+                    .style(button::text)
+                    .on_press(Message::RemoveLocalFolder(path.to_path_buf())),
+                text(&strings.local_remove),
+                tooltip::Position::Bottom,
+            )
+            .style(container::rounded_box);
+            // The full path is what tells two folders with the same name apart.
+            list = list.push(
+                tooltip(
+                    row![open, remove].align_y(iced::Center),
+                    text(path.display().to_string()),
+                    tooltip::Position::Right,
+                )
+                .style(container::rounded_box),
+            );
+        }
+        section = section.push(scrollable(list).height(iced::Shrink));
+    }
+    section
+        .push(
+            button(text(&strings.local_add))
+                .width(Fill)
+                .style(button::secondary)
+                .on_press_maybe(can_open.then_some(Message::AddLocalFolder)),
+        )
         .into()
 }
 

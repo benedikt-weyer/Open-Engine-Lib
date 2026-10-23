@@ -14,6 +14,7 @@ mod deck;
 mod drives;
 mod i18n;
 mod library_sync_view;
+mod local_folders;
 mod loop_bar;
 mod loop_editor;
 mod loops;
@@ -32,7 +33,7 @@ mod smart_editor;
 mod sync_view;
 mod waveform;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -48,6 +49,7 @@ use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text, tooltip};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use library_sync_view::Stage as LibrarySyncStage;
+use local_folders::LocalFolders;
 use loops::{Loop, TrackLoops};
 use menubar::MenuItem;
 use model::Library;
@@ -124,6 +126,8 @@ struct State {
     session: SessionStore,
     library: LibraryState,
     recents: Recents,
+    /// The folders of music that were added to the "Local music" section.
+    local_folders: LocalFolders,
     /// The USB drives that are connected, as of the last scan.
     drives: Vec<Drive>,
     /// Whether a scan is still running, so a slow drive can't pile them up.
@@ -283,6 +287,14 @@ pub enum Message {
     DrivesFound(Vec<Drive>),
     /// Open the Engine library on a drive (the path is its `Engine Library` folder).
     OpenDrive(PathBuf),
+    /// "Add local music folder…": ask for a folder.
+    AddLocalFolder,
+    /// The folder that was picked, if one was.
+    LocalFolderChosen(Option<PathBuf>),
+    /// A folder of the "Local music" section was clicked: open it as the library.
+    OpenLocalFolder(PathBuf),
+    /// The × of a folder of the "Local music" section: take it out of the list.
+    RemoveLocalFolder(PathBuf),
     ForgetRecent(PathBuf),
     /// Scroll the track list to a row, once the list is on screen.
     RevealRow(usize),
@@ -388,6 +400,7 @@ impl State {
             session,
             library: LibraryState::Closed { error: None },
             recents: Recents::discover(),
+            local_folders: LocalFolders::discover(),
             drives: Vec::new(),
             scanning_drives: true,
             covers: Covers::default(),
@@ -566,7 +579,26 @@ impl State {
     }
 
     /// Opens the library at `path`; `restore` says what to go back to in it, if anything.
+    /// (A session that was in a folder of music goes back to that folder.)
     fn open(&mut self, path: PathBuf, restore: Option<Session>) -> Task<Message> {
+        let kind = match &restore {
+            Some(session) if session.folder => model::Kind::Folder,
+            _ => model::Kind::Engine,
+        };
+        self.open_as(path, kind, restore)
+    }
+
+    /// Opens the folder of music at `path` as the library.
+    fn open_folder(&mut self, path: PathBuf) -> Task<Message> {
+        self.open_as(path, model::Kind::Folder, None)
+    }
+
+    fn open_as(
+        &mut self,
+        path: PathBuf,
+        kind: model::Kind,
+        restore: Option<Session>,
+    ) -> Task<Message> {
         let Some(backend) = self.backend() else {
             // Still starting: remember it for when the backend is up.
             self.open_when_ready = Some((path, restore));
@@ -581,7 +613,21 @@ impl State {
         self.loops.clear();
         self.sync = None;
         self.library = LibraryState::Opening(path.clone());
-        Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
+        match kind {
+            model::Kind::Engine => {
+                Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
+            }
+            model::Kind::Folder => Task::perform(
+                backend::open_local_folder(backend, path),
+                Message::LibraryOpened,
+            ),
+        }
+    }
+
+    /// Whether the open library is a folder of music, which has nothing of an Engine library
+    /// to edit, show or sync.
+    fn is_folder(&self) -> bool {
+        matches!(&self.library, LibraryState::Open(browser) if !browser.library.is_engine())
     }
 
     fn reset_playback(&mut self) {
@@ -699,6 +745,7 @@ impl State {
 
         Some(Session {
             library: Some(PathBuf::from(&library.path)),
+            folder: !library.is_engine(),
             playlist,
             track,
             loaded,
@@ -836,7 +883,9 @@ impl State {
         let (Some(backend), Some(id)) = (self.backend(), self.playing_id()) else {
             return Task::none();
         };
-        if !matches!(self.library, LibraryState::Open(_)) || !self.loops.claim(id) {
+        if !matches!(&self.library, LibraryState::Open(browser) if browser.library.is_engine())
+            || !self.loops.claim(id)
+        {
             return Task::none();
         }
         let generation = self.loops.generation();
@@ -867,7 +916,9 @@ impl State {
         let (Some(backend), Some(id)) = (self.backend(), self.playing_id()) else {
             return Task::none();
         };
-        if !matches!(self.library, LibraryState::Open(_)) || !self.cues.claim(id) {
+        if !matches!(&self.library, LibraryState::Open(browser) if browser.library.is_engine())
+            || !self.cues.claim(id)
+        {
             return Task::none();
         }
         let generation = self.cues.generation();
@@ -941,6 +992,19 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 
 fn handle(state: &mut State, message: Message) -> Task<Message> {
     match message {
+        // A folder of music has nothing to sync, no playlists or ratings to change and no
+        // origins to save (the buttons for these are not shown either).
+        Message::SyncOpen
+        | Message::LibrarySyncOpen
+        | Message::PlaylistNew
+        | Message::PlaylistRename(_)
+        | Message::PlaylistDelete(_)
+        | Message::SmartNew
+        | Message::SmartEdit(_)
+        | Message::MigrateOrigins
+        | Message::SetStars { .. }
+        | Message::MenuSelected(MenuItem::SaveAs)
+            if state.is_folder() => {}
         Message::Navigate(page) => state.page = page,
         Message::ThemeSelected(theme) => {
             state.config_error = state.config.set_theme(theme).err().map(|e| e.to_string());
@@ -1623,7 +1687,60 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::CloseLibrary
         | Message::OpenRecent(_)
         | Message::OpenDrive(_)
+        | Message::AddLocalFolder
+        | Message::OpenLocalFolder(_)
             if state.saving.is_some() => {}
+        Message::AddLocalFolder => {
+            let title = state
+                .config
+                .effective()
+                .language
+                .strings()
+                .local_choose
+                .clone();
+            return Task::perform(
+                async move {
+                    rfd::AsyncFileDialog::new()
+                        .set_title(title)
+                        .pick_folder()
+                        .await
+                        .map(|folder| folder.path().to_path_buf())
+                },
+                Message::LocalFolderChosen,
+            );
+        }
+        Message::LocalFolderChosen(Some(_)) if state.saving.is_some() => {}
+        Message::LocalFolderChosen(Some(path)) => {
+            state.recents_error = state
+                .local_folders
+                .add(path.clone())
+                .err()
+                .map(|error| error.to_string());
+            return state.open_folder(path);
+        }
+        Message::LocalFolderChosen(None) => {}
+        Message::OpenLocalFolder(path) => {
+            // One library at a time: the backend would end up with the other one.
+            if !matches!(state.library, LibraryState::Opening(_)) {
+                return state.open_folder(path);
+            }
+        }
+        Message::RemoveLocalFolder(path) => {
+            state.recents_error = state
+                .local_folders
+                .remove(&path)
+                .err()
+                .map(|error| error.to_string());
+            // Taking the open folder out of the list closes it.
+            let open = matches!(
+                &state.library,
+                LibraryState::Open(browser)
+                    if !browser.library.is_engine() && Path::new(&browser.library.path) == path
+            );
+            if open && state.saving.is_none() {
+                return handle(state, Message::CloseLibrary);
+            }
+        }
         Message::ChooseLibrary => {
             let title = state
                 .config
@@ -1650,11 +1767,16 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             if matches!(state.library, LibraryState::Opening(_)) {
                 state.library = match result {
                     Ok(library) => {
-                        state.recents_error = state
-                            .recents
-                            .add(PathBuf::from(&library.path))
-                            .err()
-                            .map(|error| error.to_string());
+                        // A folder of music is kept in the "Local music" section, not among
+                        // the recent libraries.
+                        let path = PathBuf::from(&library.path);
+                        state.recents_error = if library.is_engine() {
+                            state.recents.add(path)
+                        } else {
+                            state.local_folders.add(path)
+                        }
+                        .err()
+                        .map(|error| error.to_string());
                         LibraryState::Open(Browser::new(library))
                     }
                     Err(error) => {
@@ -2242,6 +2364,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
                 recents: &state.recents,
                 recents_error: state.recents_error.as_deref(),
                 drives: &state.drives,
+                local: &state.local_folders,
             },
             browser.map(|browser| browser.library.path.as_str()),
             !matches!(state.library, LibraryState::Opening(_)) && state.saving.is_none(),
@@ -2264,43 +2387,64 @@ fn open_library<'a>(
     let strings = language.strings();
     let library = &browser.library;
 
-    let mut summary = column![
-        text(fill(
-            &strings.library_summary,
-            &[
-                ("path", &library.path),
-                ("tracks", &library.tracks.len()),
-                ("playlists", &library.playlists.len()),
-            ],
-        )),
-        text(fill(
-            &strings.library_cache,
-            &[("path", &library.cache_path)],
-        ))
-        .size(14)
-        .style(text::secondary),
-    ]
+    let mut summary = if library.is_engine() {
+        column![
+            text(fill(
+                &strings.library_summary,
+                &[
+                    ("path", &library.path),
+                    ("tracks", &library.tracks.len()),
+                    ("playlists", &library.playlists.len()),
+                ],
+            )),
+            text(fill(
+                &strings.library_cache,
+                &[("path", &library.cache_path)],
+            ))
+            .size(14)
+            .style(text::secondary),
+        ]
+    } else {
+        // A folder of music: its folders are the playlists, and there is no cache.
+        column![
+            text(fill(
+                &strings.local_summary,
+                &[
+                    ("path", &library.path),
+                    ("tracks", &library.tracks.len()),
+                    ("folders", &library.playlists.len()),
+                ],
+            )),
+            text(&strings.local_hint).size(14).style(text::secondary),
+        ]
+    }
     .spacing(2)
     .width(Fill);
     if let Some(notice) = browser.origin_notice() {
         summary = summary.push(text(notice).size(14).style(text::success));
     }
 
-    let header = row![
-        summary,
+    let mut header = row![summary].spacing(10).align_y(Center);
+    if library.is_engine() {
         // Saves where each track's file is as its origin (only the origin database changes).
-        tooltip(
-            button(text(&strings.origin_migrate)).on_press(Message::MigrateOrigins),
-            text(&strings.origin_migrate_tip).size(13),
-            tooltip::Position::Bottom,
-        )
-        .style(container::rounded_box),
-        // Not while the library is being saved: it is in the middle of moving.
-        button(text(&strings.close_library))
-            .on_press_maybe(state.saving.is_none().then_some(Message::CloseLibrary)),
-    ]
-    .spacing(10)
-    .align_y(Center);
+        header = header.push(
+            tooltip(
+                button(text(&strings.origin_migrate)).on_press(Message::MigrateOrigins),
+                text(&strings.origin_migrate_tip).size(13),
+                tooltip::Position::Bottom,
+            )
+            .style(container::rounded_box),
+        );
+    }
+    // Not while the library is being saved: it is in the middle of moving.
+    header = header.push(
+        button(text(if library.is_engine() {
+            &strings.close_library
+        } else {
+            &strings.close_folder
+        }))
+        .on_press_maybe(state.saving.is_none().then_some(Message::CloseLibrary)),
+    );
 
     let now = (!state.is_stopped())
         .then_some(state.status.track_id)
@@ -2487,6 +2631,7 @@ mod tests {
             session: SessionStore::load(temp.join("session.toml")),
             library: LibraryState::Open(Browser::new(Arc::new(library))),
             recents: Recents::load(temp.join("recent.toml")),
+            local_folders: LocalFolders::load(temp.join("local-folders.toml")),
             drives: Vec::new(),
             scanning_drives: false,
             covers: Covers::default(),
@@ -2528,6 +2673,7 @@ mod tests {
     fn session(playlist: &[&str], track: Option<&str>, loaded: bool, position_ms: u64) -> Session {
         Session {
             library: Some("/media/DRIVE/Engine Library".into()),
+            folder: false,
             playlist: playlist.iter().map(|title| title.to_string()).collect(),
             track: track.map(str::to_owned),
             loaded,
@@ -3921,6 +4067,180 @@ mod tests {
             state.loop_editor.as_ref().unwrap().loops().unwrap(),
             [],
             "no edits while it is being written"
+        );
+    }
+
+    /// An app with a folder of music open.
+    fn state_in_folder() -> State {
+        let mut state = state();
+        state.library = LibraryState::Open(Browser::new(Arc::new(
+            library_at("/home/me/Music").of_kind(model::Kind::Folder),
+        )));
+        state
+    }
+
+    #[test]
+    fn a_folder_of_music_that_was_opened_is_listed_under_local_music_not_recents() {
+        let mut state = state();
+        state.library = LibraryState::Opening("/home/me/Music".into());
+        let before = state.recents.paths().to_vec();
+
+        let folder = Arc::new(library_at("/home/me/Music").of_kind(model::Kind::Folder));
+        let _ = handle(&mut state, Message::LibraryOpened(Ok(folder)));
+        assert!(!browser(&state).library.is_engine());
+        assert!(state.local_folders.contains(Path::new("/home/me/Music")));
+        assert_eq!(
+            state.recents.paths(),
+            before,
+            "recents are Engine libraries"
+        );
+
+        // And an Engine library the other way round.
+        state.library = LibraryState::Opening("/media/NEW/Engine Library".into());
+        let _ = handle(
+            &mut state,
+            Message::LibraryOpened(Ok(Arc::new(library_at("/media/NEW/Engine Library")))),
+        );
+        assert_eq!(
+            state.recents.paths().first(),
+            Some(&PathBuf::from("/media/NEW/Engine Library"))
+        );
+        assert!(
+            !state
+                .local_folders
+                .contains(Path::new("/media/NEW/Engine Library"))
+        );
+    }
+
+    #[test]
+    fn an_added_folder_is_remembered_and_opened() {
+        let mut state = state();
+        let _ = handle(
+            &mut state,
+            Message::LocalFolderChosen(Some("/home/me/Music".into())),
+        );
+        assert!(state.local_folders.contains(Path::new("/home/me/Music")));
+        // (No backend is running in the test, so it waits for it to be up.)
+        assert_eq!(
+            state
+                .open_when_ready
+                .as_ref()
+                .map(|(path, _)| path.as_path()),
+            Some(Path::new("/home/me/Music"))
+        );
+
+        let before = state.local_folders.paths().len();
+        let _ = handle(&mut state, Message::LocalFolderChosen(None));
+        assert_eq!(state.local_folders.paths().len(), before);
+    }
+
+    #[test]
+    fn what_only_an_engine_library_has_does_nothing_in_a_folder_of_music() {
+        let mut state = state_in_folder();
+        for message in [
+            Message::SyncOpen,
+            Message::LibrarySyncOpen,
+            Message::PlaylistNew,
+            Message::PlaylistRename(0),
+            Message::PlaylistDelete(0),
+            Message::SmartNew,
+            Message::SmartEdit(0),
+            Message::MenuSelected(MenuItem::SaveAs),
+        ] {
+            let _ = handle(&mut state, message);
+        }
+        assert!(state.sync.is_none() && state.library_sync.is_none());
+        assert!(state.playlist_dialog.is_none() && state.smart.is_none());
+        assert!(state.saving.is_none());
+
+        let _ = handle(&mut state, Message::SetStars { track: 1, stars: 3 });
+        assert_eq!(browser(&state).rating(1), None);
+
+        // The same messages work in an Engine library.
+        let mut engine = self::state();
+        let _ = handle(&mut engine, Message::PlaylistNew);
+        assert!(engine.playlist_dialog.is_some());
+    }
+
+    #[test]
+    fn no_cues_or_loops_are_asked_for_in_a_folder_of_music() {
+        let mut state = state_in_folder();
+        state.status = PlaybackStatus {
+            state: PlaybackState::Playing.into(),
+            queue_position: Some(0),
+            track_id: Some(1),
+            position_ms: 1_000,
+            error: None,
+        };
+        let _ = state.fetch_cues();
+        let _ = state.fetch_loops();
+        // (Not claimed: nothing would have been asked, and it must not wait for an answer.)
+        assert!(state.cues.claim(1) && state.loops.claim(1));
+    }
+
+    #[test]
+    fn closing_a_folder_forgets_it_on_the_next_start_but_keeps_it_listed() {
+        let mut state = state_in_folder();
+        let _ = state.local_folders.add("/home/me/Music".into());
+        let _ = handle(&mut state, Message::CloseLibrary);
+        assert!(matches!(
+            state.library,
+            LibraryState::Closed { error: None }
+        ));
+        assert!(state.local_folders.contains(Path::new("/home/me/Music")));
+        assert_eq!(state.session.session().library, None);
+    }
+
+    #[test]
+    fn removing_a_folder_from_the_list_closes_it_only_if_it_is_open() {
+        let mut state = state_in_folder();
+        let _ = state.local_folders.add("/home/me/Music".into());
+        let _ = state.local_folders.add("/home/me/Other".into());
+
+        let _ = handle(
+            &mut state,
+            Message::RemoveLocalFolder("/home/me/Other".into()),
+        );
+        assert!(!state.local_folders.contains(Path::new("/home/me/Other")));
+        assert!(
+            matches!(state.library, LibraryState::Open(_)),
+            "another folder: still open"
+        );
+
+        let _ = handle(
+            &mut state,
+            Message::RemoveLocalFolder("/home/me/Music".into()),
+        );
+        assert!(!state.local_folders.contains(Path::new("/home/me/Music")));
+        assert!(matches!(state.library, LibraryState::Closed { .. }));
+
+        // An Engine library at the same path is not a folder of music: it stays.
+        let mut engine = self::state();
+        let _ = engine
+            .local_folders
+            .add("/media/DRIVE/Engine Library".into());
+        let _ = handle(
+            &mut engine,
+            Message::RemoveLocalFolder("/media/DRIVE/Engine Library".into()),
+        );
+        assert!(matches!(engine.library, LibraryState::Open(_)));
+    }
+
+    #[test]
+    fn a_session_in_a_folder_of_music_goes_back_to_that_folder() {
+        let mut state = state_in_folder();
+        let snapshot = state.snapshot().unwrap();
+        assert!(snapshot.folder);
+        assert_eq!(snapshot.library, Some(PathBuf::from("/home/me/Music")));
+        assert!(!self::state().snapshot().unwrap().folder);
+
+        // (Without a running backend, opening only records what is to be opened.)
+        let _ = state.open(PathBuf::from("/home/me/Music"), Some(snapshot.clone()));
+        assert_eq!(
+            state
+                .open_when_ready
+                .map(|(path, restore)| (path, restore.map(|s| s.folder))),
+            Some((PathBuf::from("/home/me/Music"), Some(true)))
         );
     }
 
