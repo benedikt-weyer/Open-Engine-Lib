@@ -410,6 +410,9 @@ message GetLibrarySyncDiffResponse {
   // The tracks behind `origins_changed`, with one `origin` field each: what the other
   // library has (empty for none) and what it gets.
   repeated TrackChange changed_origins = 16;
+  // Streaming tracks that only the other library has and that would be deleted from it
+  // (only with `remove_missing`; tracks with files are never deleted).
+  uint32 tracks_removed = 17;
 }
 message SyncToLibraryRequest {
   string target_path = 1;
@@ -434,6 +437,8 @@ message SyncToLibraryResponse {
   uint32 files_copied = 8;
   // The library did not exist and was made.
   bool created = 9;
+  // Streaming tracks that were deleted from the changed library.
+  uint32 tracks_removed = 10;
 }
 
 message PullFromSourceRequest {}

@@ -253,7 +253,7 @@ libsync_back: Choose another library
 libsync_summary: "Playlists: {count} would change"
 libsync_nothing: The playlists are already the same.
 libsync_hint: "The other library gets the playlists and smart playlists of the open one. Tracks are matched by where they came from, or by a file name only one track has. Tracks the other library doesn't have are left out of its playlists, unless the tracks are copied."
-libsync_remove: Also delete playlists that only the other library has
+libsync_remove: Also delete playlists and streaming songs that only the other library has
 libsync_missing: "Tracks the other library doesn't have: {count}"
 libsync_run: Sync playlists
 libsync_writing: Writing the playlists…
@@ -268,6 +268,7 @@ libsync_locations: Overwrite the locations (paths) with those of the open librar
 libsync_stems: "Copy the stems of the tracks both libraries have and of the copied ones (the .stems files are big)"
 libsync_copy: "Copy the tracks into an Engine-Tracks folder (Artist/Album) beside the library, and add the ones it lacks"
 libsync_tracks_summary: "Tracks: {added} to add, {changed} to change"
+libsync_streaming_removed: "Streaming songs to remove: {count}"
 libsync_files: "Files to copy: {count} ({size})"
 libsync_files_missing: "Files of the open library that can't be found, so they are not copied: {count}"
 libsync_conflicts: "Locations that stay as they are because another track has the path: {count}"
@@ -288,7 +289,7 @@ libsync_direction_forward: Copy from the open library to the other one
 libsync_direction_reverse: Copy from the other library into the open one (back-sync)
 libsync_from: "Syncing from: {path}"
 libsync_hint_reverse: "The working copy of the open library gets the playlists and smart playlists of the other one, and the ticked things below. Nothing is written to the open library itself until you sync with the source."
-libsync_remove_reverse: Also delete playlists that only the open library has
+libsync_remove_reverse: Also delete playlists and streaming songs that only the open library has
 libsync_stars_reverse: Set the stars to those of the other library
 libsync_locations_reverse: Overwrite the locations (paths) with those of the other library
 libsync_copy_reverse: "Copy the tracks into an Engine-Tracks folder (Artist/Album) beside the open library, and add the ones it lacks"

@@ -224,6 +224,7 @@ pub struct Strings {
     pub libsync_copy: String,
     pub libsync_stems: String,
     pub libsync_tracks_summary: String,
+    pub libsync_streaming_removed: String,
     pub libsync_files: String,
     pub libsync_files_missing: String,
     pub libsync_conflicts: String,

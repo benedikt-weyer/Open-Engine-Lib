@@ -253,7 +253,7 @@ libsync_back: Andere Bibliothek wählen
 libsync_summary: "Playlists: {count} würden sich ändern"
 libsync_nothing: Die Playlists sind bereits gleich.
 libsync_hint: "Die andere Bibliothek bekommt die Playlists und Smart-Playlists der geöffneten. Titel werden über ihre Herkunft zugeordnet oder über einen Dateinamen, den nur ein Titel hat. Titel, die die andere Bibliothek nicht hat, fehlen in ihren Playlists, außer die Titel werden kopiert."
-libsync_remove: Auch Playlists löschen, die nur die andere Bibliothek hat
+libsync_remove: Auch Playlists und Streaming-Titel löschen, die nur die andere Bibliothek hat
 libsync_missing: "Titel, die die andere Bibliothek nicht hat: {count}"
 libsync_run: Playlists abgleichen
 libsync_writing: Playlists werden geschrieben…
@@ -268,6 +268,7 @@ libsync_locations: Die Orte (Pfade) mit denen der geöffneten Bibliothek übersc
 libsync_stems: "Die Stems der Titel kopieren, die beide Bibliotheken haben, und der kopierten (die .stems-Dateien sind groß)"
 libsync_copy: "Die Titel in einen Ordner Engine-Tracks (Interpret/Album) neben der Bibliothek kopieren und fehlende hinzufügen"
 libsync_tracks_summary: "Titel: {added} hinzuzufügen, {changed} zu ändern"
+libsync_streaming_removed: "Zu entfernende Streaming-Titel: {count}"
 libsync_files: "Zu kopierende Dateien: {count} ({size})"
 libsync_files_missing: "Dateien der geöffneten Bibliothek, die nicht gefunden werden und deshalb nicht kopiert werden: {count}"
 libsync_conflicts: "Orte, die bleiben, weil ein anderer Titel den Pfad hat: {count}"
@@ -288,7 +289,7 @@ libsync_direction_forward: Von der geöffneten Bibliothek in die andere kopieren
 libsync_direction_reverse: Aus der anderen Bibliothek in die geöffnete kopieren (Rückabgleich)
 libsync_from: "Abgleich von: {path}"
 libsync_hint_reverse: "Die Arbeitskopie der geöffneten Bibliothek bekommt die Playlists und Smart-Playlists der anderen und die unten angehakten Dinge. In die geöffnete Bibliothek selbst wird erst geschrieben, wenn du mit der Quelle abgleichst."
-libsync_remove_reverse: Auch Playlists löschen, die nur die geöffnete Bibliothek hat
+libsync_remove_reverse: Auch Playlists und Streaming-Titel löschen, die nur die geöffnete Bibliothek hat
 libsync_stars_reverse: Die Sterne auf die der anderen Bibliothek setzen
 libsync_locations_reverse: Die Orte (Pfade) mit denen der anderen Bibliothek überschreiben
 libsync_copy_reverse: "Die Titel in einen Ordner Engine-Tracks (Interpret/Album) neben der geöffneten Bibliothek kopieren und fehlende hinzufügen"

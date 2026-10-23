@@ -109,6 +109,8 @@ pub struct Options {
 /// What the work on the copy found.
 struct Outcome {
     changes: Vec<api::PlaylistChange>,
+    /// Streaming tracks that only the other library had, which were deleted from it.
+    tracks_removed: usize,
     /// Tracks of the open library that were left out of a playlist because the other
     /// library does not have them (indices into its tracks).
     missing: Vec<usize>,
@@ -400,6 +402,7 @@ pub fn diff(
             .map(|&index| reference(index))
             .collect(),
         tracks_changed: tracks.changed.len() as u32,
+        tracks_removed: outcome.tracks_removed as u32,
         changed_tracks: tracks.changed.iter().take(MAX_LISTED).cloned().collect(),
         files_to_copy: tracks.files_to_copy,
         bytes_to_copy: tracks.bytes_to_copy,
@@ -445,6 +448,7 @@ pub fn push(
         origins_changed: outcome.origins_changed as u32,
         tracks_added: tracks.added.len() as u32,
         tracks_changed: tracks.changed.len() as u32,
+        tracks_removed: outcome.tracks_removed as u32,
         files_copied: tracks.copied.len() as u32,
         backup_path: String::new(),
         created: new,
@@ -452,7 +456,11 @@ pub fn push(
     // The databases that differ now: the playlists and tracks are in `m.db`, the origins
     // in their own.
     let mut changed = Vec::new();
-    if !outcome.changes.is_empty() || !tracks.added.is_empty() || !tracks.changed.is_empty() {
+    if !outcome.changes.is_empty()
+        || outcome.tracks_removed > 0
+        || !tracks.added.is_empty()
+        || !tracks.changed.is_empty()
+    {
         changed.push(MAIN_DATABASE);
     }
     if outcome.origins_changed > 0 {
@@ -793,6 +801,18 @@ fn mirror(
         }
     }
 
+    // Streaming tracks (they have no file to lose) that the open library no longer has,
+    // for instance after "Remove streaming songs". Tracks with files are never deleted.
+    let tracks_removed = if remove_missing {
+        let kept: HashSet<usize> = matched.iter().flatten().copied().collect();
+        let gone: Vec<usize> = (0..target.tracks.len())
+            .filter(|index| target.tracks[*index].streaming && !kept.contains(index))
+            .collect();
+        target.remove_tracks(&gone)?.tracks
+    } else {
+        0
+    };
+
     // The origins the open library has for tracks that the other one has too. It is the
     // open library that counts: they replace what the other one has.
     let source_origins = source.origins();
@@ -834,6 +854,7 @@ fn mirror(
 
     Ok(Outcome {
         changes,
+        tracks_removed,
         missing,
         origins_changed,
         changed_origins,
@@ -1138,6 +1159,48 @@ mod tests {
         .unwrap();
         let after = open(&stick, &temp.0.join("check"));
         assert!(!lists(&after).iter().any(|(n, _)| n == "Mine"));
+    }
+
+    #[test]
+    fn streaming_tracks_only_in_the_other_library_go_when_asked() {
+        let temp = TempDir::new("remove-streaming");
+        let (pc, stick) = libraries(&temp.0);
+        // The stick still has a streaming track the open library lacks, in a playlist,
+        // and a track with a file that it lacks too.
+        let database = stick.join(DATABASE_DIR).join(MAIN_DATABASE);
+        Connection::open(&database)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO Track (id, title, path, streamingSource, originDatabaseUuid, originTrackId)
+                    VALUES (90, 'tidal', NULL, 'tidal', 'db', 90);
+                 INSERT INTO Track (id, title, path, originDatabaseUuid, originTrackId)
+                    VALUES (91, 'own', '../Music/own.flac', 'db', 91);
+                 INSERT INTO PerformanceData (trackId) VALUES (90) ON CONFLICT DO NOTHING;
+                 INSERT INTO PlaylistEntity (listId, trackId, databaseUuid, nextEntityId)
+                    SELECT id, 90, 'db', 0 FROM Playlist WHERE title = 'Mine';",
+            )
+            .unwrap();
+        let source = open(&pc, &temp.0.join("source-scratch"));
+
+        let kept = diff(&source, &stick, &temp.0.join("scratch"), remove(false)).unwrap();
+        assert_eq!(kept.tracks_removed, 0);
+
+        let diff = diff(&source, &stick, &temp.0.join("scratch"), remove(true)).unwrap();
+        assert_eq!(diff.tracks_removed, 1);
+
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            remove(true),
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(done.tracks_removed, 1);
+        let after = open(&stick, &temp.0.join("check"));
+        let titles: Vec<&str> = after.tracks.iter().map(|t| t.title.as_str()).collect();
+        assert!(!titles.contains(&"tidal"), "{titles:?}");
+        assert!(titles.contains(&"own"), "a track with a file stays");
     }
 
     #[test]

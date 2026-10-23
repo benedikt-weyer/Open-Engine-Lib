@@ -88,6 +88,7 @@ pub fn has_changes(diff: &GetLibrarySyncDiffResponse) -> bool {
         || diff.origins_changed > 0
         || diff.tracks_added > 0
         || diff.tracks_changed > 0
+        || diff.tracks_removed > 0
         || diff.files_to_copy > 0
 }
 
@@ -417,6 +418,12 @@ fn ready<'a>(
                 ("changed", &diff.tracks_changed),
             ],
         )));
+        if diff.tracks_removed > 0 {
+            summary = summary.push(text(fill(
+                &strings.libsync_streaming_removed,
+                &[("count", &diff.tracks_removed)],
+            )));
+        }
         if diff.files_to_copy > 0 {
             summary = summary.push(text(fill(
                 &strings.libsync_files,
