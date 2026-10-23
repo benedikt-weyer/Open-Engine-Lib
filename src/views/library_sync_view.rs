@@ -385,9 +385,9 @@ fn ready<'a>(
         ),
         tick(
             &strings.libsync_stems,
-            options.copy_tracks && options.copy_stems,
+            options.copy_stems,
             Setting::CopyStems,
-            options.copy_tracks,
+            true
         ),
     ]
     .spacing(6);

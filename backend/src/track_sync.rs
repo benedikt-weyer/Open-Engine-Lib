@@ -36,14 +36,16 @@ pub struct Options {
     /// The audio files are copied into `Engine-Tracks` and the paths lead there (instead of
     /// `locations`). Tracks the other library lacks are added to it.
     pub copy_tracks: bool,
-    /// The `.stems` file of each copied track, if it has one, is copied to the `Stems`
-    /// folder of the other library. Only together with `copy_tracks`.
+    /// The `.stems` file of each track the other library has, or gets with `copy_tracks`, is
+    /// copied to its `Stems` folder if it has one there already, nothing is replaced. Works
+    /// without `copy_tracks`: the file is named after the track's origin, wherever the audio
+    /// file is.
     pub copy_stems: bool,
 }
 
 impl Options {
     pub fn any(self) -> bool {
-        self.stars || self.locations || self.copy_tracks
+        self.stars || self.locations || self.copy_tracks || self.copy_stems
     }
 }
 
@@ -440,9 +442,18 @@ pub fn sync(
                 }
                 if let (true, Some(destination)) = (copy_it, destination) {
                     place(destination, track, copy_files, progress, &mut report)?;
-                    if options.copy_stems {
-                        place_stems(source, probe, track, copy_files, progress, &mut report)?;
-                    }
+                }
+                // (Whether or not its audio file is copied.)
+                if options.copy_stems {
+                    place_stems(
+                        source,
+                        probe,
+                        track,
+                        Some(other),
+                        copy_files,
+                        progress,
+                        &mut report,
+                    )?;
                 }
             }
             None => {
@@ -519,7 +530,15 @@ pub fn sync(
                 report.added.push(index);
                 place(destination, track, copy_files, progress, &mut report)?;
                 if options.copy_stems {
-                    place_stems(source, probe, track, copy_files, progress, &mut report)?;
+                    place_stems(
+                        source,
+                        probe,
+                        track,
+                        None,
+                        copy_files,
+                        progress,
+                        &mut report,
+                    )?;
                 }
             }
         }
@@ -528,21 +547,26 @@ pub fn sync(
     Ok(report)
 }
 
-/// Notes that the stems of `track` are to go to the other library, and copies them.
+/// Notes that the stems of `track` are to go to the other library, and copies them. `there`
+/// is the track the other library has for it, if it had one: the stems are named after
+/// that one's origin, which a track matched by its file name alone may not share. (An added
+/// track keeps its origin.)
 fn place_stems(
     source: &Library,
     probe: &Library,
     track: &crate::library::Track,
+    there: Option<&crate::library::Track>,
     copy_files: bool,
     progress: &Progress,
     report: &mut Report,
 ) -> Result<(), MirrorError> {
-    let Some(name) = stems_name(track) else {
+    let (Some(name), Some(name_there)) = (stems_name(track), stems_name(there.unwrap_or(track)))
+    else {
         return Ok(());
     };
     place_extra(
         &source.dir.join(STEMS_DIR).join(&name),
-        &probe.dir.join(STEMS_DIR).join(&name),
+        &probe.dir.join(STEMS_DIR).join(&name_there),
         copy_files,
         progress,
         report,

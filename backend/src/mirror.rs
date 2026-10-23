@@ -1746,6 +1746,107 @@ mod tests {
     }
 
     #[test]
+    fn stems_can_be_copied_alone_for_the_tracks_both_libraries_have() {
+        let temp = TempDir::new("stems-alone");
+        let pc = make(&temp.0, "pc", &[("a.flac", 5), ("b.flac", 6)], "");
+        let stick = make(&temp.0, "stick", &[("a.flac", 5)], "");
+        fs::create_dir_all(pc.join("Stems")).unwrap();
+        fs::write(pc.join("Stems/5 db.stems"), b"stems!!").unwrap();
+        fs::write(pc.join("Stems/6 db.stems"), b"other").unwrap();
+        let source = open_source(&pc, &temp.0.join("source"));
+        let scratch = temp.0.join("scratch");
+        let options = tracks(track_sync::Options {
+            copy_stems: true,
+            ..Default::default()
+        });
+
+        // Only the track the stick has gets its stems: no track is added, no audio file is
+        // copied and the stick's database is not touched.
+        let found = diff(&source, &stick, &scratch, options).unwrap();
+        assert_eq!((found.files_to_copy, found.bytes_to_copy), (1, 7));
+        assert_eq!((found.tracks_added, found.tracks_changed), (0, 0));
+        assert!(!stick.join("Stems").exists(), "a diff copies nothing");
+        let done = push(&source, &stick, &scratch, options, &Progress::default()).unwrap();
+        assert_eq!((done.files_copied, done.tracks_added), (1, 0));
+        assert!(done.backup_path.is_empty(), "nothing in a database changed");
+        assert_eq!(
+            fs::read(stick.join("Stems/5 db.stems")).unwrap(),
+            b"stems!!"
+        );
+        assert!(!stick.join("Stems/6 db.stems").exists());
+        assert!(!temp.0.join("stick").join(track_sync::TRACKS_DIR).exists());
+
+        // Nothing is left to copy the next time, and what is there is kept.
+        fs::write(stick.join("Stems/5 db.stems"), b"mine").unwrap();
+        let again = push(&source, &stick, &scratch, options, &Progress::default()).unwrap();
+        assert_eq!(again.files_copied, 0);
+        assert_eq!(fs::read(stick.join("Stems/5 db.stems")).unwrap(), b"mine");
+    }
+
+    #[test]
+    fn stems_go_under_the_origin_of_the_track_the_other_library_has() {
+        let temp = TempDir::new("stems-origin");
+        // The stick has the track under another origin (they are matched by the file name).
+        let pc = make(&temp.0, "pc", &[("a.flac", 5)], "");
+        let stick = make(&temp.0, "stick", &[("a.flac", 9)], "");
+        fs::create_dir_all(pc.join("Stems")).unwrap();
+        fs::write(pc.join("Stems/5 db.stems"), b"stems!!").unwrap();
+        let source = open_source(&pc, &temp.0.join("source"));
+        let options = tracks(track_sync::Options {
+            copy_stems: true,
+            ..Default::default()
+        });
+        push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(stick.join("Stems/9 db.stems")).unwrap(),
+            b"stems!!"
+        );
+        assert!(!stick.join("Stems/5 db.stems").exists());
+    }
+
+    #[test]
+    fn stems_can_be_copied_alone_the_other_way_round_too() {
+        let temp = TempDir::new("stems-back");
+        let pc = make(&temp.0, "pc", &[("a.flac", 5)], "");
+        let stick = make(&temp.0, "stick", &[("a.flac", 5), ("c.flac", 7)], "");
+        fs::create_dir_all(stick.join("Stems")).unwrap();
+        fs::write(stick.join("Stems/5 db.stems"), b"stems!!").unwrap();
+        fs::write(stick.join("Stems/7 db.stems"), b"other").unwrap();
+        let open_library = open_source(&pc, &temp.0.join("pc-working"));
+        let options = Options {
+            reverse: true,
+            tracks: track_sync::Options {
+                copy_stems: true,
+                ..Default::default()
+            },
+            ..Options::default()
+        };
+        let scratch = temp.0.join("scratch");
+
+        let found = diff(&open_library, &stick, &scratch, options).unwrap();
+        assert_eq!((found.files_to_copy, found.tracks_added), (1, 0));
+        let done = push(
+            &open_library,
+            &stick,
+            &scratch,
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(done.files_copied, 1);
+        // The open library has the stems of the track it shares with the stick, and only those.
+        assert_eq!(fs::read(pc.join("Stems/5 db.stems")).unwrap(), b"stems!!");
+        assert!(!pc.join("Stems/7 db.stems").exists());
+    }
+
+    #[test]
     fn files_that_would_share_a_name_get_a_number_and_missing_files_are_skipped() {
         let temp = TempDir::new("names");
         let pc = make(
