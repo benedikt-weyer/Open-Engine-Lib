@@ -627,7 +627,7 @@ impl LibraryService for Service {
                 "a streaming track has no audio file to analyse",
             ));
         }
-        let path = track.path.clone();
+        let path = library.playable_path(track);
 
         let shared = Arc::clone(&self.0);
         // Decoding a whole track takes a moment and must not block the async threads.
@@ -962,6 +962,8 @@ impl PlaybackService for Service {
         let library = self.library()?;
         let request = request.into_inner();
 
+        // The saved origins, for a file that is not at its location.
+        let origins = library.origins();
         let queue = request
             .track_ids
             .iter()
@@ -973,6 +975,11 @@ impl PlaybackService for Service {
                 Ok(QueueItem {
                     track_id: id,
                     path: track.path.clone(),
+                    fallback: track
+                        .origin_key
+                        .as_ref()
+                        .and_then(|key| origins.get(key))
+                        .map(PathBuf::from),
                     streaming: track.streaming,
                 })
             })

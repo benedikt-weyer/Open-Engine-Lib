@@ -771,6 +771,23 @@ impl Library {
             .unwrap_or_default()
     }
 
+    /// Where the audio file of `track` is: its location if there is a file there, else its
+    /// saved origin if there is one there, else (for the error to be about it) the location.
+    pub fn playable_path(&self, track: &Track) -> PathBuf {
+        if !track.path.is_file()
+            && let Some(origin) = track
+                .origin_key
+                .as_ref()
+                .and_then(|key| self.origins().remove(key))
+        {
+            let origin = PathBuf::from(origin);
+            if origin.is_file() {
+                return origin;
+            }
+        }
+        track.path.clone()
+    }
+
     /// Saves origins in the working copy: with `overwrite` they replace the ones the
     /// tracks have, else only tracks that have none get one. Returns how many were new
     /// (or, with `overwrite`, different).
@@ -2360,6 +2377,37 @@ mod tests {
             1
         );
         assert_eq!(library.origins()[&key(1)], "/pc/one.flac");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_file_missing_at_its_location_is_found_at_its_origin() {
+        let cache = std::env::temp_dir().join(format!(
+            "open-engine-lib-library-playable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(cache.join(DATABASE_DIR)).unwrap();
+        let mut library = Library::load(database(), PathBuf::from("/lib"), cache.clone()).unwrap();
+        let key = library.tracks[0].origin_key.clone().unwrap();
+        let (location, origin) = (cache.join("location.flac"), cache.join("origin.flac"));
+        library.tracks[0].path = location.clone();
+        let track = &library.tracks[0];
+
+        // Neither file is there: the error is about the location.
+        assert_eq!(library.playable_path(track), location);
+        library
+            .save_origins(&[(key, origin.display().to_string())], false)
+            .unwrap();
+        assert_eq!(library.playable_path(track), location);
+
+        // Only the origin is there, then both, then only the location.
+        std::fs::write(&origin, b"o").unwrap();
+        assert_eq!(library.playable_path(track), origin);
+        std::fs::write(&location, b"l").unwrap();
+        assert_eq!(library.playable_path(track), location);
+        std::fs::remove_file(&origin).unwrap();
+        assert_eq!(library.playable_path(track), location);
         let _ = std::fs::remove_dir_all(&cache);
     }
 

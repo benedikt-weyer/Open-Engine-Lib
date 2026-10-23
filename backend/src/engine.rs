@@ -21,6 +21,9 @@ const TICK: Duration = Duration::from_millis(100);
 pub struct QueueItem {
     pub track_id: u32,
     pub path: PathBuf,
+    /// Where else the file may be (the track's saved origin): played if the one at `path`
+    /// is not there.
+    pub fallback: Option<PathBuf>,
     pub streaming: bool,
 }
 
@@ -188,12 +191,19 @@ impl<O: Output> Playback<O> {
             self.output.stop();
             Err((ErrorKind::Streaming, String::new()))
         } else {
-            self.output
-                .play(&item.path, start)
-                .map_err(|error| match error {
-                    PlayError::NotFound(path) => (ErrorKind::NotFound, path.display().to_string()),
-                    PlayError::Failed(error) => (ErrorKind::Failed, error),
-                })
+            let mut played = self.output.play(&item.path, start);
+            // A file that is not at its location may be at its origin. If it is at neither,
+            // the error is about the location.
+            if let (Err(PlayError::NotFound(_)), Some(fallback)) = (&played, &item.fallback) {
+                match self.output.play(fallback, start) {
+                    Err(PlayError::NotFound(_)) => {}
+                    other => played = other,
+                }
+            }
+            played.map_err(|error| match error {
+                PlayError::NotFound(path) => (ErrorKind::NotFound, path.display().to_string()),
+                PlayError::Failed(error) => (ErrorKind::Failed, error),
+            })
         };
 
         match result {
@@ -344,6 +354,7 @@ mod tests {
         QueueItem {
             track_id: id,
             path: PathBuf::from(format!("/music/{id}.flac")),
+            fallback: None,
             streaming,
         }
     }
@@ -462,6 +473,42 @@ mod tests {
         assert_eq!(status.track_id, Some(4));
         let error = status.error.expect("the streaming track was skipped last");
         assert_eq!((error.kind, error.track_id), (ErrorKind::Streaming, 3));
+    }
+
+    #[test]
+    fn a_file_missing_at_its_location_is_played_from_its_origin() {
+        let (mut playback, _) = playback(&[5, 6]);
+        let at_origin = |id: u32| QueueItem {
+            fallback: Some(PathBuf::from(format!("/origin/{id}.flac"))),
+            ..item(id, false)
+        };
+        playback.handle(Command::Play {
+            queue: vec![at_origin(5)],
+            position: 0,
+            start: Start::default(),
+        });
+        let status = playback.status();
+        assert_eq!((status.state, status.error), (State::Playing, None));
+        assert_eq!(
+            playback.output.playing.as_deref(),
+            Some(Path::new("/origin/5.flac"))
+        );
+
+        // Where neither is there, the error is about the location.
+        playback
+            .output
+            .missing
+            .insert(PathBuf::from("/origin/6.flac"));
+        playback.handle(Command::Play {
+            queue: vec![at_origin(6)],
+            position: 0,
+            start: Start::default(),
+        });
+        let error = playback.status().error.unwrap();
+        assert_eq!(
+            (error.kind, error.detail.as_str()),
+            (ErrorKind::NotFound, "/music/6.flac")
+        );
     }
 
     #[test]
