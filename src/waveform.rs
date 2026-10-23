@@ -117,8 +117,29 @@ impl BeatGrid {
     }
 }
 
+/// Tells one `Waveform` from another, even when they are the same data (the display
+/// caches what it draws of a waveform and needs to know when it is another one). It takes
+/// no part in comparing waveforms.
+#[derive(Debug, Clone, Copy)]
+pub struct Serial(pub u64);
+
+impl PartialEq for Serial {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Serial {
+    fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Serial(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Waveform {
+    /// Different for every waveform that is made.
+    pub serial: Serial,
     pub duration: f64,
     pub columns_per_second: f64,
     pub columns: Vec<Bands>,
@@ -136,6 +157,7 @@ impl Waveform {
     ) -> Self {
         let overview = pool(&columns, OVERVIEW_COLUMNS);
         Self {
+            serial: Serial::next(),
             duration,
             columns_per_second,
             columns,

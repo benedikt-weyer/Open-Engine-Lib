@@ -5,26 +5,39 @@
 //! How the waveform is colored is a setting (`WaveformColors`) that can also be changed
 //! from a menu next to the display.
 
+use std::cell::RefCell;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use iced::mouse;
-use std::ops::Range;
-
+use iced::advanced::graphics::geometry::Renderer as GeometryRenderer;
+use iced::advanced::renderer::Quad;
+use iced::advanced::widget::{Tree, Widget, tree};
+use iced::advanced::{
+    Clipboard, Layout, Renderer as AdvancedRenderer, Shell, layout, mouse, renderer,
+};
 use iced::widget::canvas::{Action, Frame, Geometry, Path, Text};
 use iced::widget::{canvas, column, container, pick_list, row, text};
-use iced::{Color, Element, Event, Fill, Pixels, Point, Rectangle, Renderer, Size, Theme, window};
+use iced::{
+    Color, Element, Event, Fill, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector,
+    window,
+};
 
 use crate::Message;
 use crate::clock::Clock;
 use crate::colors::{self, STACKED_LAYERS};
 use crate::config::{Language, WaveformColors};
 use crate::i18n::fill;
-use crate::waveform::{Bands, Display, Waveform};
+use crate::waveform::{Bands, Display, Serial, Waveform};
 
 /// How much of the track the zoomed waveform shows.
 const VISIBLE_SECONDS: f64 = 6.0;
 const ZOOM_HEIGHT: f32 = 110.0;
 const OVERVIEW_HEIGHT: f32 = 44.0;
+/// How much of the track one cached piece of the zoomed waveform holds. A piece is drawn
+/// (the outline built, its triangles made) once, and then only moved as the track plays.
+const PIECE_SECONDS: f64 = 12.0;
+/// Room around a piece for what is drawn a little over its edge (half a beat line).
+const PIECE_MARGIN: f32 = 4.0;
 /// The overview only needs to follow the playhead a few times a second.
 const OVERVIEW_REDRAW: Duration = Duration::from_millis(100);
 
@@ -99,13 +112,11 @@ pub fn view<'a>(
     .padding([2, 8]);
 
     column![
-        canvas(Zoomed {
+        Element::from(ScrollingWaveform {
             waveform,
             clock,
             colors
-        })
-        .width(Fill)
-        .height(ZOOM_HEIGHT),
+        }),
         canvas(Overview {
             waveform,
             clock,
@@ -258,105 +269,223 @@ fn paint_beat_number(frame: &mut Frame, line_x: f32, label: String, bar_start: b
     });
 }
 
+/// What the zoomed waveform keeps between frames: the pieces of the track it has drawn,
+/// and which waveform and colors they are of.
+#[derive(Default)]
+struct ZoomState {
+    of: RefCell<Option<(Serial, WaveformColors)>>,
+    /// By piece: the geometry of `PIECE_SECONDS` of the track (outline and beatgrid),
+    /// made when the piece first comes into view.
+    pieces: RefCell<Vec<canvas::Cache>>,
+}
+
 /// The scrolling waveform around the playhead.
-struct Zoomed<'a> {
+///
+/// Drawing the outline of a few seconds of waveform means building and tessellating
+/// thousands of points, which done anew for every frame took up a fifth of the time
+/// between two frames and made frames late now and then. Instead the track is cut into
+/// pieces that are drawn once each, kept as geometry, and moved to where the playhead is
+/// with the renderer's translation, which costs nothing (the triangles stay on the GPU).
+struct ScrollingWaveform<'a> {
     waveform: &'a Waveform,
     clock: Clock,
     colors: WaveformColors,
 }
 
-impl canvas::Program<Message> for Zoomed<'_> {
-    type State = ();
+impl<'a> Widget<Message, Theme, Renderer> for ScrollingWaveform<'a> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<ZoomState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(ZoomState::default())
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fixed(ZOOM_HEIGHT))
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::atomic(limits, Length::Fill, Length::Fixed(ZOOM_HEIGHT))
+    }
 
     fn update(
-        &self,
-        _state: &mut (),
+        &mut self,
+        _tree: &mut Tree,
         event: &Event,
-        _bounds: Rectangle,
+        _layout: Layout<'_>,
         _cursor: mouse::Cursor,
-    ) -> Option<Action<Message>> {
+        _renderer: &Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
         // While playing, draw the next frame as soon as the last one is out.
-        (self.clock.is_running()
-            && matches!(event, Event::Window(window::Event::RedrawRequested(_))))
-        .then(Action::request_redraw)
+        if self.clock.is_running()
+            && matches!(event, Event::Window(window::Event::RedrawRequested(_)))
+        {
+            shell.request_redraw();
+        }
     }
 
     fn draw(
         &self,
-        _state: &(),
-        renderer: &Renderer,
+        tree: &Tree,
+        renderer: &mut Renderer,
         _theme: &Theme,
-        bounds: Rectangle,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
         _cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), BACKGROUND);
-
+        _viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        if bounds.width < 1.0 || bounds.height < 1.0 {
+            return;
+        }
+        let state = tree.state.downcast_ref::<ZoomState>();
         let waveform = self.waveform;
-        let (width, height) = (bounds.width, bounds.height);
-        let middle = height / 2.0;
-        let half_height = middle - 4.0;
 
-        let now = self.clock.position(Instant::now(), waveform.duration);
-        let pixels_per_second = f64::from(width) / VISIBLE_SECONDS;
-        let start = now - VISIBLE_SECONDS / 2.0;
-        let end = now + VISIBLE_SECONDS / 2.0;
-        let x_of = |time: f64| ((time - start) * pixels_per_second) as f32;
-
-        // The waveform, from a column before the window to one after it, so its outline
-        // runs off both edges.
-        let columns_per_second = waveform.columns_per_second;
-        let first = ((start * columns_per_second).floor().max(1.0) as usize).saturating_sub(1);
-        let last =
-            ((end * columns_per_second).ceil().max(0.0) as usize + 1).min(waveform.columns.len());
-        paint_waveform(
-            &mut frame,
-            self.colors,
-            &waveform.columns,
-            first..last,
-            // The middle of a column's 10 ms.
-            |index| x_of((index as f64 + 0.5) / columns_per_second),
-            middle,
-            half_height,
-        );
-
-        // The beatgrid, with the first beat of every bar stronger.
-        if let Some(grid) = &waveform.grid {
-            for beat in grid.beats(start, end) {
-                let (alpha, line) = if beat.is_bar_start() {
-                    (0.9, 2.0)
-                } else {
-                    (0.4, 1.0)
-                };
-                let x = x_of(beat.time);
-                frame.fill_rectangle(
-                    Point::new(x - line / 2.0, 0.0),
-                    Size::new(line, height),
-                    Color {
-                        a: alpha,
-                        ..Color::WHITE
-                    },
-                );
-
-                // The bar and the beat in it ("17.1" is the first beat of bar 17). The
-                // first beat of a bar is brighter and larger.
-                if let Some((bar, in_bar)) = beat.bar_and_beat() {
-                    paint_beat_number(
-                        &mut frame,
-                        x,
-                        format!("{bar}.{in_bar}"),
-                        beat.is_bar_start(),
-                    );
-                }
-            }
+        // Another track, or other colors: nothing that was drawn is of any use.
+        let of = (waveform.serial, self.colors);
+        if state.of.borrow().is_none_or(|known| known != of) {
+            state.pieces.borrow_mut().clear();
+            *state.of.borrow_mut() = Some(of);
         }
 
-        frame.fill_rectangle(
-            Point::new(width / 2.0 - 1.0, 0.0),
-            Size::new(2.0, height),
-            PLAYHEAD,
+        let now = self.clock.position(Instant::now(), waveform.duration);
+        let pixels_per_second = f64::from(bounds.width) / VISIBLE_SECONDS;
+        let start = now - VISIBLE_SECONDS / 2.0;
+        let end = now + VISIBLE_SECONDS / 2.0;
+
+        let piece_count = (waveform.duration / PIECE_SECONDS).ceil().max(1.0) as usize;
+        let first = (start / PIECE_SECONDS).floor().max(0.0) as usize;
+        let last = ((end / PIECE_SECONDS).floor().max(0.0) as usize).min(piece_count - 1);
+        let piece_size = Size::new(
+            (PIECE_SECONDS * pixels_per_second) as f32 + 2.0 * PIECE_MARGIN + 4.0,
+            bounds.height,
         );
-        vec![frame.into_geometry()]
+
+        // Under the pieces: the background.
+        renderer.with_layer(bounds, |renderer| {
+            renderer.fill_quad(
+                Quad {
+                    bounds,
+                    ..Quad::default()
+                },
+                BACKGROUND,
+            );
+            for piece in first..=last {
+                let geometry = {
+                    let mut pieces = state.pieces.borrow_mut();
+                    if pieces.len() <= piece {
+                        pieces.resize_with(piece + 1, canvas::Cache::new);
+                    }
+                    pieces[piece].draw(renderer, piece_size, |frame| {
+                        paint_piece(
+                            frame,
+                            waveform,
+                            self.colors,
+                            piece,
+                            pixels_per_second,
+                            bounds.height,
+                        );
+                    })
+                };
+                // Where the piece starts, which is further left the further the track has
+                // played.
+                let x = ((piece as f64 * PIECE_SECONDS - start) * pixels_per_second) as f32
+                    - PIECE_MARGIN;
+                renderer.with_translation(Vector::new(bounds.x + x, bounds.y), |renderer| {
+                    renderer.draw_geometry(geometry);
+                });
+            }
+        });
+
+        // Over them: the playhead, in the middle.
+        renderer.with_layer(bounds, |renderer| {
+            renderer.fill_quad(
+                Quad {
+                    bounds: Rectangle::new(
+                        Point::new(bounds.x + bounds.width / 2.0 - 1.0, bounds.y),
+                        Size::new(2.0, bounds.height),
+                    ),
+                    ..Quad::default()
+                },
+                PLAYHEAD,
+            );
+        });
+    }
+}
+
+impl<'a> From<ScrollingWaveform<'a>> for Element<'a, Message> {
+    fn from(widget: ScrollingWaveform<'a>) -> Self {
+        Element::new(widget)
+    }
+}
+
+/// Draws one piece of the track: `PIECE_SECONDS` from `piece * PIECE_SECONDS` on, with
+/// the first of it `PIECE_MARGIN` from the left. A piece ends with the column the next one
+/// starts with, so that they join without a gap or an overlap.
+fn paint_piece(
+    frame: &mut Frame,
+    waveform: &Waveform,
+    colors: WaveformColors,
+    piece: usize,
+    pixels_per_second: f64,
+    height: f32,
+) {
+    let origin = piece as f64 * PIECE_SECONDS;
+    let columns_per_second = waveform.columns_per_second;
+    let x_of = |time: f64| PIECE_MARGIN + ((time - origin) * pixels_per_second) as f32;
+    let middle = height / 2.0;
+
+    let per_piece = (PIECE_SECONDS * columns_per_second).round() as usize;
+    let first = piece * per_piece;
+    let last = ((piece + 1) * per_piece + 1).min(waveform.columns.len());
+    paint_waveform(
+        frame,
+        colors,
+        &waveform.columns,
+        first..last,
+        // The middle of a column's 10 ms.
+        |index| x_of((index as f64 + 0.5) / columns_per_second),
+        middle,
+        middle - 4.0,
+    );
+
+    // The beatgrid, with the first beat of every bar stronger. (A beat belongs to the piece
+    // it falls in.)
+    if let Some(grid) = &waveform.grid {
+        for beat in grid.beats(origin, origin + PIECE_SECONDS) {
+            if beat.time < origin || beat.time >= origin + PIECE_SECONDS {
+                continue;
+            }
+            let (alpha, line) = if beat.is_bar_start() {
+                (0.9, 2.0)
+            } else {
+                (0.4, 1.0)
+            };
+            let x = x_of(beat.time);
+            frame.fill_rectangle(
+                Point::new(x - line / 2.0, 0.0),
+                Size::new(line, height),
+                Color {
+                    a: alpha,
+                    ..Color::WHITE
+                },
+            );
+
+            // The bar and the beat in it ("17.1" is the first beat of bar 17). The first
+            // beat of a bar is brighter and larger.
+            if let Some((bar, in_bar)) = beat.bar_and_beat() {
+                paint_beat_number(frame, x, format!("{bar}.{in_bar}"), beat.is_bar_start());
+            }
+        }
     }
 }
 
@@ -367,12 +496,19 @@ struct Overview<'a> {
     colors: WaveformColors,
 }
 
+/// What the overview keeps between frames: the waveform it drew, and which one that was.
+#[derive(Default)]
+struct OverviewState {
+    of: RefCell<Option<(Serial, WaveformColors, Size)>>,
+    base: canvas::Cache,
+}
+
 impl canvas::Program<Message> for Overview<'_> {
-    type State = ();
+    type State = OverviewState;
 
     fn update(
         &self,
-        _state: &mut (),
+        _state: &mut OverviewState,
         event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
@@ -392,29 +528,38 @@ impl canvas::Program<Message> for Overview<'_> {
 
     fn draw(
         &self,
-        _state: &(),
+        state: &OverviewState,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), BACKGROUND);
-
         let waveform = self.waveform;
         let (width, height) = (bounds.width, bounds.height);
-        let middle = height / 2.0;
-        let bin_width = width / waveform.overview.len().max(1) as f32;
-        paint_waveform(
-            &mut frame,
-            self.colors,
-            &waveform.overview,
-            0..waveform.overview.len(),
-            |index| (index as f32 + 0.5) * bin_width,
-            middle,
-            middle - 2.0,
-        );
 
+        // The whole track does not change while it plays: it is drawn once (again for another
+        // track, other colors or another size), and only what is over it is drawn per frame.
+        let of = (waveform.serial, self.colors, bounds.size());
+        if state.of.borrow().is_none_or(|known| known != of) {
+            state.base.clear();
+            *state.of.borrow_mut() = Some(of);
+        }
+        let base = state.base.draw(renderer, bounds.size(), |frame| {
+            frame.fill_rectangle(Point::ORIGIN, bounds.size(), BACKGROUND);
+            let middle = height / 2.0;
+            let bin_width = width / waveform.overview.len().max(1) as f32;
+            paint_waveform(
+                frame,
+                self.colors,
+                &waveform.overview,
+                0..waveform.overview.len(),
+                |index| (index as f32 + 0.5) * bin_width,
+                middle,
+                middle - 2.0,
+            );
+        });
+
+        let mut frame = Frame::new(renderer, bounds.size());
         let progress = (self.clock.position(Instant::now(), waveform.duration)
             / waveform.duration.max(f64::EPSILON)) as f32;
         let played = (progress * width).clamp(0.0, width);
@@ -431,12 +576,12 @@ impl canvas::Program<Message> for Overview<'_> {
             Size::new(2.0, height),
             PLAYHEAD,
         );
-        vec![frame.into_geometry()]
+        vec![base, frame.into_geometry()]
     }
 
     fn mouse_interaction(
         &self,
-        _state: &(),
+        _state: &OverviewState,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
