@@ -829,7 +829,7 @@ fn mirror(
     let origins_changed = if origins_to_write.is_empty() {
         0
     } else {
-        target.save_origins(&origins_to_write, true)?
+        target.write_origins(&origins_to_write)?
     };
 
     Ok(Outcome {

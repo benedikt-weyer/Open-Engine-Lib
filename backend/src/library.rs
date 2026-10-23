@@ -789,6 +789,23 @@ impl Library {
         entries: &[(TrackKey, String)],
         overwrite: bool,
     ) -> Result<usize, EditError> {
+        self.store_origins(entries, overwrite, true)
+    }
+
+    /// Replaces the origins of these tracks with exactly these, without taking over what
+    /// earlier versions kept (as a library's own first save does). That is for the working
+    /// copy of another library that a sync changes: what it gets is what was compared with
+    /// what it has, and taking over more would make the count of what changed too small.
+    pub fn write_origins(&self, entries: &[(TrackKey, String)]) -> Result<usize, EditError> {
+        self.store_origins(entries, true, false)
+    }
+
+    fn store_origins(
+        &self,
+        entries: &[(TrackKey, String)],
+        overwrite: bool,
+        inherit: bool,
+    ) -> Result<usize, EditError> {
         let path = self.origins_path();
         let first = !path.is_file();
         if first && entries.is_empty() {
@@ -799,6 +816,7 @@ impl Library {
         // The first time, the origins that earlier versions kept for all libraries come
         // along (those of this library's tracks), so that saving them again is not needed.
         if first
+            && inherit
             && let Ok(Some(legacy)) = Origins::open_existing(&self.legacy_origins)
             && let Ok(all) = legacy.all()
         {
@@ -2386,6 +2404,37 @@ mod tests {
             1
         );
         assert_eq!(library.origins()[&key(1)], "/pc/one.flac");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn writing_origins_for_a_sync_takes_nothing_over() {
+        let cache = std::env::temp_dir().join(format!(
+            "open-engine-lib-library-origins-write-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(cache.join(DATABASE_DIR)).unwrap();
+        let mut library = Library::load(database(), PathBuf::from("/lib"), cache.clone()).unwrap();
+        let key = |id: i64| ("db".to_string(), id);
+
+        // The origins earlier versions kept are the same as what is written: were they taken
+        // over first, nothing would count as changed and a sync would think it had no work.
+        let legacy = cache.join("legacy.db");
+        Origins::open(&legacy)
+            .unwrap()
+            .save_missing(&[(key(1), "/pc/one.flac".into())])
+            .unwrap();
+        library.legacy_origins = legacy;
+
+        let written = library
+            .write_origins(&[
+                (key(1), "/pc/one.flac".into()),
+                (key(2), "/pc/two.flac".into()),
+            ])
+            .unwrap();
+        assert_eq!(written, 2);
+        assert_eq!(library.origins().len(), 2);
         let _ = std::fs::remove_dir_all(&cache);
     }
 
