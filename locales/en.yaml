@@ -80,6 +80,10 @@ open_failed: "Could not open the library: {error}"
 recent_libraries: Recent libraries
 no_recent_libraries: Libraries you open will show up here.
 forget_library: Remove from the list
+drives: USB drives
+no_drives: No USB drives connected.
+drive_has_library: Engine library
+drive_no_library: No Engine library at the root
 recents_save_failed: "Could not save the recent libraries: {error}"
 close_library: Close library
 library_summary: "{path} · Tracks: {tracks} · Playlists: {playlists}"

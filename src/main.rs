@@ -8,6 +8,7 @@ mod columns;
 mod config;
 mod covers;
 mod deck;
+mod drives;
 mod i18n;
 mod menubar;
 mod model;
@@ -30,6 +31,7 @@ use clock::Clock;
 use columns::{Column, ColumnStore};
 use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, WaveformColors};
 use covers::Covers;
+use drives::Drive;
 use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
@@ -45,6 +47,8 @@ use waveform::{Waveform, Waveforms};
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// How long after a library opens to wait with scrolling its track list to the right place.
 const REVEAL_DELAY: Duration = Duration::from_millis(150);
+/// How often to look for USB drives that were plugged in or removed.
+const DRIVE_SCAN_INTERVAL: Duration = Duration::from_secs(3);
 
 fn main() -> iced::Result {
     iced::application(State::new, update, view)
@@ -105,6 +109,10 @@ struct State {
     session: SessionStore,
     library: LibraryState,
     recents: Recents,
+    /// The USB drives that are connected, as of the last scan.
+    drives: Vec<Drive>,
+    /// Whether a scan is still running, so a slow drive can't pile them up.
+    scanning_drives: bool,
     /// Cover images fetched for the tracks in view and the one playing.
     covers: Covers,
     /// Why the recent libraries could not be saved.
@@ -177,6 +185,10 @@ pub enum Message {
     CloseLibrary,
     LibraryClosed(Result<(), String>),
     OpenRecent(PathBuf),
+    ScanDrives,
+    DrivesFound(Vec<Drive>),
+    /// Open the Engine library on a drive (the path is its `Engine Library` folder).
+    OpenDrive(PathBuf),
     ForgetRecent(PathBuf),
     /// Scroll the track list to a row, once the list is on screen.
     RevealRow(usize),
@@ -231,6 +243,8 @@ impl State {
             session,
             library: LibraryState::Closed { error: None },
             recents: Recents::discover(),
+            drives: Vec::new(),
+            scanning_drives: true,
             covers: Covers::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
@@ -246,7 +260,7 @@ impl State {
             columns: ColumnStore::discover(),
             resize: None,
         };
-        (state, start_backend())
+        (state, Task::batch([start_backend(), scan_drives()]))
     }
 
     fn theme(&self) -> Theme {
@@ -280,6 +294,7 @@ impl State {
         Subscription::batch([
             poll,
             resizing,
+            iced::time::every(DRIVE_SCAN_INTERVAL).map(|_| Message::ScanDrives),
             iced::window::close_requests().map(Message::CloseRequested),
         ])
     }
@@ -520,6 +535,18 @@ impl State {
     }
 }
 
+/// Looks for USB drives off the UI thread, since reading a drive can take a while.
+fn scan_drives() -> Task<Message> {
+    Task::perform(
+        async {
+            tokio::task::spawn_blocking(drives::detect)
+                .await
+                .unwrap_or_default()
+        },
+        Message::DrivesFound,
+    )
+}
+
 fn start_backend() -> Task<Message> {
     Task::perform(
         async { backend::start().await.map(Box::new) },
@@ -752,7 +779,10 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 Err(error) => state.save_error = Some(error),
             }
         }
-        Message::ChooseLibrary | Message::CloseLibrary | Message::OpenRecent(_)
+        Message::ChooseLibrary
+        | Message::CloseLibrary
+        | Message::OpenRecent(_)
+        | Message::OpenDrive(_)
             if state.saving.is_some() => {}
         Message::ChooseLibrary => {
             let title = state
@@ -810,7 +840,17 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::LibraryClosed(result) => state.backend_error = result.err(),
-        Message::OpenRecent(path) => {
+        Message::ScanDrives => {
+            if !state.scanning_drives {
+                state.scanning_drives = true;
+                return scan_drives();
+            }
+        }
+        Message::DrivesFound(drives) => {
+            state.scanning_drives = false;
+            state.drives = drives;
+        }
+        Message::OpenRecent(path) | Message::OpenDrive(path) => {
             // One library at a time: the backend would end up with the other one.
             if !matches!(state.library, LibraryState::Opening(_)) {
                 return state.open(path, None);
@@ -1003,8 +1043,11 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
     row![
         sidebar::view(
             browser,
-            &state.recents,
-            state.recents_error.as_deref(),
+            sidebar::Sources {
+                recents: &state.recents,
+                recents_error: state.recents_error.as_deref(),
+                drives: &state.drives,
+            },
             browser.map(|browser| browser.library.path.as_str()),
             !matches!(state.library, LibraryState::Opening(_)) && state.saving.is_none(),
             state.saving.is_none(),
@@ -1213,6 +1256,8 @@ mod tests {
             session: SessionStore::load(temp.join("session.toml")),
             library: LibraryState::Open(Browser::new(Arc::new(library))),
             recents: Recents::load(temp.join("recent.toml")),
+            drives: Vec::new(),
+            scanning_drives: false,
             covers: Covers::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
