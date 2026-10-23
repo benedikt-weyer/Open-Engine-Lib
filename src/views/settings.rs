@@ -1,5 +1,5 @@
 use iced::Element;
-use iced::widget::{Column, button, checkbox, column, radio, row, slider, text};
+use iced::widget::{Column, button, checkbox, column, radio, row, scrollable, slider, text};
 
 use crate::Message;
 use crate::config::{
@@ -302,5 +302,10 @@ pub fn view<'a>(
         ));
     }
 
-    page.into()
+    // The page is longer than a small window, so it scrolls; the padding keeps the scrollbar
+    // off the controls.
+    scrollable(page.padding(iced::Padding::ZERO.right(16)).width(iced::Fill))
+        .width(iced::Fill)
+        .height(iced::Fill)
+        .into()
 }
