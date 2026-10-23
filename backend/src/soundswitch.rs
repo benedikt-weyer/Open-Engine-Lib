@@ -18,6 +18,9 @@
 //!   inference from the names and the counts.
 //!
 //! A track is matched to the library's by the path of its file relative to the drive.
+//!
+//! The findings behind this, with what was observed and what is only inferred, are in
+//! `docs/soundswitch-format.md`.
 
 use std::collections::HashMap;
 use std::fs;

@@ -92,10 +92,10 @@ Two more columns in the track list.
 
 **Lighting** says whether SoundSwitch, the lighting software, has lighting for the track: a filled dot if it was rendered, a ring if SoundSwitch only analysed the track, a dash if the track isn't in SoundSwitch. Pointing at it says so in words and names the projects. Streaming tracks have no mark.
 
-SoundSwitch's files are not documented, so how this is read was worked out from the files on a real drive, and the central step is an **inference**:
+SoundSwitch's files are not documented, so how this is read was worked out from the files on a real drive, and the central step is an **inference**. The full findings are in [`soundswitch-format.md`](soundswitch-format.md), in the way [`engine-library-format.md`](engine-library-format.md) describes the Engine library:
 
 - SoundSwitch keeps projects in `<drive>/SoundSwitch/<name>.ssproj` folders. `SoundSwitchTrackMap.bin` in each lists the tracks it knows by the path of their audio file as Windows saw it (`F:\Music\a.flac`, or through `D:\Engine Library\..\Music\a.flac`), as UTF-16. After the path of an analysed track comes a marker and a GUID.
-- That GUID names the track's data in the project folder: `{GUID}.ssfile` exists for every analysed track (checked: every `.ssfile` of the real projects is named in its map).
+- That GUID names the track's data in the project folder: `{GUID}.ssfile` exists for every analysed track (checked: all 463 `.ssfile` of the player's project, and 315 of 381 in the other project, are named in their track maps).
 - Most also have `{GUID}.ssa`. These are small and compressed or encrypted, so their contents could not be read. They are **taken to be the rendered lighting** (SoundSwitch's "autoscript"), because they are made in the same moment as the `.ssfile` of a track that was given lighting and a project whose tracks were only analysed has none. If that is wrong, the dot means something else.
 - A track is matched to the library's by the path of its file relative to the drive, compared without the drive letter, with `\` read as `/`, `..` worked out and upper and lower case treated alike. Every project in the folder counts; a track has lighting if any project has an `.ssa` for it.
 
