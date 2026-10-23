@@ -1397,13 +1397,14 @@ mod tests {
     fn locations_are_overwritten_with_the_open_librarys() {
         let temp = TempDir::new("locations");
         let (pc, stick) = with_files(&temp.0);
-        // The paths differ in the open library, and one is already taken on the stick by
-        // another track.
+        // The paths differ in the open library, and one leads to a file that another track
+        // of the stick already has. (The libraries are in different folders, so the same
+        // file is written differently in each.)
         let connection = Connection::open(pc.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap();
         connection
             .execute_batch(
                 "UPDATE Track SET path = '../Elsewhere/a.flac' WHERE id = 1;
-                 UPDATE Track SET path = '../Music/zzz.flac' WHERE id = 2;",
+                 UPDATE Track SET path = '../../stick/Music/zzz.flac' WHERE id = 2;",
             )
             .unwrap();
         drop(connection);
@@ -1429,7 +1430,7 @@ mod tests {
                 field.source_value.as_str(),
                 field.working_value.as_str()
             ),
-            ("path", "../Music/a.flac", "../Elsewhere/a.flac")
+            ("path", "../Music/a.flac", "../../pc/Elsewhere/a.flac")
         );
         assert_eq!(
             found.location_conflicts, 1,
@@ -1453,10 +1454,55 @@ mod tests {
         assert_eq!(
             paths,
             [
-                "../Elsewhere/a.flac",
+                "../../pc/Elsewhere/a.flac",
                 "../Music/b.flac",
                 "../Music/zzz.flac"
             ]
+        );
+    }
+
+    #[test]
+    fn locations_synced_back_lead_to_the_copied_files() {
+        let temp = TempDir::new("locations-back");
+        let (pc, stick) = with_files(&temp.0);
+        let open_library = open_source(&pc, &temp.0.join("pc-working"));
+        let scratch = temp.0.join("scratch");
+
+        // The tracks are copied to the stick...
+        let copy = tracks(track_sync::Options {
+            copy_tracks: true,
+            ..Default::default()
+        });
+        push(&open_library, &stick, &scratch, copy, &Progress::default()).unwrap();
+
+        // ...and the pc library takes the stick's locations back.
+        let back = Options {
+            reverse: true,
+            tracks: track_sync::Options {
+                locations: true,
+                ..Default::default()
+            },
+            ..Options::default()
+        };
+        push(&open_library, &stick, &scratch, back, &Progress::default()).unwrap();
+
+        let working = temp
+            .0
+            .join("pc-working")
+            .join(DATABASE_DIR)
+            .join(MAIN_DATABASE);
+        let changed = Library::open_copy(&working, pc.clone(), temp.0.join("check")).unwrap();
+        for track in &changed.tracks {
+            assert!(
+                track.path.is_file(),
+                "{} leads to {}, which is not a file",
+                track.title,
+                track.relative_path
+            );
+        }
+        assert_eq!(
+            changed.tracks[0].relative_path,
+            "../../stick/Engine-Tracks/AC_DC/Back_ In Black_/a.flac"
         );
     }
 

@@ -337,7 +337,9 @@ pub fn sync(
         let wanted_path: Option<String> = if options.copy_tracks {
             destination.map(|destination| destination.relative.clone())
         } else if options.locations && !track.streaming {
-            Some(track.relative_path.clone())
+            // The track's path is relative to its own library's folder; the other library
+            // needs the way to the same file from its folder.
+            Some(crate::save::relative_path(&probe.dir, &track.path))
         } else {
             None
         };

@@ -206,7 +206,7 @@ fn repoint_tracks(database: &Path, old_dir: &Path, new_dir: &Path) -> Result<(),
 /// The path of `file` as the library records it: relative to the library folder `dir`,
 /// with `/` as the separator, or the plain path if there is no relative one (another
 /// drive).
-fn relative_path(dir: &Path, file: &Path) -> String {
+pub fn relative_path(dir: &Path, file: &Path) -> String {
     let dir = normalize(dir);
     let file = normalize(file);
     let dir_parts: Vec<_> = dir.components().collect();
