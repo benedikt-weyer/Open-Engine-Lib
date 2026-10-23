@@ -7,7 +7,7 @@ use std::path::Path;
 
 /// How many answers are kept. Far more than are on screen, so scrolling back a little
 /// finds them again, but few enough to bound memory.
-const MAX_KEPT: usize = 4000;
+const MAX_KEPT: usize = 40_000;
 
 #[derive(Default)]
 pub struct Reachability {
