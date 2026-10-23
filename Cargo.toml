@@ -31,3 +31,7 @@ tokio = { version = "1.54.1", features = ["rt", "time"] }
 toml = "1.1.8"
 tonic = "0.14.6"
 yaml_serde = "0.10.7"
+
+# MPRIS, the desktop's media interface, is D-Bus and only Linux has it.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"

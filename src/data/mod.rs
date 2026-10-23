@@ -17,6 +17,7 @@ pub(crate) mod i18n;
 pub(crate) mod local_folders;
 pub(crate) mod loops;
 pub(crate) mod model;
+pub(crate) mod mpris;
 pub(crate) mod reachable;
 pub(crate) mod recent;
 pub(crate) mod session;

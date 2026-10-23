@@ -3195,6 +3195,7 @@ dependencies = [
  "toml",
  "tonic",
  "yaml_serde",
+ "zbus",
 ]
 
 [[package]]

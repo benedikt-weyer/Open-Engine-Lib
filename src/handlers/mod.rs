@@ -6,6 +6,7 @@ pub(super) mod cues;
 pub(super) mod library;
 pub(super) mod library_sync;
 pub(super) mod loops;
+pub(super) mod mpris;
 pub(super) mod origin_prefix;
 pub(super) mod playback;
 pub(super) mod playlists;

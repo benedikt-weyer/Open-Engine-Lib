@@ -18,7 +18,7 @@ use covers::Covers;
 use cues::{Cue, TrackCues};
 use data::{
     backend, clock, colors, columns, config, controller, covers, cues, drives, i18n, local_folders,
-    loops, model, reachable, recent, session, waveform,
+    loops, model, mpris, reachable, recent, session, waveform,
 };
 use drives::Drive;
 use i18n::fill;
@@ -184,6 +184,10 @@ struct State {
     resize: Option<Resize>,
     /// The DJ controller: what its controls do, what is connected, what it said last.
     controller: Controller,
+    /// How to tell the desktop what plays (MPRIS), once the service is up, and what it was
+    /// last told, to tell it again only when that changed.
+    mpris: Option<mpris::Handle>,
+    mpris_told: Option<handlers::mpris::Told>,
 }
 
 #[derive(Debug, Clone)]
@@ -418,6 +422,8 @@ pub enum Message {
         result: Result<Vec<Cue>, String>,
     },
     Status(Result<PlaybackStatus, String>),
+    /// The desktop's media interface is up, or asked for something.
+    Mpris(mpris::Event),
     /// A fetched cover: the covers' generation it was asked in, its id and its image.
     CoverLoaded(u32, u32, Result<Option<Vec<u8>>, String>),
     /// The sync that is running has got this far, as the backend last said.
@@ -493,6 +499,8 @@ impl State {
             columns: ColumnStore::discover(),
             resize: None,
             controller: Controller::default(),
+            mpris: None,
+            mpris_told: None,
         };
         (state, Task::batch([start_backend(), scan_drives()]))
     }
@@ -545,6 +553,7 @@ impl State {
             Subscription::none()
         };
         Subscription::batch([
+            mpris::subscription().map(Message::Mpris),
             poll,
             resizing,
             progress,
@@ -1119,8 +1128,10 @@ fn start_backend() -> Task<Message> {
 
 /// Handles a message, then fetches whatever covers the result has put on screen.
 fn update(state: &mut State, message: Message) -> Task<Message> {
+    let status = matches!(message, Message::Status(Ok(_)));
     let task = handle(state, message);
     state.save_session(false);
+    state.tell_desktop(status);
     Task::batch([
         task,
         state.fetch_covers(),
@@ -1254,6 +1265,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::RemoveLocalFolder(..)
         | Message::SaveAsChosen(..)
         | Message::ScanDrives => handlers::library::handle(state, message),
+        Message::Mpris(..) => handlers::mpris::handle(state, message),
         Message::CoverLoaded(..)
         | Message::Next
         | Message::PathsChecked(..)
@@ -1806,6 +1818,8 @@ mod tests {
             columns: ColumnStore::load(temp.join("track-columns.toml")),
             resize: None,
             controller: Controller::default(),
+            mpris: None,
+            mpris_told: None,
         }
     }
 

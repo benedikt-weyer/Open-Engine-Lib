@@ -55,6 +55,15 @@ Versioning rules:
 
 The `.proto` files are compiled in pure Rust (`protox`), so building needs no `protoc`.
 
+## Media keys and the desktop's media widget (MPRIS)
+
+On Linux the UI serves the MPRIS interface (`org.mpris.MediaPlayer2` and `.Player`) on the session bus as `org.mpris.MediaPlayer2.open-engine-lib` (with `.instance<pid>` added if another window has the name), so media keys, the shell's media widget, KDE Connect and `playerctl` show the playing track and can play, pause, stop, skip and seek it. It lives in the UI (`src/data/mpris.rs`) because the UI knows the tags, the cover and the playback state; the backend processes know nothing of it.
+
+- The metadata is the track id, length (the waveform's exact length once known), title, artist, album, genre, the file's URL (not for streaming tracks) and the cover. D-Bus cannot carry the image, so the cover is written to `$XDG_RUNTIME_DIR/open-engine-lib/mpris-<pid>/` and its `file://` URL is given; folders of ended runs are removed at the next start.
+- `State::tell_desktop` runs after every update and sends the whole state only when the playback state, the track, the cover's arrival or the exact length changed. The position is not a signal in MPRIS (clients ask for it): each status report only updates it, and `Seeked` is emitted when it is further than half a second from where the playing track would be by itself. Nothing is sent while the track is held by hand (scratching).
+- What is asked for becomes the messages the buttons send (`handlers/mpris.rs`). Quit and Raise do nothing, and there is no volume, loop or shuffle.
+- If there is no session bus, the service is not started and the rest of the app is unaffected. Other platforms have no MPRIS: the module is a stub there.
+
 ## The menu bar: Open, Reload, Save as, Exit
 
 A **File** menu sits at the top of the window: **Open…** (the same as "Open library…"), **Reload from disk** and **Save as…** (both only while a library is open) and **Exit** (which saves the session first, like closing the window).
