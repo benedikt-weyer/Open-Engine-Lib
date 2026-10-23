@@ -1,7 +1,8 @@
 name: Tag
 
-# Creates a version tag for every new commit on main (see
-# .github/scripts/create-tags.sh), then builds and releases each new tag.
+# Creates a version tag for the newest commit on main (see
+# .github/scripts/create-tags.sh; the commits before it only count towards its
+# version), then builds and releases that tag.
 # Tags pushed with GITHUB_TOKEN don't trigger other workflows, so the release
 # workflow is called directly instead of listening for tag pushes.
 

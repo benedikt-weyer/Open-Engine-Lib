@@ -37,10 +37,10 @@ The root `Cargo.toml` builds dependencies with `opt-level = 2` in debug builds (
 
 ## Versioning and releases
 
-Every push to `main` runs `.github/workflows/tag.yml`, which tags each new commit sequentially via `.github/scripts/create-tags.sh` (`DRY_RUN=1 .github/scripts/create-tags.sh` previews locally) and then calls `release.yml` once per new tag. Commit messages decide the bump, and lower components reset to 0:
+Every push to `main` runs `.github/workflows/tag.yml`, which tags the newest commit via `.github/scripts/create-tags.sh` (`DRY_RUN=1 .github/scripts/create-tags.sh` previews locally) and then calls `release.yml` for that tag. The commits pushed with it are not tagged or released themselves, but each one counts towards the version, so the number is the same as if every commit had its own tag. (Tags pushed with the workflow's token are refused for a commit that changes a workflow file, which is why only the newest commit is tagged.) Commit messages decide the bump, and lower components reset to 0:
 
 - `type!:`, `type(scope)!:` or a `BREAKING CHANGE:` footer: major
 - `feat:` / `feat(scope):`: minor
 - anything else: patch
 
-Existing `vX.Y.Z` tags are respected (the running version resets to them), and with no tags it starts at `v0.0.0`. Because every commit on `main` gets a tag and a release, prefer squash merges. `release.yml` patches the version in `[workspace.package]` of `Cargo.toml` from the tag at build time (not committed; the UI, backend and API crates share it) and publishes a Linux tarball, an AppImage and a Windows zip. Each contains both executables, which have to stay next to each other.
+Existing `vX.Y.Z` tags are respected (the running version resets to them), and with no tags it starts at `v0.0.0`. Because every push to `main` gets a release, prefer squash merges. `release.yml` patches the version in `[workspace.package]` of `Cargo.toml` from the tag at build time (not committed; the UI, backend and API crates share it) and publishes a Linux tarball, an AppImage and a Windows zip. Each contains both executables, which have to stay next to each other.

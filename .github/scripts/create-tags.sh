@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Create a semver tag (vX.Y.Z) for every untagged commit on the first-parent
-# history of a ref, bumping the version sequentially per commit message:
+# Create a semver tag (vX.Y.Z) for the newest commit of a ref (if it has none), whose
+# version is worked out by counting every untagged commit on the first-parent history,
+# bumping the version sequentially per commit message:
 #
 #   type!: ... / type(scope)!: ... / BREAKING CHANGE: footer  -> major (minor, patch = 0)
 #   feat: ... / feat(scope): ...                              -> minor (patch = 0)
@@ -8,7 +9,9 @@
 #
 # Existing version tags are respected: walking oldest to newest, a tagged
 # commit resets the running version to its tag and discards untagged commits
-# before it. Only untagged commits after the last tag get new tags.
+# before it. Only the newest commit gets a tag: the commits before it count towards
+# its version but are not tagged (or released) themselves, so a commit that can't be
+# tagged, e.g. because it changed a workflow file, can't hold up the ones after it.
 # The base version is 0.0.0 when no tag exists.
 #
 # Usage: create-tags.sh [ref]   (default HEAD)
@@ -58,8 +61,13 @@ while read -r sha; do
 done < <(git rev-list --reverse --first-parent "$ref")
 
 tags=()
+# Only the newest commit is tagged; the others are only counted.
 for entry in ${pending[@]+"${pending[@]}"}; do
   read -r sha tag <<<"$entry"
+  if ((${#pending[@]} > 1)) && [[ $entry != "${pending[${#pending[@]} - 1]}" ]]; then
+    echo "$tag -> $(git log -1 --format='%h %s' "$sha") (counted, not tagged)"
+    continue
+  fi
   if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
     echo "error: $tag already exists on another commit; cannot tag $sha" >&2
     exit 1
