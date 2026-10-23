@@ -143,6 +143,7 @@ pub fn modal<'a>(
                     &strings.libsync_done,
                     &[
                         ("count", &done.playlists_changed),
+                        ("origins", &done.origins_changed),
                         ("backup", &done.backup_path),
                     ],
                 )
@@ -262,7 +263,7 @@ fn ready<'a>(
     ]
     .spacing(8);
 
-    if diff.playlists_changed == 0 {
+    if diff.playlists_changed == 0 && diff.origins_changed == 0 {
         content = content.push(text(&strings.libsync_nothing));
     } else {
         content = content
@@ -270,7 +271,11 @@ fn ready<'a>(
                 &strings.libsync_summary,
                 &[("count", &diff.playlists_changed)],
             )))
-            .push(changes(diff, language));
+            .push(changes(diff, language))
+            .push(text(fill(
+                &strings.libsync_origins,
+                &[("count", &diff.origins_changed)],
+            )));
     }
     if diff.tracks_missing > 0 {
         content = content.push(text(fill(
@@ -288,7 +293,8 @@ fn ready<'a>(
         button(text(&strings.libsync_run))
             .style(button::primary)
             .on_press_maybe(
-                (active && diff.playlists_changed > 0).then_some(Message::LibrarySyncStart)
+                (active && (diff.playlists_changed > 0 || diff.origins_changed > 0))
+                    .then_some(Message::LibrarySyncStart)
             ),
         button(text(&strings.libsync_back))
             .style(button::secondary)

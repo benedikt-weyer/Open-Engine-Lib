@@ -184,6 +184,8 @@ libsync_missing: "Tracks the other library doesn't have: {count}"
 libsync_run: Sync playlists
 libsync_writing: Writing the playlists…
 libsync_run_failed: "Syncing failed: {error}"
-libsync_done: "Done: {count} playlists changed. The other library's previous database is kept in {backup}"
+libsync_done: "Done: {count} playlists and {origins} origins changed. What was replaced is kept in {backup}"
 libsync_none_written: Nothing needed to be written.
 path_unreachable: "Can't be reached. Is its drive connected?"
+sync_origins_summary: "Origins: {count} new or changed"
+libsync_origins: "Origins to write: {count}"

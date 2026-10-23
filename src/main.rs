@@ -1062,7 +1062,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 diff,
                 ..
             }) = &state.library_sync
-                && diff.playlists_changed > 0
+                && (diff.playlists_changed > 0 || diff.origins_changed > 0)
                 && let Some(backend) = state.backend()
             {
                 let (target, remove_missing, diff) =

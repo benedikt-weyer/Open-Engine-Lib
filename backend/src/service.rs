@@ -17,7 +17,6 @@ use tonic::{Request, Response, Status};
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, EditError, Library, OpenError};
 use crate::mirror::{self, MirrorError};
-use crate::origins::Origins;
 use crate::player::Start;
 use crate::save::{self, SaveError};
 use crate::smartlist::Rules;
@@ -59,21 +58,14 @@ struct Shared {
     engine: Engine,
     /// Where copies of the libraries' databases are kept.
     cache_root: PathBuf,
-    /// Open Engine Lib's own database of origins; `None` if it couldn't be opened (the
-    /// reason was printed), which leaves the origins out.
-    origins: Option<Origins>,
 }
 
 #[derive(Clone)]
 pub struct Service(Arc<Shared>);
 
 impl Service {
-    pub fn new(engine: Engine, cache_root: PathBuf, origins: PathBuf) -> Self {
-        let origins = Origins::open(&origins)
-            .map_err(|error| eprintln!("open-engine-backend: no origins: {error}"))
-            .ok();
+    pub fn new(engine: Engine, cache_root: PathBuf) -> Self {
         Self(Arc::new(Shared {
-            origins,
             library: RwLock::new(None),
             waveforms: Mutex::new(WaveformCache::default()),
             engine,
@@ -299,25 +291,19 @@ impl LibraryService for Service {
         _: Request<api::MigrateOriginsRequest>,
     ) -> Result<Response<api::MigrateOriginsResponse>, Status> {
         let library = self.library()?;
-        let shared = Arc::clone(&self.0);
         // Reads and writes a file: not on the async threads.
         tokio::task::spawn_blocking(move || {
-            let origins = shared
-                .origins
-                .as_ref()
-                .ok_or_else(|| Status::internal("the origin database could not be opened"))?;
-            let internal = |error: rusqlite::Error| Status::internal(error.to_string());
-
             let locations = library.locations();
-            let new = origins
-                .save_missing(
+            let new = library
+                .save_origins(
                     &locations
                         .iter()
                         .map(|(_, key, location)| (key.clone(), location.clone()))
                         .collect::<Vec<_>>(),
+                    false,
                 )
-                .map_err(internal)?;
-            let saved = origins.all().map_err(internal)?;
+                .map_err(edit_status)?;
+            let saved = library.origins();
             let known: Vec<api::TrackOrigin> = library
                 .tracks
                 .iter()
@@ -401,19 +387,15 @@ impl LibraryService for Service {
     ) -> Result<Response<Self::ListTracksStream>, Status> {
         let library = self.library()?;
         let (sender, receiver) = mpsc::channel(4);
-        let shared = Arc::clone(&self.0);
 
         tokio::spawn(async move {
-            // (Read off the async threads; a database that can't be read just has none.)
-            let origins = tokio::task::spawn_blocking(move || {
-                shared
-                    .origins
-                    .as_ref()
-                    .and_then(|origins| origins.all().ok())
+            // (Read off the async threads; a library without origins just has none.)
+            let origins = {
+                let library = Arc::clone(&library);
+                tokio::task::spawn_blocking(move || library.origins())
+                    .await
                     .unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
+            };
             for (batch, tracks) in library.tracks.chunks(TRACKS_PER_BATCH).enumerate() {
                 let first = batch * TRACKS_PER_BATCH;
                 let tracks = tracks

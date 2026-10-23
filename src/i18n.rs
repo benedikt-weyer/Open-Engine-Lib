@@ -156,6 +156,8 @@ pub struct Strings {
     pub origin_migrated: String,
     pub origin_none: String,
     pub path_unreachable: String,
+    pub sync_origins_summary: String,
+    pub libsync_origins: String,
     pub sync_playlist_missing: String,
     pub libsync_button: String,
     pub libsync_title: String,

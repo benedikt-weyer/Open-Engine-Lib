@@ -184,6 +184,8 @@ libsync_missing: "Titel, die die andere Bibliothek nicht hat: {count}"
 libsync_run: Playlists abgleichen
 libsync_writing: Playlists werden geschrieben…
 libsync_run_failed: "Der Abgleich ist fehlgeschlagen: {error}"
-libsync_done: "Fertig: {count} Playlists geändert. Die vorherige Datenbank der anderen Bibliothek liegt in {backup}"
+libsync_done: "Fertig: {count} Playlists und {origins} Herkünfte geändert. Was ersetzt wurde, liegt in {backup}"
 libsync_none_written: Es musste nichts geschrieben werden.
 path_unreachable: "Nicht erreichbar. Ist das Laufwerk angeschlossen?"
+sync_origins_summary: "Herkunft: {count} neu oder geändert"
+libsync_origins: "Herkünfte, die geschrieben werden: {count}"

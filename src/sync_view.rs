@@ -198,6 +198,10 @@ fn summary<'a>(diff: &'a GetSyncDiffResponse, language: Language) -> Element<'a,
             &[("count", &diff.playlists_changed)],
         )),
         text(fill(
+            &strings.sync_origins_summary,
+            &[("count", &diff.origins_changed)],
+        )),
+        text(fill(
             &strings.sync_databases_summary,
             &[("names", &diff.changed_databases.join(", "))],
         )),

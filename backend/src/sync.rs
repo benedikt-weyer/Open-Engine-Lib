@@ -25,6 +25,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::cache::{self, DATABASE_DIR};
 use crate::library::Library;
+use crate::origins;
 
 /// Where the databases that a sync replaces are kept, inside the source's `Database2`.
 pub const BACKUP_DIR: &str = "open-engine-lib-backup";
@@ -170,6 +171,16 @@ pub fn diff(library: &Library) -> Result<api::GetSyncDiffResponse, SyncError> {
     response.source_busy = is_busy(&source);
     response.source_changed_outside = cache::source_changed(&library.dir, &library.cache)?;
     response.changed_databases = changed_databases(library)?;
+    if response
+        .changed_databases
+        .iter()
+        .any(|name| name == origins::FILE)
+    {
+        response.origins_changed = changed_origins(
+            &working_databases(library).join(origins::FILE),
+            &source.join(origins::FILE),
+        );
+    }
 
     if response
         .changed_databases
@@ -204,6 +215,36 @@ fn compare_main_databases(
     compare_tracks(&connection, response)?;
     compare_playlists(&connection, response)?;
     Ok(())
+}
+
+/// How many origins the database at `working` has that are new or different from those in
+/// the one at `source` (which may not exist). Both are only read, and in a way that leaves
+/// the source's locks and journals alone.
+fn changed_origins(working: &Path, source: &Path) -> u32 {
+    let read = |path: &Path| -> HashMap<(String, i64), String> {
+        let Ok(connection) = Connection::open_with_flags(
+            source_uri(path),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return HashMap::new();
+        };
+        let Ok(mut statement) =
+            connection.prepare("SELECT databaseUuid, trackId, origin FROM Origin")
+        else {
+            return HashMap::new();
+        };
+        statement
+            .query_map([], |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)))
+            .and_then(|rows| rows.collect())
+            .unwrap_or_default()
+    };
+    let before = read(source);
+    read(working)
+        .iter()
+        .filter(|(key, origin)| before.get(*key) != Some(origin))
+        .count() as u32
 }
 
 /// A `file:` URI for opening `path` read-only and immutable.
@@ -927,6 +968,52 @@ mod tests {
             .find(|p| p.name == "Pop")
             .unwrap();
         assert_eq!(removed.kind(), api::PlaylistChangeKind::Removed);
+    }
+
+    #[test]
+    fn saved_origins_are_synced_to_the_source_with_the_other_databases() {
+        let temp = TempDir::new("origins");
+        let library = library(&temp.0);
+        let database = library.dir.join("Database2").join(origins::FILE);
+        assert_eq!(diff(&library).unwrap().origins_changed, 0);
+
+        // Saved in the working copy, the origins are a difference the source lacks.
+        let entries = [
+            (("db".to_string(), 1), "/pc/one.flac".to_string()),
+            (("db".to_string(), 2), "/pc/two.flac".to_string()),
+        ];
+        assert_eq!(library.save_origins(&entries, false).unwrap(), 2);
+        let found = diff(&library).unwrap();
+        assert_eq!(found.changed_databases, [origins::FILE]);
+        assert_eq!(found.origins_changed, 2);
+        assert!(!database.exists(), "the source has none yet");
+
+        let done = push(&library, false).unwrap();
+        assert_eq!(done.files_written, 1);
+        assert!(database.is_file());
+        assert_eq!(
+            origins::Origins::open(&database).unwrap().all().unwrap(),
+            entries.iter().cloned().collect::<HashMap<_, _>>()
+        );
+        assert_eq!(diff(&library).unwrap().origins_changed, 0);
+
+        // A changed origin and a new one are counted; the file is replaced, and the old
+        // one is kept in the backup.
+        library
+            .save_origins(
+                &[
+                    (("db".to_string(), 1), "/stick/one.flac".to_string()),
+                    (("db".to_string(), 3), "/pc/three.flac".to_string()),
+                ],
+                true,
+            )
+            .unwrap();
+        assert_eq!(diff(&library).unwrap().origins_changed, 2);
+        let done = push(&library, false).unwrap();
+        assert!(Path::new(&done.backup_path).join(origins::FILE).is_file());
+        let synced = origins::Origins::open(&database).unwrap().all().unwrap();
+        assert_eq!(synced[&("db".to_string(), 1)], "/stick/one.flac");
+        assert_eq!(synced.len(), 3);
     }
 
     #[test]

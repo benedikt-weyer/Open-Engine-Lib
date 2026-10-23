@@ -216,6 +216,9 @@ message GetLibrarySyncDiffResponse {
   // Tracks of the open library, in the playlists, that the other library does not have.
   uint32 tracks_missing = 4;
   repeated TrackRef missing_tracks = 5;
+  // Tracks of the other library whose saved origin is new or different from the open
+  // library's, which replaces it.
+  uint32 origins_changed = 6;
 }
 message SyncToLibraryRequest {
   string target_path = 1;
@@ -227,6 +230,7 @@ message SyncToLibraryResponse {
   uint32 tracks_missing = 3;
   // Where the replaced database was kept; empty if nothing needed to be written.
   string backup_path = 4;
+  uint32 origins_changed = 5;
 }
 
 message CloseLibraryRequest {}
@@ -410,6 +414,9 @@ message GetSyncDiffResponse {
   repeated TrackChange changed_tracks = 12;
   uint32 playlists_changed = 13;
   repeated PlaylistChange changed_playlists = 14;
+  // Tracks whose saved origin is new or different in the working copy
+  // (`open-engine-lib.db`, which is written like the other databases).
+  uint32 origins_changed = 15;
 }
 
 message TrackRef {

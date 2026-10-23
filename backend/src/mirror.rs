@@ -19,6 +19,7 @@ use open_engine_api::v1 as api;
 
 use crate::cache::DATABASE_DIR;
 use crate::library::{self, EditError, Library, OpenError, Playlist};
+use crate::origins;
 use crate::sync::{BACKUP_DIR, is_busy};
 
 const MAIN_DATABASE: &str = "m.db";
@@ -83,6 +84,8 @@ struct Outcome {
     /// Tracks of the open library that were left out of a playlist because the other
     /// library does not have them (indices into its tracks).
     missing: Vec<usize>,
+    /// How many origins of the other library are new or were different.
+    origins_changed: usize,
 }
 
 /// A copy of the other library's `m.db`, opened as a library.
@@ -112,6 +115,11 @@ fn prepare(source: &Library, target: &Path, scratch_root: &Path) -> Result<Copy,
     fs::create_dir_all(scratch.join(DATABASE_DIR))?;
     let copy = scratch.join(DATABASE_DIR).join(MAIN_DATABASE);
     fs::copy(databases.join(MAIN_DATABASE), &copy)?;
+    // The origins it has, if any, to be changed along with the playlists.
+    let origins = databases.join(origins::FILE);
+    if origins.is_file() {
+        fs::copy(&origins, scratch.join(DATABASE_DIR).join(origins::FILE))?;
+    }
     let library = Library::open_copy(&copy, dir.clone(), scratch.clone())?;
     Ok(Copy {
         dir,
@@ -143,6 +151,7 @@ pub fn diff(
         playlists_changed,
         changed_playlists: changes,
         tracks_missing: outcome.missing.len() as u32,
+        origins_changed: outcome.origins_changed as u32,
         missing_tracks: outcome
             .missing
             .iter()
@@ -180,9 +189,18 @@ pub fn push(
         target_path: dir.display().to_string(),
         playlists_changed: outcome.changes.len() as u32,
         tracks_missing: outcome.missing.len() as u32,
+        origins_changed: outcome.origins_changed as u32,
         backup_path: String::new(),
     };
+    // The databases that differ now: the playlists are in `m.db`, the origins in their own.
+    let mut changed = Vec::new();
     if !outcome.changes.is_empty() {
+        changed.push(MAIN_DATABASE);
+    }
+    if outcome.origins_changed > 0 {
+        changed.push(origins::FILE);
+    }
+    if !changed.is_empty() {
         let databases = dir.join(DATABASE_DIR);
         // Another program may have started writing since the copy was made.
         if is_busy(&databases) {
@@ -193,16 +211,33 @@ pub fn push(
         let backup = databases.join(BACKUP_DIR);
         let _ = fs::remove_dir_all(&backup);
         fs::create_dir_all(&backup)?;
-        fs::copy(databases.join(MAIN_DATABASE), backup.join(MAIN_DATABASE))?;
+        for name in &changed {
+            if databases.join(name).is_file() {
+                fs::copy(databases.join(name), backup.join(name))?;
+            }
+        }
 
-        // Written beside the file and moved over it, so that it is never half written.
-        let temporary = databases.join(format!(".{MAIN_DATABASE}.syncing"));
-        let result = fs::copy(scratch.join(DATABASE_DIR).join(MAIN_DATABASE), &temporary)
-            .and_then(|_| fs::rename(&temporary, databases.join(MAIN_DATABASE)));
-        if let Err(error) = result {
-            let _ = fs::remove_file(&temporary);
-            let _ = fs::remove_dir_all(&scratch);
-            return Err(error.into());
+        // Each is written beside the original and moved over it, so that it is never
+        // half written. (If one fails, the ones before it are put back.)
+        let mut replaced: Vec<&str> = Vec::new();
+        for name in &changed {
+            let temporary = databases.join(format!(".{name}.syncing"));
+            let result = fs::copy(scratch.join(DATABASE_DIR).join(name), &temporary)
+                .and_then(|_| fs::rename(&temporary, databases.join(name)));
+            if let Err(error) = result {
+                let _ = fs::remove_file(&temporary);
+                for done in replaced {
+                    let kept = backup.join(done);
+                    if kept.is_file() {
+                        let _ = fs::copy(kept, databases.join(done));
+                    } else {
+                        let _ = fs::remove_file(databases.join(done));
+                    }
+                }
+                let _ = fs::remove_dir_all(&scratch);
+                return Err(error.into());
+            }
+            replaced.push(name);
         }
         response.backup_path = backup.display().to_string();
     }
@@ -442,7 +477,36 @@ fn mirror(
         }
     }
 
-    Ok(Outcome { changes, missing })
+    // The origins the open library has for tracks that the other one has too. It is the
+    // open library that counts: they replace what the other one has.
+    let source_origins = source.origins();
+    let target_origins = target.origins();
+    let mut origins_to_write = Vec::new();
+    for (index, track) in source.tracks.iter().enumerate() {
+        let (Some(key), Some(other)) = (track.origin_key.as_ref(), matched[index]) else {
+            continue;
+        };
+        let (Some(origin), Some(other_key)) = (
+            source_origins.get(key),
+            target.tracks[other].origin_key.as_ref(),
+        ) else {
+            continue;
+        };
+        if target_origins.get(other_key) != Some(origin) {
+            origins_to_write.push((other_key.clone(), origin.clone()));
+        }
+    }
+    let origins_changed = if origins_to_write.is_empty() {
+        0
+    } else {
+        target.save_origins(&origins_to_write, true)?
+    };
+
+    Ok(Outcome {
+        changes,
+        missing,
+        origins_changed,
+    })
 }
 
 #[cfg(test)]
@@ -750,6 +814,91 @@ mod tests {
             .unwrap();
         assert_eq!(techno.kind(), api::PlaylistChangeKind::Rules);
         assert!(techno.rules_changed);
+    }
+
+    #[test]
+    fn the_origins_of_matching_tracks_go_to_the_other_library_too() {
+        let temp = TempDir::new("origins");
+        let (pc, stick) = libraries(&temp.0);
+        let source = open(&pc, &temp.0.join("source-scratch"));
+        let key = |id: i64| ("db".to_string(), id);
+        // Tracks a (1), b (2) and c (3); the stick has a and b, and c has no match there.
+        source
+            .save_origins(
+                &[
+                    (key(1), "/pc/Music/a.flac".into()),
+                    (key(2), "/pc/Music/b.flac".into()),
+                    (key(3), "/pc/Music/c.flac".into()),
+                ],
+                false,
+            )
+            .unwrap();
+        // The stick already has a different origin for b.
+        let target = open(&stick, &temp.0.join("stick-scratch"));
+        target
+            .save_origins(&[(key(2), "/old/b.flac".into())], false)
+            .unwrap();
+        drop(target);
+        fs::copy(
+            temp.0
+                .join("stick-scratch")
+                .join(DATABASE_DIR)
+                .join(origins::FILE),
+            stick.join(DATABASE_DIR).join(origins::FILE),
+        )
+        .unwrap();
+
+        let scratch = temp.0.join("scratch");
+        let found = diff(&source, &stick, &scratch, false).unwrap();
+        assert_eq!(
+            found.origins_changed, 2,
+            "a is new and b differs; c has no match"
+        );
+
+        let done = push(&source, &stick, &scratch, false).unwrap();
+        assert_eq!(done.origins_changed, 2);
+        let written = origins::Origins::open(&stick.join(DATABASE_DIR).join(origins::FILE))
+            .unwrap()
+            .all()
+            .unwrap();
+        assert_eq!(written.len(), 2);
+        assert_eq!(written[&key(1)], "/pc/Music/a.flac");
+        assert_eq!(
+            written[&key(2)],
+            "/pc/Music/b.flac",
+            "the open library's replaces"
+        );
+        let backup = stick.join(DATABASE_DIR).join(BACKUP_DIR);
+        assert!(backup.join(origins::FILE).is_file());
+        assert!(
+            backup.join(MAIN_DATABASE).is_file(),
+            "the playlists changed as well"
+        );
+
+        let again = push(&source, &stick, &scratch, false).unwrap();
+        assert_eq!((again.playlists_changed, again.origins_changed), (0, 0));
+    }
+
+    #[test]
+    fn only_the_origins_differing_writes_only_their_file() {
+        let temp = TempDir::new("origins-only");
+        let tracks = [("a.flac", 1)];
+        let playlists = "INSERT INTO Playlist (id, title, parentListId, isPersisted, nextListId) VALUES (1, 'Mix', 0, 1, 0);";
+        let pc = make(&temp.0, "pc", &tracks, playlists);
+        let stick = make(&temp.0, "stick", &tracks, playlists);
+        let source = open(&pc, &temp.0.join("source-scratch"));
+        source
+            .save_origins(&[(("db".to_string(), 1), "/pc/a.flac".into())], false)
+            .unwrap();
+        let before = fs::read(stick.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap();
+
+        let done = push(&source, &stick, &temp.0.join("scratch"), false).unwrap();
+        assert_eq!((done.playlists_changed, done.origins_changed), (0, 1));
+        assert_eq!(
+            fs::read(stick.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap(),
+            before
+        );
+        assert!(stick.join(DATABASE_DIR).join(origins::FILE).is_file());
     }
 
     #[test]

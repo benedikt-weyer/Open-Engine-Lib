@@ -16,6 +16,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::beatgrid::{self, Marker};
 use crate::cache::{self, DATABASE_DIR};
+use crate::origins::{self, Origins, TrackKey};
 use crate::smartlist::Rules;
 use crate::soundswitch::{Lighting, SoundSwitch};
 
@@ -166,6 +167,8 @@ pub struct Library {
     playlists: Mutex<Vec<Playlist>>,
     by_id: TrackIds,
     by_origin: TrackOrigins,
+    /// Where earlier versions kept the origins of all libraries, to take over from.
+    legacy_origins: PathBuf,
     /// Ratings set since the library was opened, by index in `tracks`.
     ratings: Mutex<HashMap<usize, u32>>,
     /// Kept open to read what is not loaded with the tracks (covers, beatgrids) on demand,
@@ -227,6 +230,7 @@ impl Library {
             playlists: Mutex::new(playlists),
             by_id,
             by_origin,
+            legacy_origins: origins::legacy_path(),
             ratings: Mutex::default(),
             connection: Mutex::new(connection),
         })
@@ -662,6 +666,66 @@ impl Library {
                 Some((index, key, resolve(&track.path).display().to_string()))
             })
             .collect()
+    }
+
+    /// Where the library's own database of origins is: in the working copy, like the
+    /// databases of Engine, so that syncing takes it along.
+    fn origins_path(&self) -> PathBuf {
+        self.cache.join(DATABASE_DIR).join(origins::FILE)
+    }
+
+    /// The saved origins (the library has none until one is saved).
+    pub fn origins(&self) -> HashMap<TrackKey, String> {
+        Origins::open_existing(&self.origins_path())
+            .ok()
+            .flatten()
+            .and_then(|origins| origins.all().ok())
+            .unwrap_or_default()
+    }
+
+    /// Saves origins in the working copy: with `overwrite` they replace the ones the
+    /// tracks have, else only tracks that have none get one. Returns how many were new
+    /// (or, with `overwrite`, different).
+    pub fn save_origins(
+        &self,
+        entries: &[(TrackKey, String)],
+        overwrite: bool,
+    ) -> Result<usize, EditError> {
+        let path = self.origins_path();
+        let first = !path.is_file();
+        if first && entries.is_empty() {
+            return Ok(0); // (no file for nothing)
+        }
+        let origins =
+            Origins::open(&path).map_err(|error| EditError::Cache(std::io::Error::other(error)))?;
+        // The first time, the origins that earlier versions kept for all libraries come
+        // along (those of this library's tracks), so that saving them again is not needed.
+        if first
+            && let Ok(Some(legacy)) = Origins::open_existing(&self.legacy_origins)
+            && let Ok(all) = legacy.all()
+        {
+            let mine: HashSet<&TrackKey> = self
+                .tracks
+                .iter()
+                .filter_map(|track| track.origin_key.as_ref())
+                .collect();
+            let inherited: Vec<(TrackKey, String)> = all
+                .into_iter()
+                .filter(|(key, _)| mine.contains(key))
+                .collect();
+            origins.save_missing(&inherited)?;
+        }
+        let changed = if overwrite {
+            origins.replace(entries)?
+        } else {
+            origins.save_missing(entries)?
+        };
+        if changed > 0 || first {
+            // Noted, so that opening the library again can't throw the origins away
+            // before they reached the source.
+            cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        }
+        Ok(changed)
     }
 
     /// The star rating of the track at `index` in `tracks`, 0 to 100, as it is now.
@@ -1928,6 +1992,63 @@ mod tests {
             library.delete_smart_playlist(0),
             Err(EditError::NotSmart)
         ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn origins_are_saved_in_the_working_copy_and_take_over_the_old_ones() {
+        let cache = std::env::temp_dir().join(format!(
+            "open-engine-lib-library-origins-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(cache.join(DATABASE_DIR)).unwrap();
+        let mut library = Library::load(database(), PathBuf::from("/lib"), cache.clone()).unwrap();
+        let key = |id: i64| ("db".to_string(), id);
+
+        // What earlier versions saved: for a track of this library, and for another.
+        let legacy = cache.join("legacy.db");
+        Origins::open(&legacy)
+            .unwrap()
+            .save_missing(&[
+                (key(1), "/old/one.flac".into()),
+                (("elsewhere".to_string(), 9), "/old/nine.flac".into()),
+            ])
+            .unwrap();
+        library.legacy_origins = legacy;
+
+        // Nothing to save makes no file; saving makes it in the working copy, noted as edited.
+        assert_eq!(library.save_origins(&[], false).unwrap(), 0);
+        assert!(!cache.join(DATABASE_DIR).join(origins::FILE).exists());
+        assert!(library.origins().is_empty());
+        let new = library
+            .save_origins(
+                &[
+                    (key(1), "/pc/one.flac".into()),
+                    (key(2), "/pc/two.flac".into()),
+                ],
+                false,
+            )
+            .unwrap();
+        assert_eq!(new, 1, "the old origin of one is kept, two is new");
+        let saved = library.origins();
+        assert_eq!(
+            saved.len(),
+            2,
+            "the other library's origin did not come along"
+        );
+        assert_eq!(saved[&key(1)], "/old/one.flac");
+        assert_eq!(saved[&key(2)], "/pc/two.flac");
+        assert!(cache.join("edited").exists());
+
+        // Replacing is for syncing from another library.
+        assert_eq!(
+            library
+                .save_origins(&[(key(1), "/pc/one.flac".into())], true)
+                .unwrap(),
+            1
+        );
+        assert_eq!(library.origins()[&key(1)], "/pc/one.flac");
         let _ = std::fs::remove_dir_all(&cache);
     }
 
