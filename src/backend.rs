@@ -284,6 +284,7 @@ async fn load_library(
             title: playlist.title,
             depth: playlist.depth as usize,
             has_children: playlist.has_children,
+            is_smart: playlist.is_smart,
             tracks: playlist
                 .track_ids
                 .iter()

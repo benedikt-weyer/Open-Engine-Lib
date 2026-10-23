@@ -15,6 +15,7 @@ mod library;
 mod player;
 mod save;
 mod service;
+mod smartlist;
 mod soundswitch;
 mod sync;
 mod waveform;

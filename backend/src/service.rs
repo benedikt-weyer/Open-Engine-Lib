@@ -268,6 +268,7 @@ impl LibraryService for Service {
                 depth: playlist.depth as u32,
                 parent_id: playlist.parent.map(|parent| parent as u32),
                 has_children: playlist.has_children,
+                is_smart: playlist.smart,
                 track_ids: playlist.tracks.iter().map(|&track| track as u32).collect(),
             })
             .collect();

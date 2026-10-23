@@ -1276,6 +1276,7 @@ mod tests {
             title: title.into(),
             depth,
             has_children,
+            is_smart: false,
             tracks: tracks.to_vec(),
         }
     }

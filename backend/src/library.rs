@@ -16,6 +16,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::beatgrid::{self, Marker};
 use crate::cache::{self, DATABASE_DIR};
+use crate::smartlist::Rules;
 use crate::soundswitch::{Lighting, SoundSwitch};
 
 const DATABASE: &str = "Database2/m.db";
@@ -116,7 +117,9 @@ pub struct Playlist {
     /// Index of the parent in `Library::playlists`.
     pub parent: Option<usize>,
     pub has_children: bool,
-    /// Indices into `Library::tracks`, in playlist order.
+    /// A smart playlist: its tracks are the ones that satisfy its rules.
+    pub smart: bool,
+    /// Indices into `Library::tracks`, in playlist order (in library order for a smart one).
     pub tracks: Vec<usize>,
 }
 
@@ -162,7 +165,7 @@ impl Library {
 
     fn load(connection: Connection, dir: PathBuf, cache: PathBuf) -> Result<Self, OpenError> {
         let (tracks, by_id, by_origin) = load_tracks(&connection, &dir)?;
-        let playlists = load_playlists(&connection, &by_id, &by_origin)?;
+        let playlists = load_playlists(&connection, &tracks, &by_id, &by_origin)?;
         Ok(Self {
             dir,
             cache,
@@ -389,6 +392,7 @@ fn load_tracks(
 
 fn load_playlists(
     connection: &Connection,
+    library_tracks: &[Track],
     by_id: &TrackIds,
     by_origin: &TrackOrigins,
 ) -> rusqlite::Result<Vec<Playlist>> {
@@ -431,45 +435,203 @@ fn load_playlists(
         rows_by_parent.entry(parent).or_default().push((id, next));
     }
 
-    let mut playlists = Vec::new();
-    // Depth first, each level in its stored sibling order. Playlists hang off the
-    // root, whose id is 0.
-    let mut stack: Vec<(i64, usize, Option<usize>)> =
-        chain_order(rows_by_parent.get(&0).map(Vec::as_slice).unwrap_or(&[]))
-            .into_iter()
-            .rev()
-            .map(|id| (id, 0, None))
-            .collect();
+    let mut smart_by_parent: HashMap<String, Vec<SmartRow>> = HashMap::new();
+    for row in load_smartlists(connection)? {
+        smart_by_parent
+            .entry(row.parent.clone())
+            .or_default()
+            .push(row);
+    }
 
-    while let Some((id, depth, parent)) = stack.pop() {
-        let children = rows_by_parent.get(&id).map(Vec::as_slice).unwrap_or(&[]);
-        let tracks = entities
-            .get(&id)
-            .map(|list| {
-                chain_order(list)
-                    .into_iter()
-                    .filter_map(|entity| entity_track.get(&entity).copied())
-                    .collect()
-            })
-            .unwrap_or_default();
+    let mut playlists: Vec<Playlist> = Vec::new();
+    // Depth first, each level in its stored sibling order. Playlists hang off the
+    // root, whose id is 0. A playlist is told apart from its siblings by its path,
+    // its parents' titles and its own, each followed by `;`, which is how smart
+    // playlists name their parent.
+    let root = ordered_children(
+        rows_by_parent.get(&0).map(Vec::as_slice).unwrap_or(&[]),
+        &titles,
+        smart_by_parent.remove("").unwrap_or_default(),
+    );
+    let mut stack: Vec<(Node, usize, Option<usize>, String)> = root
+        .into_iter()
+        .rev()
+        .map(|node| (node, 0, None, String::new()))
+        .collect();
+
+    while let Some((node, depth, parent, parent_path)) = stack.pop() {
+        let (playlist, children, path) = match node {
+            Node::List(id) => {
+                let title = titles.remove(&id).unwrap_or_default();
+                let path = format!("{parent_path}{title};");
+                let children = ordered_children(
+                    rows_by_parent.get(&id).map(Vec::as_slice).unwrap_or(&[]),
+                    &titles,
+                    smart_by_parent.remove(&path).unwrap_or_default(),
+                );
+                let tracks = entities
+                    .get(&id)
+                    .map(|list| {
+                        chain_order(list)
+                            .into_iter()
+                            .filter_map(|entity| entity_track.get(&entity).copied())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let playlist = Playlist {
+                    title,
+                    depth,
+                    parent,
+                    has_children: !children.is_empty(),
+                    smart: false,
+                    tracks,
+                };
+                (playlist, children, path)
+            }
+            Node::Smart(row) => {
+                let rules = Rules::parse(&row.rules);
+                let tracks = library_tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| rules.as_ref().is_some_and(|rules| rules.matches(track)))
+                    .map(|(index, _)| index)
+                    .collect();
+                let playlist = Playlist {
+                    title: row.title,
+                    depth,
+                    parent,
+                    has_children: false,
+                    smart: true,
+                    tracks,
+                };
+                (playlist, Vec::new(), String::new())
+            }
+        };
 
         let index = playlists.len();
-        playlists.push(Playlist {
-            title: titles.remove(&id).unwrap_or_default(),
-            depth,
-            parent,
-            has_children: !children.is_empty(),
-            tracks,
-        });
+        playlists.push(playlist);
         stack.extend(
-            chain_order(children)
+            children
                 .into_iter()
                 .rev()
-                .map(|child| (child, depth + 1, Some(index))),
+                .map(|child| (child, depth + 1, Some(index), path.clone())),
         );
     }
 
     Ok(playlists)
+}
+
+/// A row of the `Smartlist` table.
+struct SmartRow {
+    uuid: String,
+    title: String,
+    /// The playlist it is in, as the titles from the top, each followed by `;`. Empty
+    /// at the top level.
+    parent: String,
+    /// The smart playlist after this one, if it is in the same place.
+    next_uuid: String,
+    /// The playlist after this one, if one follows it instead, as a path like `parent`.
+    next_path: String,
+    rules: String,
+}
+
+/// The smart playlists of the library. (A library from an older version has none.)
+fn load_smartlists(connection: &Connection) -> rusqlite::Result<Vec<SmartRow>> {
+    let has_table = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'Smartlist'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare(
+        "SELECT listUuid, title, parentPlaylistPath, nextListUuid, nextPlaylistPath, rules \
+         FROM Smartlist ORDER BY rowid",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut smartlists = Vec::new();
+    while let Some(row) = rows.next()? {
+        let text = |index: usize| -> rusqlite::Result<String> {
+            Ok(row.get::<_, Option<String>>(index)?.unwrap_or_default())
+        };
+        smartlists.push(SmartRow {
+            uuid: text(0)?,
+            title: text(1)?,
+            parent: text(2)?,
+            next_uuid: text(3)?,
+            next_path: text(4)?,
+            rules: text(5)?,
+        });
+    }
+    Ok(smartlists)
+}
+
+/// A playlist or a smart playlist, to be placed in the tree.
+enum Node {
+    /// A row of `Playlist`.
+    List(i64),
+    Smart(SmartRow),
+}
+
+/// The children of one playlist (or of the top level) in display order. The playlists
+/// keep their stored order. The smart playlists, which are ordered among themselves by
+/// their own links, stand before the playlist their last one points at, or after all of
+/// them if it points at none.
+fn ordered_children(
+    lists: &[(i64, i64)],
+    titles: &HashMap<i64, String>,
+    smart: Vec<SmartRow>,
+) -> Vec<Node> {
+    let mut nodes: Vec<Node> = chain_order(lists).into_iter().map(Node::List).collect();
+    if smart.is_empty() {
+        return nodes;
+    }
+
+    // `chain_order` wants ids that are not 0: use the position plus one.
+    let position: HashMap<&str, i64> = smart
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.uuid.as_str(), index as i64 + 1))
+        .collect();
+    let links: Vec<(i64, i64)> = smart
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            (
+                index as i64 + 1,
+                position.get(row.next_uuid.as_str()).copied().unwrap_or(0),
+            )
+        })
+        .collect();
+    let order = chain_order(&links);
+
+    let before = order
+        .last()
+        .and_then(|&last| {
+            smart[last as usize - 1]
+                .next_path
+                .split(';')
+                .rfind(|s| !s.is_empty())
+        })
+        .map(str::to_owned);
+    let at = before
+        .and_then(|title| {
+            nodes
+                .iter()
+                .position(|node| matches!(node, Node::List(id) if titles.get(id) == Some(&title)))
+        })
+        .unwrap_or(nodes.len());
+
+    let mut smart: Vec<Option<SmartRow>> = smart.into_iter().map(Some).collect();
+    let placed: Vec<Node> = order
+        .into_iter()
+        .filter_map(|id| smart[id as usize - 1].take().map(Node::Smart))
+        .collect();
+    nodes.splice(at..at, placed);
+    nodes
 }
 
 /// Orders `(id, next)` pairs that form a singly linked list: the head is the item
@@ -655,6 +817,50 @@ mod tests {
                 ("Child", 1, Some(1), false),
             ]
         );
+    }
+
+    #[test]
+    fn places_smart_playlists_and_fills_them_from_their_rules() {
+        let connection = database();
+        // Top level: Smart A -> Smart B stand before Alpha. Alpha holds Smart C, after Child.
+        // Smart D names a parent that does not exist and is left out.
+        connection
+            .execute_batch(
+                "CREATE TABLE Smartlist (listUuid TEXT PRIMARY KEY, title TEXT,
+                    parentPlaylistPath TEXT, nextPlaylistPath TEXT, nextListUuid TEXT, rules TEXT);
+                 INSERT INTO Smartlist VALUES
+                    ('b', 'Smart B', '', 'Alpha;', '', '{\"match\":\"all\",\"rules\":[{\"col\":\"genre\",\"con\":\"LIKE\",\"param\":\"''%tech%''\"}]}'),
+                    ('a', 'Smart A', '', '', 'b', '{\"match\":\"all\",\"rules\":[{\"col\":\"genre\",\"con\":\"LIKE\",\"param\":\"''%house%''\"}]}'),
+                    ('c', 'Smart C', 'Alpha;', '', '', 'broken'),
+                    ('d', 'Smart D', 'Nowhere;', '', '', '{}');",
+            )
+            .unwrap();
+        let library =
+            Library::load(connection, PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
+
+        let shape: Vec<_> = library
+            .playlists
+            .iter()
+            .map(|p| (p.title.as_str(), p.depth, p.smart, p.has_children))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Beta", 0, false, false),
+                ("Smart A", 0, true, false),
+                ("Smart B", 0, true, false),
+                ("Alpha", 0, false, true),
+                ("Child", 1, false, false),
+                ("Smart C", 1, true, false),
+            ]
+        );
+        assert_eq!(library.playlists[1].tracks, [0], "genre House");
+        assert_eq!(library.playlists[2].tracks, [2], "genre Techno");
+        assert!(
+            library.playlists[5].tracks.is_empty(),
+            "unreadable rules match nothing"
+        );
+        assert_eq!(library.playlists[5].parent, Some(3));
     }
 
     #[test]

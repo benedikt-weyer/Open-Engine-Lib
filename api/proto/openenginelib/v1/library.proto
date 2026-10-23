@@ -178,6 +178,8 @@ message Playlist {
   bool has_children = 5;
   // Track ids in playlist order.
   repeated uint32 track_ids = 6;
+  // True for a smart playlist: `track_ids` are the tracks that satisfy its rules.
+  bool is_smart = 7;
 }
 
 message GetWaveformRequest {

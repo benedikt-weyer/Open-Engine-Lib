@@ -82,6 +82,8 @@ pub struct Playlist {
     pub title: String,
     pub depth: usize,
     pub has_children: bool,
+    /// A smart playlist: its tracks are the ones that satisfy its rules.
+    pub is_smart: bool,
     /// Indices into `Library::tracks`, in playlist order.
     pub tracks: Vec<usize>,
 }
@@ -174,6 +176,7 @@ mod tests {
             title: title.into(),
             depth,
             has_children: false,
+            is_smart: false,
             tracks: Vec::new(),
         }
     }

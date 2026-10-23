@@ -114,6 +114,12 @@ For an implementation: treat text hashes as opaque ids. They can be recomputed f
 ### `Smartlist`
 Keyed by `listUuid`. The rules are JSON text in `rules`, e.g. `{"match":"all","rules":[{"col":"genre","con":"LIKE","param":"'%Techno%'","v":"2.20.0"}],"rv":2}`. Parent and next are referenced by path/UUID instead of integer id.
 
+What Open Engine Lib does with it (the first two points are **observed** on one library with five lists, the rest is **inferred**):
+- `parentPlaylistPath` is the parent as the titles from the top, each followed by `;` (empty at the top level), and `nextPlaylistPath` names a regular playlist the same way. `nextListUuid` links to the next smartlist.
+- A chain of smartlists ends at `nextListUuid = ''`, with `nextPlaylistPath` naming the regular playlist it stands before (empty: after all of them). Regular playlists cannot point at a smartlist, as `Playlist.nextListId` is an integer.
+- `param` is an SQL literal, so text is in single quotes and `LIKE` is SQL `LIKE`. Besides `genre`, the columns `title`, `artist`, `album` and `bpm` are evaluated, with `LIKE`, `NOT LIKE`, `=`, `!=`/`<>` and for `bpm` also `<`, `<=`, `>`, `>=`. Any other rule matches no track. `match` is `all` or `any`.
+- The `Smartlist` table has no tracks of its own: the tracks of a smart playlist are worked out when the library is opened and are not written back.
+
 ### Other tables
 - `PreparelistEntity`: the prepare list (`trackId`, `trackNumber`).
 - `Pack`: `packId`, `changeLogDatabaseUuid`, `changeLogId`, `lastPackTime` (looks like cloud/export pack bookkeeping).
