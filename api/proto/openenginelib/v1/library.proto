@@ -323,6 +323,9 @@ message GetLibrarySyncDiffResponse {
   uint32 location_conflicts = 14;
   // There is no library at the path: a new one would be created at `target_path`.
   bool target_is_new = 15;
+  // The tracks behind `origins_changed`, with one `origin` field each: what the other
+  // library has (empty for none) and what it gets.
+  repeated TrackChange changed_origins = 16;
 }
 message SyncToLibraryRequest {
   string target_path = 1;

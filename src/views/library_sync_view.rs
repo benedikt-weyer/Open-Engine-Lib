@@ -514,6 +514,10 @@ fn changes<'a>(diff: &'a GetLibrarySyncDiffResponse, language: Language) -> Elem
         list = list.push(track_change(change));
     }
     list = more(list, diff.tracks_changed, diff.changed_tracks.len());
+    for change in &diff.changed_origins {
+        list = list.push(track_change(change));
+    }
+    list = more(list, diff.origins_changed, diff.changed_origins.len());
 
     container(scrollable(list.padding(8).width(Fill)))
         .height(LIST_HEIGHT)

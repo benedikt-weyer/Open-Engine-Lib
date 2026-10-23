@@ -114,6 +114,8 @@ struct Outcome {
     missing: Vec<usize>,
     /// How many origins of the other library are new or were different.
     origins_changed: usize,
+    /// Those origins by track, for the lists: what the other library has and what it gets.
+    changed_origins: Vec<api::TrackChange>,
 }
 
 /// A copy of the other library's databases that is worked on.
@@ -378,6 +380,12 @@ pub fn diff(
         changed_playlists: changes,
         tracks_missing: outcome.missing.len() as u32,
         origins_changed: outcome.origins_changed as u32,
+        changed_origins: outcome
+            .changed_origins
+            .iter()
+            .take(MAX_LISTED)
+            .cloned()
+            .collect(),
         missing_tracks: outcome
             .missing
             .iter()
@@ -790,6 +798,7 @@ fn mirror(
     let source_origins = source.origins();
     let target_origins = target.origins();
     let mut origins_to_write = Vec::new();
+    let mut changed_origins = Vec::new();
     for (index, track) in source.tracks.iter().enumerate() {
         let (Some(key), Some(other)) = (track.origin_key.as_ref(), matched[index]) else {
             continue;
@@ -800,8 +809,21 @@ fn mirror(
         ) else {
             continue;
         };
-        if target_origins.get(other_key) != Some(origin) {
+        let before = target_origins.get(other_key);
+        if before != Some(origin) {
             origins_to_write.push((other_key.clone(), origin.clone()));
+            changed_origins.push(api::TrackChange {
+                track: Some(api::TrackRef {
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    path: track.relative_path.clone(),
+                }),
+                fields: vec![api::FieldChange {
+                    field: "origin".into(),
+                    source_value: before.cloned().unwrap_or_default(),
+                    working_value: origin.clone(),
+                }],
+            });
         }
     }
     let origins_changed = if origins_to_write.is_empty() {
@@ -814,6 +836,7 @@ fn mirror(
         changes,
         missing,
         origins_changed,
+        changed_origins,
     })
 }
 
@@ -1195,6 +1218,26 @@ mod tests {
         assert_eq!(
             found.origins_changed, 2,
             "a is new and b differs; c has no match"
+        );
+        let listed: Vec<_> = found
+            .changed_origins
+            .iter()
+            .map(|change| {
+                let field = &change.fields[0];
+                (
+                    change.track.as_ref().unwrap().title.as_str(),
+                    field.field.as_str(),
+                    field.source_value.as_str(),
+                    field.working_value.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("a.flac", "origin", "", "/pc/Music/a.flac"),
+                ("b.flac", "origin", "/old/b.flac", "/pc/Music/b.flac"),
+            ]
         );
 
         let done = push(
