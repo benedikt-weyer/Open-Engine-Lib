@@ -62,6 +62,28 @@ A **File** menu sits at the top of the window: **Open…** (the same as "Open li
 - Playback is not interrupted and track and playlist ids don't change, so the list shown, the selection and the song playing carry on; the UI just fetches the tracks again to learn their new paths. While a save is running the library can't be closed or replaced.
 - The clone has the same database identity (UUID) as the original: it is a copy, not a new library.
 
+## Syncing the working copy to the source
+
+The **Sync with the source…** button in the sidebar opens a window that compares the working copy (the cached databases the backend reads and could change) with the source (the library at its location) and can write the working copy to the source. `GetSyncDiff` says what syncing would change, `SyncToSource` does it.
+
+**The comparison** looks at the main database `m.db` (opened read-only, with the source attached as `immutable`, so another program's locks and journals are left alone):
+
+- tracks that are only in the working copy (added), only in the source (removed), or in both but different: the fields that changed with the old and new value (title, artist, album, genre, comment, label, composer, remixer, year, BPM, key, rating, path, length, file type, analysed, grid locked) and whether the beatgrid, cues or loops changed;
+- playlists that are added, removed, renamed or moved, and for each the tracks added and removed and whether their order changed;
+- which database files differ at all. `hm.db`, `sm.db` and `stm.db` are not itemised, and neither are smart playlists: they are written when syncing but only named in the window.
+
+Lists are cut at 200 entries (the counts are complete). Matching is by Engine's own ids, which a working copy shares with its source.
+
+**Syncing** copies the working copy's databases that differ over the source's, with these protections:
+
+- It refuses if the source can't be reached (a drive that is gone) or another program is writing to it right now (a journal or write-ahead log with something in it).
+- It notices when the source was changed *outside the app* after the working copy was made (the source's files no longer match what the working copy was made from). Syncing would then undo those changes, so the window says so and requires ticking a box before it can go ahead.
+- What it replaces is first kept in `Database2/open-engine-lib-backup` in the source (the latest only, so the drive doesn't fill up).
+- Each file is written next to its place and moved over it in one step, so a file is never half written, and if a later file fails the earlier ones are put back from the backup.
+- Afterwards the working copy and the source count as the same, so nothing shows as changed from outside.
+
+**Limitation:** the app does not yet change the working copy itself, so today the comparison mostly shows what someone else did to the source while the library was open. It is the way back for edits the app will make. Opening a library re-copies the working copy when the source has changed since (see "The library cache"), which would discard unsynced edits, so editing needs to decide what to do then before it is added.
+
 ## The track list
 
 Besides title, artist, album, genre, BPM and length, the list shows where each file is: the path the library records (relative to its `Engine Library` folder, usually starting with `..`) resolved against that folder, so it is a plain path such as `/run/media/you/DRIVE/House/track.flac`. It is worked out from the path alone, without asking the file system. Streaming tracks have no file here and say so. The location is the last column and takes the width the others leave; pointing at it shows the whole path, since a long one is cut off.

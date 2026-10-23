@@ -18,6 +18,7 @@ use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, Library, OpenError};
 use crate::player::Start;
 use crate::save::{self, SaveError};
+use crate::sync::{self, SyncError};
 use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 
 /// Tracks per message of `ListTracks`, to stay well below gRPC's message size limit.
@@ -163,6 +164,32 @@ impl LibraryService for Service {
         // The tracks are the same files in the same order, so playback and every id carry on.
         *self.0.library.write().expect("library lock") = Some(Arc::new(saved));
         Ok(Response::new(response))
+    }
+
+    async fn get_sync_diff(
+        &self,
+        _: Request<api::GetSyncDiffRequest>,
+    ) -> Result<Response<api::GetSyncDiffResponse>, Status> {
+        let library = self.library()?;
+        // Compares files, possibly on a slow drive: not on the async threads.
+        let diff = tokio::task::spawn_blocking(move || sync::diff(&library))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(sync_status)?;
+        Ok(Response::new(diff))
+    }
+
+    async fn sync_to_source(
+        &self,
+        request: Request<api::SyncToSourceRequest>,
+    ) -> Result<Response<api::SyncToSourceResponse>, Status> {
+        let library = self.library()?;
+        let overwrite = request.into_inner().overwrite_outside_changes;
+        let done = tokio::task::spawn_blocking(move || sync::push(&library, overwrite))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(sync_status)?;
+        Ok(Response::new(done))
     }
 
     async fn close_library(
@@ -459,5 +486,16 @@ fn status_message(status: crate::engine::Status) -> api::PlaybackStatus {
             track_id: error.track_id,
             detail: error.detail,
         }),
+    }
+}
+
+/// A sync problem the caller can do something about is a failed precondition; the rest is
+/// an error of the backend.
+fn sync_status(error: SyncError) -> Status {
+    match error {
+        SyncError::Unavailable(_) | SyncError::Busy | SyncError::ChangedOutside => {
+            Status::failed_precondition(error.to_string())
+        }
+        SyncError::Failed(_) => Status::internal(error.to_string()),
     }
 }

@@ -17,6 +17,7 @@ mod recent;
 mod session;
 mod settings;
 mod sidebar;
+mod sync_view;
 mod waveform;
 
 use std::path::PathBuf;
@@ -37,6 +38,7 @@ use model::Library;
 use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
 use recent::Recents;
 use session::{Session, SessionStore};
+use sync_view::Stage as SyncStage;
 use waveform::{Waveform, Waveforms};
 
 /// How often the playback position is fetched from the backend while playing.
@@ -121,6 +123,8 @@ struct State {
     backend_error: Option<String>,
     /// The waveform gain slider being dragged and where it is.
     gain_draft: Option<(WaveformBand, f32)>,
+    /// The window comparing the working copy with the source, while it is open.
+    sync: Option<SyncStage>,
     /// Where the library is being saved to, and why the last save failed.
     saving: Option<PathBuf>,
     save_error: Option<String>,
@@ -146,6 +150,15 @@ pub enum Message {
     /// The pointer moved, to this x, while a column was being resized.
     ResizeMoved(f32),
     ResizeEnded,
+
+    /// The Sync button: open the window and compare (also "Compare again").
+    SyncOpen,
+    SyncDiffLoaded(Result<Arc<open_engine_api::v1::GetSyncDiffResponse>, String>),
+    /// The tick that allows overwriting changes made outside this app.
+    SyncAcknowledged(bool),
+    SyncStart,
+    SyncFinished(Result<open_engine_api::v1::SyncToSourceResponse, String>),
+    SyncClose,
 
     /// A File menu entry was picked.
     MenuSelected(MenuItem),
@@ -227,6 +240,7 @@ impl State {
             seeking: None,
             backend_error: None,
             gain_draft: None,
+            sync: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::discover(),
@@ -296,6 +310,7 @@ impl State {
         self.reset_playback();
         self.covers.clear();
         self.waveforms.clear();
+        self.sync = None;
         self.library = LibraryState::Opening(path.clone());
         Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
     }
@@ -616,6 +631,74 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             return start_backend();
         }
 
+        Message::SyncOpen => {
+            let busy =
+                state.saving.is_some() || matches!(state.sync, Some(SyncStage::Syncing { .. }));
+            if !busy
+                && matches!(state.library, LibraryState::Open(_))
+                && let Some(backend) = state.backend()
+            {
+                state.sync = Some(SyncStage::Loading);
+                return Task::perform(backend::sync_diff(backend), Message::SyncDiffLoaded);
+            }
+        }
+        Message::SyncDiffLoaded(result) => {
+            // Only if the window is still waiting for it.
+            if matches!(state.sync, Some(SyncStage::Loading)) {
+                state.sync = Some(match result {
+                    Ok(diff) => SyncStage::Ready {
+                        diff,
+                        acknowledged: false,
+                        error: None,
+                    },
+                    Err(error) => SyncStage::Failed(error),
+                });
+            }
+        }
+        Message::SyncAcknowledged(ticked) => {
+            if let Some(SyncStage::Ready { acknowledged, .. }) = &mut state.sync {
+                *acknowledged = ticked;
+            }
+        }
+        Message::SyncStart => {
+            if let (
+                Some(SyncStage::Ready {
+                    diff, acknowledged, ..
+                }),
+                Some(backend),
+            ) = (&state.sync, state.backend())
+                && sync_view::can_sync(diff, *acknowledged)
+            {
+                // Overwriting what was changed outside is allowed only if it was ticked.
+                let overwrite = diff.source_changed_outside;
+                state.sync = Some(SyncStage::Syncing {
+                    diff: Arc::clone(diff),
+                    acknowledged: *acknowledged,
+                });
+                return Task::perform(
+                    backend::sync_to_source(backend, overwrite),
+                    Message::SyncFinished,
+                );
+            }
+        }
+        Message::SyncFinished(result) => {
+            if let Some(SyncStage::Syncing { diff, acknowledged }) = &state.sync {
+                state.sync = Some(match result {
+                    Ok(done) => SyncStage::Done(done),
+                    // Back to what was shown, with the reason.
+                    Err(error) => SyncStage::Ready {
+                        diff: Arc::clone(diff),
+                        acknowledged: *acknowledged,
+                        error: Some(error),
+                    },
+                });
+            }
+        }
+        Message::SyncClose => {
+            if state.sync.as_ref().is_some_and(SyncStage::can_close) {
+                state.sync = None;
+            }
+        }
         Message::MenuSelected(item) => match item {
             MenuItem::Open => return handle(state, Message::ChooseLibrary),
             MenuItem::SaveAs => {
@@ -719,6 +802,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.reset_playback();
             state.covers.clear();
             state.waveforms.clear();
+            state.sync = None;
             // Closing a library on purpose means the next start doesn't reopen it.
             state.save(&Session::default(), true);
             if let Some(backend) = state.backend() {
@@ -845,7 +929,7 @@ fn view(state: &State) -> Element<'_, Message> {
         ),
     };
 
-    column![
+    let window = column![
         menubar::view(
             language,
             matches!(state.library, LibraryState::Open(_)),
@@ -857,7 +941,12 @@ fn view(state: &State) -> Element<'_, Message> {
     ]
     .width(Fill)
     .height(Fill)
-    .into()
+    .into();
+    // The sync window lies over the whole app, which is dimmed and can't be used meanwhile.
+    match &state.sync {
+        Some(stage) => iced::widget::stack![window, sync_view::modal(stage, language)].into(),
+        None => window,
+    }
 }
 
 fn library_page(state: &State, language: Language) -> Element<'_, Message> {
@@ -918,6 +1007,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
             state.recents_error.as_deref(),
             browser.map(|browser| browser.library.path.as_str()),
             !matches!(state.library, LibraryState::Opening(_)) && state.saving.is_none(),
+            state.saving.is_none(),
             language,
         ),
         content
@@ -1129,6 +1219,7 @@ mod tests {
             seeking: None,
             backend_error: None,
             gain_draft: None,
+            sync: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
@@ -1241,6 +1332,117 @@ mod tests {
             state.snapshot().unwrap(),
             session(&["House", "Deep"], Some("../Music/c.flac"), true, 61_250)
         );
+    }
+
+    fn sync_diff(changed: &[&str]) -> Arc<open_engine_api::v1::GetSyncDiffResponse> {
+        Arc::new(open_engine_api::v1::GetSyncDiffResponse {
+            source_available: true,
+            changed_databases: changed.iter().map(|name| name.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn the_sync_window_shows_the_differences_once_they_are_known() {
+        let mut state = state();
+        // (Without a backend there is nothing to compare with, so the window stays closed.)
+        let _ = handle(&mut state, Message::SyncOpen);
+        assert!(state.sync.is_none());
+
+        state.sync = Some(SyncStage::Loading);
+        let _ = handle(
+            &mut state,
+            Message::SyncDiffLoaded(Ok(sync_diff(&["m.db"]))),
+        );
+        assert!(matches!(
+            state.sync,
+            Some(SyncStage::Ready {
+                acknowledged: false,
+                error: None,
+                ..
+            })
+        ));
+
+        // The tick that allows overwriting changes made outside is the window's own.
+        let _ = handle(&mut state, Message::SyncAcknowledged(true));
+        assert!(matches!(
+            state.sync,
+            Some(SyncStage::Ready {
+                acknowledged: true,
+                ..
+            })
+        ));
+
+        // Starting needs the backend; without it nothing is written or changed.
+        let _ = handle(&mut state, Message::SyncStart);
+        assert!(matches!(state.sync, Some(SyncStage::Ready { .. })));
+    }
+
+    #[test]
+    fn a_failed_comparison_is_shown_and_a_late_answer_for_a_closed_window_is_dropped() {
+        let mut state = state();
+        state.sync = Some(SyncStage::Loading);
+        let _ = handle(&mut state, Message::SyncDiffLoaded(Err("no luck".into())));
+        assert!(matches!(&state.sync, Some(SyncStage::Failed(error)) if error == "no luck"));
+
+        let _ = handle(&mut state, Message::SyncClose);
+        assert!(state.sync.is_none());
+        let _ = handle(
+            &mut state,
+            Message::SyncDiffLoaded(Ok(sync_diff(&["m.db"]))),
+        );
+        assert!(state.sync.is_none(), "nobody is waiting for it any more");
+    }
+
+    #[test]
+    fn a_sync_ends_in_a_report_or_goes_back_with_the_reason_and_cannot_be_closed_meanwhile() {
+        let writing = |diff| SyncStage::Syncing {
+            diff,
+            acknowledged: true,
+        };
+        let mut state = state();
+        state.sync = Some(writing(sync_diff(&["m.db"])));
+
+        // The window stays until the writing is done.
+        let _ = handle(&mut state, Message::SyncClose);
+        assert!(matches!(state.sync, Some(SyncStage::Syncing { .. })));
+
+        // It failed: back to the differences, still ticked, with what went wrong.
+        let _ = handle(&mut state, Message::SyncFinished(Err("disk full".into())));
+        match &state.sync {
+            Some(SyncStage::Ready {
+                acknowledged,
+                error,
+                ..
+            }) => {
+                assert!(*acknowledged);
+                assert_eq!(error.as_deref(), Some("disk full"));
+            }
+            other => panic!("expected the differences again, got {other:?}"),
+        }
+
+        // It worked: a report, and then the window can go.
+        state.sync = Some(writing(sync_diff(&["m.db"])));
+        let done = open_engine_api::v1::SyncToSourceResponse {
+            files_written: 2,
+            backup_path: "/media/DRIVE/Engine Library/Database2/open-engine-lib-backup".into(),
+        };
+        let _ = handle(&mut state, Message::SyncFinished(Ok(done)));
+        assert!(matches!(&state.sync, Some(SyncStage::Done(done)) if done.files_written == 2));
+        let _ = handle(&mut state, Message::SyncClose);
+        assert!(state.sync.is_none());
+    }
+
+    #[test]
+    fn closing_the_library_closes_the_sync_window() {
+        let mut state = state();
+        state.sync = Some(SyncStage::Ready {
+            diff: sync_diff(&["m.db"]),
+            acknowledged: false,
+            error: None,
+        });
+        let _ = handle(&mut state, Message::CloseLibrary);
+        assert!(state.sync.is_none());
     }
 
     #[test]

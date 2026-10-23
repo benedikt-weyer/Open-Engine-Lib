@@ -18,10 +18,10 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetWaveformRequest,
-    ListPlaylistsRequest, ListTracksRequest, NextRequest, OpenLibraryRequest, PlayRequest,
-    PlaybackStatus, PreviousRequest, SaveLibraryAsRequest, SeekRequest, StopRequest,
-    TogglePauseRequest,
+    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest,
+    GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, NextRequest,
+    OpenLibraryRequest, PlayRequest, PlaybackStatus, PreviousRequest, SaveLibraryAsRequest,
+    SeekRequest, StopRequest, SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -359,6 +359,31 @@ pub async fn waveform(
         columns,
         grid,
     ))))
+}
+
+/// What would change in the source if the working copy were written to it.
+pub async fn sync_diff(mut backend: Backend) -> Result<Arc<GetSyncDiffResponse>, String> {
+    backend
+        .library
+        .get_sync_diff(GetSyncDiffRequest {})
+        .await
+        .map(|response| Arc::new(response.into_inner()))
+        .map_err(describe)
+}
+
+/// Writes the working copy to the source.
+pub async fn sync_to_source(
+    mut backend: Backend,
+    overwrite_outside_changes: bool,
+) -> Result<SyncToSourceResponse, String> {
+    backend
+        .library
+        .sync_to_source(SyncToSourceRequest {
+            overwrite_outside_changes,
+        })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
 }
 
 pub async fn close_library(mut backend: Backend) -> Result<(), String> {

@@ -15,6 +15,7 @@ mod library;
 mod player;
 mod save;
 mod service;
+mod sync;
 mod waveform;
 
 use std::io::{Read, Write};

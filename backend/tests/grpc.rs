@@ -11,9 +11,9 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetWaveformRequest,
-    ListPlaylistsRequest, ListTracksRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind,
-    PlaybackState, SaveLibraryAsRequest,
+    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest,
+    GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, OpenLibraryRequest, PlayRequest,
+    PlaybackErrorKind, PlaybackState, SaveLibraryAsRequest, SyncToSourceRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -1227,4 +1227,219 @@ async fn saves_a_real_library() {
         "{same} tracks lead to the same file, {streaming} streaming tracks untouched, {artwork} cover files copied"
     );
     assert!(same > 0);
+}
+
+#[tokio::test]
+async fn shows_what_syncing_would_change_and_writes_the_working_copy_to_the_source() {
+    let temp = TempDir::new("sync");
+    let library_dir = fixture_library(&temp.0);
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+
+    assert_eq!(
+        code(library.get_sync_diff(GetSyncDiffRequest {}).await),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        code(library.sync_to_source(SyncToSourceRequest::default()).await),
+        Code::FailedPrecondition
+    );
+
+    let opened = library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let diff = library
+        .get_sync_diff(GetSyncDiffRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(diff.source_available && !diff.source_changed_outside && !diff.source_busy);
+    assert!(
+        diff.changed_databases.is_empty(),
+        "a fresh working copy is the source"
+    );
+
+    // The working copy is changed (as editing it will).
+    let working = Path::new(&opened.cache_path).join("Database2/m.db");
+    rusqlite::Connection::open(&working)
+        .unwrap()
+        .execute_batch(
+            "UPDATE Track SET title = 'Renamed' WHERE id = 1; DELETE FROM Track WHERE id = 3;",
+        )
+        .unwrap();
+
+    let diff = library
+        .get_sync_diff(GetSyncDiffRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(diff.changed_databases, ["m.db"]);
+    assert_eq!(
+        (diff.tracks_added, diff.tracks_removed, diff.tracks_changed),
+        (0, 1, 1)
+    );
+    assert_eq!(diff.removed_tracks[0].title, "Three");
+    let change = &diff.changed_tracks[0];
+    assert_eq!(change.fields[0].field, "title");
+    assert_eq!(change.fields[0].source_value, "One");
+    assert_eq!(change.fields[0].working_value, "Renamed");
+
+    // Syncing writes it, and keeps what was there.
+    let source = library_dir.join("Database2/m.db");
+    let old_source = std::fs::read(&source).unwrap();
+    let done = library
+        .sync_to_source(SyncToSourceRequest::default())
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(done.files_written, 1);
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        std::fs::read(&working).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(Path::new(&done.backup_path).join("m.db")).unwrap(),
+        old_source
+    );
+
+    let after = library
+        .get_sync_diff(GetSyncDiffRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(after.changed_databases.is_empty() && !after.source_changed_outside);
+
+    // Someone else changes the source: that is noticed, and not overwritten unless meant.
+    rusqlite::Connection::open(&source)
+        .unwrap()
+        .execute_batch("UPDATE Track SET title = 'Theirs' WHERE id = 2;")
+        .unwrap();
+    let outside = library
+        .get_sync_diff(GetSyncDiffRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(outside.source_changed_outside);
+    assert_eq!(
+        code(library.sync_to_source(SyncToSourceRequest::default()).await),
+        Code::FailedPrecondition
+    );
+    let theirs = std::fs::read(&source).unwrap();
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        theirs,
+        "refusing changes nothing"
+    );
+    let forced = library
+        .sync_to_source(SyncToSourceRequest {
+            overwrite_outside_changes: true,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(forced.files_written, 1);
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        std::fs::read(&working).unwrap()
+    );
+}
+
+/// Diffs a real library against its working copy, after changing the working copy in a
+/// temporary cache (the real library is only read): `OPEN_ENGINE_TEST_LIBRARY=... cargo test
+/// -p open-engine-backend --test grpc diffs_a_real -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "needs a real library (OPEN_ENGINE_TEST_LIBRARY)"]
+async fn diffs_a_real_library() {
+    let path = std::env::var("OPEN_ENGINE_TEST_LIBRARY").expect("OPEN_ENGINE_TEST_LIBRARY");
+    let temp = TempDir::new("diff-real");
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    let opened = library
+        .open_library(OpenLibraryRequest { path })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let started = Instant::now();
+    let same = library
+        .get_sync_diff(GetSyncDiffRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    println!(
+        "unchanged: {:?} databases differ, compared in {:?}",
+        same.changed_databases,
+        started.elapsed()
+    );
+    assert!(same.source_available && same.changed_databases.is_empty());
+
+    // Edit the working copy: a title, a rating, a beatgrid, a track gone, a playlist renamed,
+    // a track out of a playlist.
+    let working = Path::new(&opened.cache_path).join("Database2/m.db");
+    let db = rusqlite::Connection::open(&working).unwrap();
+    db.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         UPDATE Track SET title = title || ' (edited)', rating = 100 WHERE id = (SELECT min(id) FROM Track);
+         UPDATE PerformanceData SET beatData = x'00' WHERE trackId = (SELECT min(id) + 1 FROM Track);
+         DELETE FROM Track WHERE id = (SELECT max(id) FROM Track);
+         UPDATE Playlist SET title = title || ' 2' WHERE id = (SELECT min(id) FROM Playlist);
+         DELETE FROM PlaylistEntity WHERE id = (SELECT min(id) FROM PlaylistEntity);",
+    )
+    .unwrap();
+    drop(db);
+
+    let started = Instant::now();
+    let diff = library
+        .get_sync_diff(GetSyncDiffRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    println!(
+        "edited: databases {:?}; tracks +{} -{} ~{}; {} playlists changed; compared in {:?}",
+        diff.changed_databases,
+        diff.tracks_added,
+        diff.tracks_removed,
+        diff.tracks_changed,
+        diff.playlists_changed,
+        started.elapsed()
+    );
+    for change in diff.changed_tracks.iter().take(3) {
+        let fields: Vec<_> = change.fields.iter().map(|f| f.field.as_str()).collect();
+        println!(
+            "  ~ {:?}: {fields:?}",
+            change.track.as_ref().map(|t| &t.title)
+        );
+    }
+    for change in diff.changed_playlists.iter().take(3) {
+        println!(
+            "  playlist {:?} {:?} {:?} +{} -{}",
+            change.name,
+            change.kind(),
+            change.detail,
+            change.tracks_added,
+            change.tracks_removed
+        );
+    }
+    assert_eq!(diff.changed_databases, ["m.db"]);
+    assert_eq!(
+        (diff.tracks_added, diff.tracks_removed, diff.tracks_changed),
+        (0, 1, 2)
+    );
+    assert!(
+        diff.changed_playlists
+            .iter()
+            .any(|p| p.kind() == open_engine_api::v1::PlaylistChangeKind::Renamed)
+    );
+    assert!(
+        !diff.source_changed_outside,
+        "the source itself was not touched"
+    );
 }

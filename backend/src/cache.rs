@@ -68,6 +68,20 @@ pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
     Ok(cache)
 }
 
+/// Whether the databases at `source` are no longer as they were when the working copy in
+/// `cache` (a folder `sync` returned) was made from them: something else changed them.
+pub fn source_changed(source: &Path, cache: &Path) -> io::Result<bool> {
+    let now = render_manifest(&database_files(&source.join(DATABASE_DIR))?);
+    Ok(fs::read_to_string(cache.join(MANIFEST)).map_or(true, |recorded| recorded != now))
+}
+
+/// Notes that the working copy in `cache` matches the databases at `source` as they are
+/// now, e.g. after the working copy was written to the source.
+pub fn record_source(source: &Path, cache: &Path) -> io::Result<()> {
+    let manifest = render_manifest(&database_files(&source.join(DATABASE_DIR))?);
+    fs::write(cache.join(MANIFEST), manifest)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct SourceFile {
     pub name: String,
@@ -231,6 +245,22 @@ mod tests {
             b"main, edited"
         );
         assert!(!cache.join("Database2/hm.db").exists());
+    }
+
+    #[test]
+    fn notices_when_the_source_is_changed_by_someone_else() {
+        let temp = TempDir::new("outside");
+        let source = source_library(&temp.0);
+        let cache = sync(&source, &temp.0.join("cache")).unwrap();
+        assert!(!source_changed(&source, &cache).unwrap());
+
+        // Another program changes a database (a different size is enough to tell).
+        fs::write(source.join("Database2/m.db"), b"main, edited elsewhere").unwrap();
+        assert!(source_changed(&source, &cache).unwrap());
+
+        // After the working copy has been written to the source, they match again.
+        record_source(&source, &cache).unwrap();
+        assert!(!source_changed(&source, &cache).unwrap());
     }
 
     #[test]

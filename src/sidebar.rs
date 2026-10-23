@@ -23,6 +23,7 @@ pub fn view<'a>(
     recents_error: Option<&'a str>,
     current: Option<&'a str>,
     can_open: bool,
+    can_sync: bool,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -50,6 +51,10 @@ pub fn view<'a>(
     let content = match browser {
         Some(browser) => column![
             browser::playlists(browser, language),
+            // Compare the working copy with the library it was made from, and write it there.
+            button(text(&strings.sync_button))
+                .width(Fill)
+                .on_press_maybe(can_sync.then_some(Message::SyncOpen)),
             container(section).max_height(RECENT_MAX_HEIGHT)
         ],
         None => column![section, Space::new().height(Fill)],

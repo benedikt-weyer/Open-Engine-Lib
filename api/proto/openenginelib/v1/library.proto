@@ -24,6 +24,20 @@ service LibraryService {
   // library's current location, ALREADY_EXISTS if there already is a library at `path`,
   // INTERNAL if copying fails.
   rpc SaveLibraryAs(SaveLibraryAsRequest) returns (SaveLibraryAsResponse);
+  // What would change in the source (the library at its location, as opposed to the
+  // working copy the backend reads and could change) if the working copy were written to
+  // it: the differences between the two. Nothing is changed.
+  // Error: FAILED_PRECONDITION if no library is open.
+  rpc GetSyncDiff(GetSyncDiffRequest) returns (GetSyncDiffResponse);
+  // Writes the working copy's databases to the source, replacing the ones there. The
+  // previous ones are first copied to `Database2/open-engine-lib-backup` in the source
+  // (replacing an older backup), each file is replaced in one step, and if one fails the
+  // ones already replaced are put back.
+  // Errors: FAILED_PRECONDITION if no library is open, the source can't be reached (a
+  // drive that is gone), is in use (a journal that has not been committed), or has been
+  // changed by someone else since the working copy was made and
+  // `overwrite_outside_changes` is not set; INTERNAL if writing fails.
+  rpc SyncToSource(SyncToSourceRequest) returns (SyncToSourceResponse);
   // Closes the library and stops playback. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
@@ -178,4 +192,87 @@ message BeatMarker {
   double position_seconds = 1;
   // Counts beats, and can be negative. A beat whose number is a multiple of 4 starts a bar.
   int64 beat_number = 2;
+}
+
+message GetSyncDiffRequest {}
+
+// What syncing would do to the source. "Added" is in the working copy and not in the
+// source, so syncing adds it there; "removed" is in the source and not in the working
+// copy, so syncing removes it from the source. Lists are cut at 200 entries, the counts
+// are complete.
+message GetSyncDiffResponse {
+  string source_path = 1;
+  string cache_path = 2;
+  // False if the source can't be reached (say its drive is not connected); then nothing
+  // else is filled in.
+  bool source_available = 3;
+  // The source has an uncommitted journal: another program is writing to it right now.
+  bool source_busy = 4;
+  // The source's databases were changed by someone else after the working copy was made
+  // from them, so syncing would also undo their changes.
+  bool source_changed_outside = 5;
+  // The database files (`m.db`, `hm.db`, ...) whose content differs. Syncing writes
+  // exactly these. They can differ in ways that are not itemised below (the history,
+  // smart playlists, ...).
+  repeated string changed_databases = 6;
+  uint32 tracks_added = 7;
+  uint32 tracks_removed = 8;
+  uint32 tracks_changed = 9;
+  repeated TrackRef added_tracks = 10;
+  repeated TrackRef removed_tracks = 11;
+  repeated TrackChange changed_tracks = 12;
+  uint32 playlists_changed = 13;
+  repeated PlaylistChange changed_playlists = 14;
+}
+
+message TrackRef {
+  string title = 1;
+  string artist = 2;
+  string path = 3;
+}
+
+message TrackChange {
+  TrackRef track = 1;
+  repeated FieldChange fields = 2;
+}
+
+message FieldChange {
+  string field = 1;
+  // The value in the source, and what it would become. Empty for none; binary data
+  // (beatgrid, cues, loops) is shown as "(changed)".
+  string source_value = 2;
+  string working_value = 3;
+}
+
+message PlaylistChange {
+  // The playlist as a path of titles, e.g. "House / Deep".
+  string name = 1;
+  PlaylistChangeKind kind = 2;
+  // For a rename, the old name; for a move, the old parent.
+  string detail = 3;
+  uint32 tracks_added = 4;
+  uint32 tracks_removed = 5;
+  bool order_changed = 6;
+}
+
+enum PlaylistChangeKind {
+  PLAYLIST_CHANGE_KIND_UNSPECIFIED = 0;
+  PLAYLIST_CHANGE_KIND_ADDED = 1;
+  PLAYLIST_CHANGE_KIND_REMOVED = 2;
+  PLAYLIST_CHANGE_KIND_RENAMED = 3;
+  PLAYLIST_CHANGE_KIND_MOVED = 4;
+  // Only its tracks changed.
+  PLAYLIST_CHANGE_KIND_TRACKS = 5;
+}
+
+message SyncToSourceRequest {
+  // Go ahead although the source was changed by someone else since the working copy was
+  // made, undoing those changes.
+  bool overwrite_outside_changes = 1;
+}
+
+message SyncToSourceResponse {
+  uint32 files_written = 1;
+  // Where the databases that were replaced were kept.
+  string backup_path = 2;
 }
