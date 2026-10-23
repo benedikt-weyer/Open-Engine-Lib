@@ -38,7 +38,7 @@ If the backend is missing or fails to start, the library page says so and offers
 The protocol lives in `api/proto/openenginelib/v1/`:
 
 - `backend.proto`: `BackendService.GetInfo`, the version handshake.
-- `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`, `GetWaveform`.
+- `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `SetRating`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`, `GetWaveform`.
 - `playback.proto`: `PlaybackService`: `Play`, `TogglePause`, `Stop`, `Next`, `Previous`, `Seek`, `GetStatus`. The backend owns the queue and moves on to the next track by itself; the UI polls `GetStatus` while playing.
 
 Versioning rules:
@@ -82,13 +82,15 @@ Lists are cut at 200 entries (the counts are complete). Matching is by Engine's 
 - Each file is written next to its place and moved over it in one step, so a file is never half written, and if a later file fails the earlier ones are put back from the backup.
 - Afterwards the working copy and the source count as the same, so nothing shows as changed from outside.
 
-**Limitation:** the app does not yet change the working copy itself, so today the comparison mostly shows what someone else did to the source while the library was open. It is the way back for edits the app will make. Opening a library re-copies the working copy when the source has changed since (see "The library cache"), which would discard unsynced edits, so editing needs to decide what to do then before it is added.
+**Edits:** the app changes the working copy (today only star ratings, see below) and never the source: an edit reaches the source only through this window. Opening a library re-copies the working copy when the source has changed since. So that this can't throw edits away, the backend leaves an `edited` mark in the cache folder when it changes the working copy, which writing to the source clears. A working copy that has the mark and is replaced because the source changed is first moved to `unsynced-edits/` in the cache folder (the latest only), so the edits can still be recovered from there. The app doesn't say so yet.
 
 ## Ratings and SoundSwitch lighting
 
 Two more columns in the track list.
 
 **Rating** is the track's star rating from the library: 0 to 100, 20 to the star, shown as five stars (`★★★☆☆`). Libraries that were imported from elsewhere can hold other values (14, 27, 53 ...), which are rounded to the nearest star.
+
+**Setting the rating:** each star in the list is a button. Clicking the third star gives the track three stars, and clicking the last filled star takes all of them away (a rating of 0). The click shows at once and `SetRating` writes `Track.rating` in the working copy (the rating is checked to be 0 to 100; the app sends 20 per star), which the database's own trigger stamps with a new `lastEditTime`. The source only gets it when you sync, where it shows as a changed `rating`. If the backend can't write it, the stars go back to what they were and the error is shown. Ratings can't be set while the library is being saved elsewhere.
 
 **Lighting** says whether SoundSwitch, the lighting software, has lighting for the track: a filled dot if it was rendered, a ring if SoundSwitch only analysed the track, a dash if the track isn't in SoundSwitch. Pointing at it says so in words and names the projects. Streaming tracks have no mark.
 
@@ -147,8 +149,8 @@ Tracks carry an `album_art_id` (tracks of one album share it) and the UI fetches
 The backend never works on a library in place: it may sit on a removable drive, and Engine DJ or a player may be using it. On `OpenLibrary` it copies the library's databases (`Database2/*.db`, plus a non-empty `-journal`/`-wal`/`-shm` so SQLite can recover an interrupted write) into a cache folder and reads that copy. Audio files, artwork, stems and overview data are not copied: they are far too large, and tracks are played from where they are.
 
 - The cache lives in `$OPEN_ENGINE_LIB_CACHE`, else `<user cache dir>/open-engine-lib/libraries/<folder name>-<hash of path>/`.
-- A `manifest` file lists the copied files with their size and modification time. If the source databases still match it, the copy is reused as it is; otherwise the databases are copied again from scratch.
-- The copy is opened read-write so that SQLite can roll back a copied hot journal. Nothing is written to the source library.
+- A `manifest` file lists the copied files with their size and modification time. If the source databases still match it, the copy is reused as it is; otherwise the databases are copied again from scratch (but a copy with edits that were never synced is kept in `unsynced-edits/` first, see "Syncing the working copy to the source").
+- The copy is opened read-write so that SQLite can roll back a copied hot journal. Edits (ratings) are written to the copy, and nothing is written to the source library except by syncing.
 - `OpenLibraryResponse.cache_path` tells the UI where the copy is.
 
 ## Tests

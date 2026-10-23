@@ -38,6 +38,12 @@ service LibraryService {
   // changed by someone else since the working copy was made and
   // `overwrite_outside_changes` is not set; INTERNAL if writing fails.
   rpc SyncToSource(SyncToSourceRequest) returns (SyncToSourceResponse);
+  // Sets a track's star rating in the working copy. The source is not touched until
+  // `SyncToSource`, and `ListTracks` answers with the new rating from now on.
+  // Errors: FAILED_PRECONDITION if no library is open, INVALID_ARGUMENT for a rating
+  // above 100, NOT_FOUND for an unknown track id, INTERNAL if the database can't be
+  // written.
+  rpc SetRating(SetRatingRequest) returns (SetRatingResponse);
   // Closes the library and stops playback. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
@@ -85,6 +91,14 @@ message SaveLibraryAsResponse {
   // The backend's cached copy of the databases, which is what it reads now.
   string cache_path = 2;
 }
+
+message SetRatingRequest {
+  // `Track.id`.
+  uint32 track_id = 1;
+  // From 0 (no stars) to 100 (five), 20 per star.
+  uint32 rating = 2;
+}
+message SetRatingResponse {}
 
 message CloseLibraryRequest {}
 message CloseLibraryResponse {}

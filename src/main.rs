@@ -198,6 +198,17 @@ pub enum Message {
     ToggleFolder(usize),
     SelectTrack(usize),
     PlayTrack(usize),
+    /// A star in the track list was clicked: give the track (by id) this many stars.
+    SetStars {
+        track: u32,
+        stars: u8,
+    },
+    /// The backend answered; `previous` is what to go back to if it could not do it.
+    RatingSet {
+        track: u32,
+        previous: Option<u32>,
+        result: Result<(), String>,
+    },
     TrackListScrolled(scrollable::Viewport),
 
     PlayPause,
@@ -888,6 +899,39 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 browser.selected = Some(row);
             }
         }
+        // The databases are being cloned: a rating set now might miss the clone.
+        Message::SetStars { .. } if state.saving.is_some() => {}
+        Message::SetStars { track, stars } => {
+            let Some(backend) = state.backend() else {
+                return Task::none();
+            };
+            if let LibraryState::Open(browser) = &mut state.library {
+                // Shown at once; taken back if the backend can't do it.
+                let previous = browser.rating(track);
+                let rating = u32::from(stars.min(5)) * 20;
+                browser.set_rating(track, Some(rating));
+                return Task::perform(backend::set_rating(backend, track, rating), move |result| {
+                    Message::RatingSet {
+                        track,
+                        previous,
+                        result,
+                    }
+                });
+            }
+        }
+        Message::RatingSet {
+            track,
+            previous,
+            result,
+        } => match result {
+            Ok(()) => state.backend_error = None,
+            Err(error) => {
+                if let LibraryState::Open(browser) = &mut state.library {
+                    browser.set_rating(track, previous);
+                }
+                state.backend_error = Some(error);
+            }
+        },
         Message::PlayTrack(row) => {
             if let LibraryState::Open(browser) = &mut state.library {
                 browser.selected = Some(row);
@@ -1635,6 +1679,52 @@ mod tests {
         let _ = handle(&mut state, Message::ResizeMoved(900.0));
         let _ = handle(&mut state, Message::ResizeEnded);
         assert_eq!(state.columns.widths, before);
+    }
+
+    #[test]
+    fn a_rating_the_backend_refused_is_taken_back() {
+        let mut state = state();
+        let LibraryState::Open(open) = &mut state.library else {
+            panic!("no library is open");
+        };
+        open.set_rating(1, Some(60));
+        // The click showed three stars at once; the backend said no to the fourth.
+        open.set_rating(1, Some(80));
+
+        let _ = handle(
+            &mut state,
+            Message::RatingSet {
+                track: 1,
+                previous: Some(60),
+                result: Err("the database is read-only".into()),
+            },
+        );
+        assert_eq!(browser(&state).rating(1), Some(60));
+        assert_eq!(
+            state.backend_error.as_deref(),
+            Some("the database is read-only")
+        );
+
+        // And one it did is kept, and clears the error.
+        let LibraryState::Open(open) = &mut state.library else {
+            unreachable!()
+        };
+        open.set_rating(1, Some(100));
+        let _ = handle(
+            &mut state,
+            Message::RatingSet {
+                track: 1,
+                previous: Some(60),
+                result: Ok(()),
+            },
+        );
+        assert_eq!(browser(&state).rating(1), Some(100));
+        assert_eq!(state.backend_error, None);
+        assert_eq!(
+            browser(&state).rating(0),
+            None,
+            "other tracks are as they were"
+        );
     }
 
     #[test]

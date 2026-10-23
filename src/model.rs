@@ -47,9 +47,13 @@ impl Track {
     /// The rating as 0 to 5 stars. A rating that is not a multiple of 20 (libraries that
     /// were imported can have any) is rounded to the nearest star.
     pub fn stars(&self) -> u8 {
-        self.rating
-            .map_or(0, |rating| ((rating + 10) / 20).min(5) as u8)
+        stars_of(self.rating)
     }
+}
+
+/// A rating as 0 to 5 stars, rounded to the nearest star.
+pub fn stars_of(rating: Option<u32>) -> u8 {
+    rating.map_or(0, |rating| ((rating + 10) / 20).min(5) as u8)
 }
 
 /// Where a track's audio file is: the path the library records, relative to the

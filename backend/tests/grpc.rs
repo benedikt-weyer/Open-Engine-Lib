@@ -13,7 +13,7 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest,
     GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, OpenLibraryRequest, PlayRequest,
-    PlaybackErrorKind, PlaybackState, SaveLibraryAsRequest, SyncToSourceRequest,
+    PlaybackErrorKind, PlaybackState, SaveLibraryAsRequest, SetRatingRequest, SyncToSourceRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -1617,4 +1617,99 @@ async fn serves_ratings_and_whether_soundswitch_has_lighting_for_a_track() {
         SoundSwitchState::Unspecified,
         "not in SoundSwitch"
     );
+}
+
+#[tokio::test]
+async fn sets_a_rating_in_the_working_copy_and_syncs_it_to_the_source() {
+    let temp = TempDir::new("set-rating");
+    let library_dir = fixture_library(&temp.0);
+    {
+        let db = rusqlite::Connection::open(library_dir.join("Database2/m.db")).unwrap();
+        db.execute_batch(
+            "ALTER TABLE Track ADD COLUMN rating INTEGER;
+             UPDATE Track SET rating = 60 WHERE id = 1;",
+        )
+        .unwrap();
+    }
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+
+    let rate = |track_id, rating| SetRatingRequest { track_id, rating };
+    assert_eq!(
+        code(library.set_rating(rate(0, 20)).await),
+        Code::FailedPrecondition
+    );
+
+    let path = temp.0.display().to_string();
+    library
+        .open_library(OpenLibraryRequest { path: path.clone() })
+        .await
+        .unwrap();
+    assert_eq!(
+        code(library.set_rating(rate(0, 101)).await),
+        Code::InvalidArgument
+    );
+    assert_eq!(code(library.set_rating(rate(99, 20)).await), Code::NotFound);
+
+    library.set_rating(rate(0, 100)).await.unwrap();
+    library.set_rating(rate(2, 40)).await.unwrap();
+    library.set_rating(rate(1, 0)).await.unwrap();
+    let ratings = |tracks: Vec<open_engine_api::v1::Track>| {
+        tracks.iter().map(|track| track.rating).collect::<Vec<_>>()
+    };
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let listed = stream.message().await.unwrap().unwrap().tracks;
+    assert_eq!(ratings(listed), [Some(100), Some(0), Some(40)]);
+
+    // The source is untouched until syncing, which shows the change first.
+    // (Syncing replaces the file, so each read opens it afresh.)
+    let source_rating = |id: i64| -> Option<i64> {
+        rusqlite::Connection::open(library_dir.join("Database2/m.db"))
+            .unwrap()
+            .query_row("SELECT rating FROM Track WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(source_rating(1), Some(60));
+    let diff = library
+        .get_sync_diff(GetSyncDiffRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(diff.tracks_changed, 3);
+    let first = diff
+        .changed_tracks
+        .iter()
+        .find(|change| change.track.as_ref().unwrap().title == "One")
+        .unwrap();
+    assert_eq!(first.fields[0].field, "rating");
+    assert_eq!(first.fields[0].source_value, "60");
+    assert_eq!(first.fields[0].working_value, "100");
+
+    library
+        .sync_to_source(SyncToSourceRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(source_rating(1), Some(100));
+    assert_eq!(source_rating(3), Some(40));
+
+    // Reopening gives the same ratings back.
+    library
+        .open_library(OpenLibraryRequest { path })
+        .await
+        .unwrap();
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let reopened = stream.message().await.unwrap().unwrap().tracks;
+    assert_eq!(ratings(reopened), [Some(100), Some(0), Some(40)]);
 }

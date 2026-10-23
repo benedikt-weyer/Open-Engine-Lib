@@ -21,8 +21,8 @@ use open_engine_api::v1::{
     CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest,
     GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, NextRequest,
     OpenLibraryRequest, PlayRequest, PlaybackStatus, PreviousRequest, SaveLibraryAsRequest,
-    SeekRequest, SoundSwitchState, StopRequest, SyncToSourceRequest, SyncToSourceResponse,
-    TogglePauseRequest,
+    SeekRequest, SetRatingRequest, SoundSwitchState, StopRequest, SyncToSourceRequest,
+    SyncToSourceResponse, TogglePauseRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -370,6 +370,16 @@ pub async fn waveform(
         columns,
         grid,
     ))))
+}
+
+/// Sets a track's rating (0 to 100) in the working copy.
+pub async fn set_rating(mut backend: Backend, track_id: u32, rating: u32) -> Result<(), String> {
+    backend
+        .library
+        .set_rating(SetRatingRequest { track_id, rating })
+        .await
+        .map(|_| ())
+        .map_err(describe)
 }
 
 /// What would change in the source if the working copy were written to it.

@@ -18,6 +18,10 @@ pub const DATABASE_DIR: &str = "Database2";
 /// Lists the files the copy was made from; written last, so a copy that was cut
 /// short is never mistaken for a complete one.
 const MANIFEST: &str = "manifest";
+/// Present while the working copy holds edits that were not written to the source yet.
+const EDITED: &str = "edited";
+/// Where a working copy with such edits goes when the source changed and it is replaced.
+const UNSYNCED: &str = "unsynced-edits";
 
 /// Where cached libraries live: `$OPEN_ENGINE_LIB_CACHE`, else the user cache dir.
 pub fn default_root() -> PathBuf {
@@ -53,6 +57,9 @@ pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
+    if cache.join(EDITED).exists() {
+        keep_unsynced_edits(&cache)?;
+    }
     match fs::remove_dir_all(cache.join(DATABASE_DIR)) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
@@ -68,6 +75,28 @@ pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
     Ok(cache)
 }
 
+/// Moves the working copy's databases, which hold edits that never reached the source, to
+/// `unsynced-edits` in the cache before they are replaced. (Only the latest is kept.)
+fn keep_unsynced_edits(cache: &Path) -> io::Result<()> {
+    let kept = cache.join(UNSYNCED);
+    match fs::remove_dir_all(&kept) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::create_dir_all(&kept)?;
+    match fs::rename(cache.join(DATABASE_DIR), kept.join(DATABASE_DIR)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::remove_file(cache.join(EDITED))
+}
+
+/// Notes that the working copy in `cache` was changed and the source does not have the
+/// change, so that opening the library again can't throw the change away unnoticed.
+pub fn mark_edited(cache: &Path) -> io::Result<()> {
+    fs::write(cache.join(EDITED), "")
+}
+
 /// Whether the databases at `source` are no longer as they were when the working copy in
 /// `cache` (a folder `sync` returned) was made from them: something else changed them.
 pub fn source_changed(source: &Path, cache: &Path) -> io::Result<bool> {
@@ -79,7 +108,11 @@ pub fn source_changed(source: &Path, cache: &Path) -> io::Result<bool> {
 /// now, e.g. after the working copy was written to the source.
 pub fn record_source(source: &Path, cache: &Path) -> io::Result<()> {
     let manifest = render_manifest(&database_files(&source.join(DATABASE_DIR))?);
-    fs::write(cache.join(MANIFEST), manifest)
+    fs::write(cache.join(MANIFEST), manifest)?;
+    match fs::remove_file(cache.join(EDITED)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -261,6 +294,46 @@ mod tests {
         // After the working copy has been written to the source, they match again.
         record_source(&source, &cache).unwrap();
         assert!(!source_changed(&source, &cache).unwrap());
+    }
+
+    #[test]
+    fn edits_not_yet_written_to_the_source_are_kept_when_the_source_changes() {
+        let temp = TempDir::new("edited");
+        let source = source_library(&temp.0);
+        let root = temp.0.join("cache");
+        let cache = sync(&source, &root).unwrap();
+
+        // Edit the working copy. As long as the source stays as it is, it is reused.
+        fs::write(cache.join("Database2/m.db"), b"main, rated").unwrap();
+        mark_edited(&cache).unwrap();
+        sync(&source, &root).unwrap();
+        assert_eq!(
+            fs::read(cache.join("Database2/m.db")).unwrap(),
+            b"main, rated"
+        );
+
+        // Once the source changes it is replaced, but what was edited is not thrown away.
+        fs::write(source.join("Database2/m.db"), b"main, edited elsewhere").unwrap();
+        sync(&source, &root).unwrap();
+        assert_eq!(
+            fs::read(cache.join("Database2/m.db")).unwrap(),
+            b"main, edited elsewhere"
+        );
+        assert_eq!(
+            fs::read(cache.join("unsynced-edits/Database2/m.db")).unwrap(),
+            b"main, rated"
+        );
+        assert!(!cache.join(EDITED).exists());
+
+        // An unedited copy that is replaced leaves nothing behind, and writing the working
+        // copy to the source clears the mark.
+        fs::remove_dir_all(cache.join(UNSYNCED)).unwrap();
+        fs::write(source.join("Database2/m.db"), b"changed again").unwrap();
+        sync(&source, &root).unwrap();
+        assert!(!cache.join(UNSYNCED).exists());
+        mark_edited(&cache).unwrap();
+        record_source(&source, &cache).unwrap();
+        assert!(!cache.join(EDITED).exists());
     }
 
     #[test]

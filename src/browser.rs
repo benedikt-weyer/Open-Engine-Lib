@@ -1,7 +1,7 @@
 //! The open library as the user sees it: a playlist tree on the left and the
 //! tracks of the chosen playlist on the right.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use crate::columns::{Column, ColumnWidths};
 use crate::config::Language;
 use crate::covers::Covers;
 use crate::i18n::fill;
-use crate::model::{Library, Lighting, Track};
+use crate::model::{Library, Lighting, Track, stars_of};
 
 /// Height of one track row. Fixed, so only the rows in view have to be built.
 const ROW_HEIGHT: f32 = 32.0;
@@ -46,6 +46,9 @@ pub struct Browser {
     /// Row (position in the shown list) the user clicked.
     pub selected: Option<usize>,
     all: Vec<usize>,
+    /// Ratings set since the library was fetched, by track id. (The library is shared
+    /// and not changed; the backend has these too.)
+    ratings: HashMap<u32, u32>,
     /// Playlist folders that are opened up in the tree.
     expanded: HashSet<usize>,
     scroll: f32,
@@ -53,6 +56,21 @@ pub struct Browser {
 }
 
 impl Browser {
+    /// The rating of the track with `id`, 0 to 100, as it is now.
+    pub fn rating(&self, id: u32) -> Option<u32> {
+        self.ratings
+            .get(&id)
+            .copied()
+            .or_else(|| self.library.track_by_id(id).and_then(|track| track.rating))
+    }
+
+    pub fn set_rating(&mut self, id: u32, rating: Option<u32>) {
+        match rating {
+            Some(rating) => self.ratings.insert(id, rating),
+            None => self.ratings.remove(&id),
+        };
+    }
+
     pub fn new(library: Arc<Library>) -> Self {
         let all = (0..library.tracks.len()).collect();
         Self {
@@ -60,6 +78,7 @@ impl Browser {
             source: Source::Collection,
             selected: None,
             all,
+            ratings: HashMap::new(),
             expanded: HashSet::new(),
             scroll: 0.0,
             viewport_height: MIN_VIEWPORT,
@@ -332,8 +351,11 @@ pub fn tracks<'a>(
         body = body.push(track_row(
             track,
             row_index,
-            browser.selected == Some(row_index),
-            playing == Some(row_index),
+            RowState {
+                selected: browser.selected == Some(row_index),
+                playing: playing == Some(row_index),
+                stars: stars_of(browser.rating(track.id)),
+            },
             track.album_art.and_then(|id| covers.get(id)),
             widths,
             language,
@@ -369,10 +391,27 @@ fn scroll_to(y: f32) -> iced::Task<Message> {
     )
 }
 
-/// The rating as five stars, filled for the ones the track has.
-fn stars(track: &Track) -> String {
-    let filled = usize::from(track.stars());
-    format!("{}{}", "★".repeat(filled), "☆".repeat(5 - filled))
+/// The rating as five stars, filled for the ones the track has. Clicking a star gives the
+/// track that many stars; clicking the last filled one takes them all away.
+fn stars_cell<'a>(track: &Track, stars: u8, dim: bool) -> Element<'a, Message> {
+    let mut stars_row = row![];
+    for star in 1..=5u8 {
+        let mark = cell(if star <= stars { "★" } else { "☆" });
+        let mark = if dim {
+            mark.style(text::secondary)
+        } else {
+            mark
+        };
+        stars_row = stars_row.push(
+            mouse_area(mark)
+                .on_press(Message::SetStars {
+                    track: track.id,
+                    stars: if star == stars { 0 } else { star },
+                })
+                .interaction(mouse::Interaction::Pointer),
+        );
+    }
+    stars_row.into()
 }
 
 /// Whether SoundSwitch has lighting for the track: a filled dot for rendered, a ring for
@@ -404,15 +443,27 @@ fn lighting_cell<'a>(track: &'a Track, language: Language) -> Element<'a, Messag
     .into()
 }
 
+/// What a row shows besides its track.
+struct RowState {
+    selected: bool,
+    playing: bool,
+    /// The track's rating as 0 to 5 stars.
+    stars: u8,
+}
+
 fn track_row<'a>(
     track: &'a Track,
     row_index: usize,
-    selected: bool,
-    playing: bool,
+    state: RowState,
     cover: Option<&Handle>,
     widths: &ColumnWidths,
     language: Language,
 ) -> Element<'a, Message> {
+    let RowState {
+        selected,
+        playing,
+        stars,
+    } = state;
     // Streaming tracks have no file here, so they can be seen but not played.
     let style = |content: text::Text<'a>| -> Element<'a, Message> {
         if track.streaming {
@@ -461,7 +512,7 @@ fn track_row<'a>(
             style(cell(&track.genre)),
             style(cell(bpm)),
             style(cell(length)),
-            style(cell(stars(track))),
+            stars_cell(track, stars, track.streaming),
             lighting_cell(track, language),
         ],
         location,

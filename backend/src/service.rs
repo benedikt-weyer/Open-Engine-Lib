@@ -15,7 +15,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
-use crate::library::{self, Library, OpenError};
+use crate::library::{self, EditError, Library, OpenError};
 use crate::player::Start;
 use crate::save::{self, SaveError};
 use crate::sync::{self, SyncError};
@@ -192,6 +192,30 @@ impl LibraryService for Service {
         Ok(Response::new(done))
     }
 
+    async fn set_rating(
+        &self,
+        request: Request<api::SetRatingRequest>,
+    ) -> Result<Response<api::SetRatingResponse>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        if request.rating > 100 {
+            return Err(Status::invalid_argument(format!(
+                "a rating is 0 to 100, not {}",
+                request.rating
+            )));
+        }
+        let index = request.track_id as usize;
+        // Writes a file, possibly after waiting for a read: not on the async threads.
+        tokio::task::spawn_blocking(move || library.set_rating(index, request.rating))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(|error| match error {
+                EditError::NoSuchTrack => Status::not_found(error.to_string()),
+                EditError::Cache(_) | EditError::Database(_) => Status::internal(error.to_string()),
+            })?;
+        Ok(Response::new(api::SetRatingResponse {}))
+    }
+
     async fn close_library(
         &self,
         _: Request<api::CloseLibraryRequest>,
@@ -215,7 +239,10 @@ impl LibraryService for Service {
                 let tracks = tracks
                     .iter()
                     .enumerate()
-                    .map(|(offset, track)| track_message((first + offset) as u32, track))
+                    .map(|(offset, track)| {
+                        let id = first + offset;
+                        track_message(id as u32, track, library.rating(id))
+                    })
                     .collect();
                 if sender.send(Ok(api::TrackBatch { tracks })).await.is_err() {
                     break; // the UI stopped listening
@@ -352,7 +379,7 @@ impl LibraryService for Service {
     }
 }
 
-fn track_message(id: u32, track: &library::Track) -> api::Track {
+fn track_message(id: u32, track: &library::Track, rating: Option<u32>) -> api::Track {
     api::Track {
         id,
         title: track.title.clone(),
@@ -363,7 +390,7 @@ fn track_message(id: u32, track: &library::Track) -> api::Track {
         length_seconds: track.length,
         streaming: track.streaming,
         album_art_id: track.album_art,
-        rating: track.rating,
+        rating,
         soundswitch: track.lighting.state.into(),
         soundswitch_projects: track.lighting.projects.clone(),
         path: track.relative_path.clone(),

@@ -50,6 +50,31 @@ impl fmt::Display for OpenError {
     }
 }
 
+#[derive(Debug)]
+pub enum EditError {
+    /// There is no track with that index.
+    NoSuchTrack,
+    /// The edit could not be noted in the cache.
+    Cache(std::io::Error),
+    Database(rusqlite::Error),
+}
+
+impl fmt::Display for EditError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EditError::NoSuchTrack => write!(f, "there is no such track"),
+            EditError::Cache(error) => write!(f, "could not note the edit in the cache: {error}"),
+            EditError::Database(error) => write!(f, "could not write the database: {error}"),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for EditError {
+    fn from(error: rusqlite::Error) -> Self {
+        EditError::Database(error)
+    }
+}
+
 impl From<rusqlite::Error> for OpenError {
     fn from(error: rusqlite::Error) -> Self {
         OpenError::Database(error)
@@ -75,7 +100,8 @@ pub struct Track {
     pub streaming: bool,
     /// `AlbumArt.id` of the track's cover, for `Library::album_art`.
     pub album_art: Option<u32>,
-    /// The star rating, 0 to 100 with 20 to the star, if the library has one.
+    /// The star rating, 0 to 100 with 20 to the star, if the library has one, as it was
+    /// when the library was opened. See `Library::rating` for what it is now.
     pub rating: Option<u32>,
     /// What SoundSwitch has for the track.
     pub lighting: Lighting,
@@ -103,7 +129,10 @@ pub struct Library {
     pub cache: PathBuf,
     pub tracks: Vec<Track>,
     pub playlists: Vec<Playlist>,
-    /// Kept open to read what is not loaded with the tracks (covers, beatgrids) on demand.
+    /// Ratings set since the library was opened, by index in `tracks`.
+    ratings: Mutex<HashMap<usize, u32>>,
+    /// Kept open to read what is not loaded with the tracks (covers, beatgrids) on demand,
+    /// and to write the edits.
     connection: Mutex<Connection>,
 }
 
@@ -139,8 +168,42 @@ impl Library {
             cache,
             tracks,
             playlists,
+            ratings: Mutex::default(),
             connection: Mutex::new(connection),
         })
+    }
+
+    /// The star rating of the track at `index` in `tracks`, 0 to 100, as it is now.
+    pub fn rating(&self, index: usize) -> Option<u32> {
+        let set = self
+            .ratings
+            .lock()
+            .expect("ratings lock")
+            .get(&index)
+            .copied();
+        set.or_else(|| self.tracks.get(index).and_then(|track| track.rating))
+    }
+
+    /// Sets the rating (0 to 100) of the track at `index` in `tracks` in the working copy.
+    /// The source only gets it when the working copy is written to it (`sync::push`).
+    pub fn set_rating(&self, index: usize, rating: u32) -> Result<(), EditError> {
+        let track = self.tracks.get(index).ok_or(EditError::NoSuchTrack)?;
+        // Noted first: were the edit to be made and the note not, a later open could
+        // replace the working copy without keeping the edit.
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        let changed = connection.execute(
+            "UPDATE Track SET rating = ?1 WHERE id = ?2",
+            (rating, track.db_id),
+        )?;
+        if changed == 0 {
+            return Err(EditError::NoSuchTrack);
+        }
+        self.ratings
+            .lock()
+            .expect("ratings lock")
+            .insert(index, rating);
+        Ok(())
     }
 
     /// The beatgrid of the track at `index` in `tracks`, if the library has analysed one.
@@ -477,6 +540,55 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(FIXTURE).unwrap();
         connection
+    }
+
+    #[test]
+    fn a_rating_is_written_to_the_working_copy() {
+        let cache =
+            std::env::temp_dir().join(format!("open-engine-lib-rating-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).unwrap();
+
+        let connection = database();
+        connection
+            .execute_batch(
+                "ALTER TABLE Track ADD COLUMN rating INTEGER;
+                 UPDATE Track SET rating = 40 WHERE id = 1;",
+            )
+            .unwrap();
+        let library = Library::load(connection, PathBuf::from("/lib"), cache.clone()).unwrap();
+        assert_eq!(library.rating(0), Some(40));
+        assert_eq!(library.rating(1), None);
+
+        library.set_rating(0, 100).unwrap();
+        library.set_rating(1, 60).unwrap();
+        library.set_rating(1, 0).unwrap();
+        assert_eq!(library.rating(0), Some(100));
+        assert_eq!(library.rating(1), Some(0), "no stars is a rating of 0");
+        assert_eq!(library.rating(2), None, "the others are as they were");
+
+        let stored: Vec<Option<u32>> = {
+            let connection = library.connection.lock().unwrap();
+            let mut statement = connection
+                .prepare("SELECT rating FROM Track ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(stored, [Some(100), Some(0), None]);
+        assert!(
+            cache.join("edited").exists(),
+            "the edit is noted for the cache"
+        );
+
+        assert!(matches!(
+            library.set_rating(3, 20),
+            Err(EditError::NoSuchTrack)
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     #[test]
