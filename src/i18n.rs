@@ -54,6 +54,8 @@ pub struct Strings {
     pub sync_playlist_tracks: String,
     pub sync_playlist_track_counts: String,
     pub sync_playlist_order: String,
+    pub sync_playlist_rules: String,
+    pub sync_playlist_smart: String,
     pub nav_library: String,
     pub nav_settings: String,
     pub settings_title: String,

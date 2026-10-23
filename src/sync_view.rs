@@ -315,6 +315,9 @@ fn playlist_change<'a>(change: &'a PlaylistChange, language: Language) -> Elemen
         )),
         _ => {}
     }
+    if change.rules_changed {
+        notes.push(strings.sync_playlist_rules.clone());
+    }
     if change.tracks_added > 0 || change.tracks_removed > 0 {
         notes.push(fill(
             &strings.sync_playlist_track_counts,
@@ -329,6 +332,9 @@ fn playlist_change<'a>(change: &'a PlaylistChange, language: Language) -> Elemen
     }
     if notes.is_empty() {
         notes.push(strings.sync_playlist_tracks.clone());
+    }
+    if change.smart {
+        notes.insert(0, strings.sync_playlist_smart.clone());
     }
 
     text(format!("{mark}  {}  ({})", change.name, notes.join(", ")))

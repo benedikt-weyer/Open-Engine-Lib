@@ -436,8 +436,133 @@ fn compare_playlists(
     connection: &Connection,
     response: &mut api::GetSyncDiffResponse,
 ) -> Result<(), SyncError> {
+    let mut changes = playlist_changes(connection)?;
+    changes.extend(smartlist_changes(connection)?);
+
+    changes.sort_by(|a, b| a.name.cmp(&b.name));
+    response.playlists_changed = changes.len() as u32;
+    changes.truncate(MAX_LISTED);
+    response.changed_playlists = changes;
+    Ok(())
+}
+
+/// A smart playlist as the working copy and the source keep it.
+struct Smartlist {
+    title: String,
+    /// Its parent as the titles from the top, each followed by `;`.
+    parent: String,
+    rules: String,
+}
+
+impl Smartlist {
+    /// Like `playlist_path`: `House / Deep`, empty at the top level.
+    fn parent_path(&self) -> String {
+        let parts: Vec<&str> = self.parent.split(';').filter(|s| !s.is_empty()).collect();
+        parts.join(" / ")
+    }
+
+    /// Like `playlist_path`: `House / Deep / Title`.
+    fn path(&self) -> String {
+        let parent = self.parent_path();
+        if parent.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{parent} / {}", self.title)
+        }
+    }
+}
+
+/// The smart playlists by `listUuid`. (A library from an older version has none.)
+fn smartlists(
+    connection: &Connection,
+    schema: &str,
+) -> rusqlite::Result<HashMap<String, Smartlist>> {
+    if !has_table(connection, schema, "Smartlist") {
+        return Ok(HashMap::new());
+    }
+    let mut statement = connection.prepare(&format!(
+        "SELECT listUuid, COALESCE(title, ''), COALESCE(parentPlaylistPath, ''), \
+                COALESCE(rules, '') FROM {schema}.Smartlist"
+    ))?;
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                Smartlist {
+                    title: row.get(1)?,
+                    parent: row.get(2)?,
+                    rules: row.get(3)?,
+                },
+            ))
+        })?
+        .collect()
+}
+
+/// Smart playlists that were added, removed, renamed, moved or given other rules. (Their
+/// order among each other is not compared.)
+fn smartlist_changes(connection: &Connection) -> rusqlite::Result<Vec<api::PlaylistChange>> {
+    let working = smartlists(connection, "main")?;
+    let source = smartlists(connection, "src")?;
+    let change =
+        |list: &Smartlist, kind: api::PlaylistChangeKind, detail: String| api::PlaylistChange {
+            name: list.path(),
+            kind: kind.into(),
+            detail,
+            smart: true,
+            ..Default::default()
+        };
+
+    let mut changes = Vec::new();
+    for (uuid, list) in &working {
+        match source.get(uuid) {
+            None => changes.push(change(list, api::PlaylistChangeKind::Added, String::new())),
+            Some(old) => {
+                let rules_changed = old.rules != list.rules;
+                let mut entry = if old.title != list.title {
+                    Some(change(
+                        list,
+                        api::PlaylistChangeKind::Renamed,
+                        old.title.clone(),
+                    ))
+                } else if old.parent != list.parent {
+                    let parent = old.parent_path();
+                    Some(change(
+                        list,
+                        api::PlaylistChangeKind::Moved,
+                        if parent.is_empty() {
+                            "(top level)".to_owned()
+                        } else {
+                            parent
+                        },
+                    ))
+                } else if rules_changed {
+                    Some(change(list, api::PlaylistChangeKind::Rules, String::new()))
+                } else {
+                    None
+                };
+                if let Some(entry) = &mut entry {
+                    entry.rules_changed = rules_changed;
+                }
+                changes.extend(entry);
+            }
+        }
+    }
+    for (uuid, list) in &source {
+        if !working.contains_key(uuid) {
+            changes.push(change(
+                list,
+                api::PlaylistChangeKind::Removed,
+                String::new(),
+            ));
+        }
+    }
+    Ok(changes)
+}
+
+/// Playlists that were added, removed, renamed, moved or whose tracks changed.
+fn playlist_changes(connection: &Connection) -> rusqlite::Result<Vec<api::PlaylistChange>> {
     if !has_table(connection, "main", "Playlist") || !has_table(connection, "src", "Playlist") {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let working = playlist_names(connection, "main")?;
     let source = playlist_names(connection, "src")?;
@@ -504,11 +629,7 @@ fn compare_playlists(
         ));
     }
 
-    changes.sort_by(|a, b| a.name.cmp(&b.name));
-    response.playlists_changed = changes.len() as u32;
-    changes.truncate(MAX_LISTED);
-    response.changed_playlists = changes;
-    Ok(())
+    Ok(changes)
 }
 
 /// Writes the working copy's databases to the source. Returns how many files were written
@@ -726,6 +847,57 @@ mod tests {
         assert_eq!(moved.kind(), api::PlaylistChangeKind::Moved);
         assert_eq!(moved.detail, "(top level)", "where it was");
         assert_eq!(by_name("New").kind(), api::PlaylistChangeKind::Added);
+    }
+
+    #[test]
+    fn smart_playlists_are_listed_when_added_removed_renamed_or_given_other_rules() {
+        let temp = TempDir::new("smartlists");
+        let library = library(&temp.0);
+        let table = "CREATE TABLE Smartlist (listUuid TEXT NOT NULL PRIMARY KEY, title TEXT,
+            parentPlaylistPath TEXT, nextPlaylistPath TEXT, nextListUuid TEXT, rules TEXT,
+            lastEditTime DATETIME);
+            INSERT INTO Smartlist VALUES
+                ('a', 'Same', '', '', '', 'r1', NULL),
+                ('b', 'Old name', '', '', '', 'r2', NULL),
+                ('c', 'Rules', 'House;', '', '', 'r3', NULL),
+                ('d', 'Gone', '', '', '', 'r4', NULL),
+                ('f', 'Moves', 'House;', '', '', 'r6', NULL);";
+        edit(&source(&library), table);
+        edit(&working(&library), table);
+        assert_eq!(diff(&library).unwrap().playlists_changed, 0);
+
+        edit(
+            &working(&library),
+            "UPDATE Smartlist SET title = 'New name', nextListUuid = 'x' WHERE listUuid = 'b';
+             UPDATE Smartlist SET rules = 'other' WHERE listUuid = 'c';
+             DELETE FROM Smartlist WHERE listUuid = 'd';
+             UPDATE Smartlist SET parentPlaylistPath = '' WHERE listUuid = 'f';
+             INSERT INTO Smartlist VALUES ('e', 'Fresh', '', '', '', 'r5', NULL);",
+        );
+        let diff = diff(&library).unwrap();
+        assert_eq!(diff.playlists_changed, 5);
+        let by_name = |name: &str| {
+            diff.changed_playlists
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("no {name}: {:?}", diff.changed_playlists))
+        };
+        assert!(diff.changed_playlists.iter().all(|p| p.smart));
+        let renamed = by_name("New name");
+        assert_eq!(renamed.kind(), api::PlaylistChangeKind::Renamed);
+        assert_eq!(renamed.detail, "Old name");
+        assert!(
+            !renamed.rules_changed,
+            "only the order links changed besides"
+        );
+        let rules = by_name("House / Rules");
+        assert_eq!(rules.kind(), api::PlaylistChangeKind::Rules);
+        assert!(rules.rules_changed);
+        assert_eq!(by_name("Gone").kind(), api::PlaylistChangeKind::Removed);
+        assert_eq!(by_name("Fresh").kind(), api::PlaylistChangeKind::Added);
+        let moved = by_name("Moves");
+        assert_eq!(moved.kind(), api::PlaylistChangeKind::Moved);
+        assert_eq!(moved.detail, "House");
     }
 
     #[test]

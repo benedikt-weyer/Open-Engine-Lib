@@ -69,8 +69,8 @@ The **Sync with the source…** button in the sidebar opens a window that compar
 **The comparison** looks at the main database `m.db` (opened read-only, with the source attached as `immutable`, so another program's locks and journals are left alone):
 
 - tracks that are only in the working copy (added), only in the source (removed), or in both but different: the fields that changed with the old and new value (title, artist, album, genre, comment, label, composer, remixer, year, BPM, key, rating, path, length, file type, analysed, grid locked) and whether the beatgrid, cues or loops changed;
-- playlists that are added, removed, renamed or moved, and for each the tracks added and removed and whether their order changed;
-- which database files differ at all. `hm.db`, `sm.db` and `stm.db` are not itemised, and neither are smart playlists: they are written when syncing but only named in the window.
+- playlists that are added, removed, renamed or moved, and for each the tracks added and removed and whether their order changed; smart playlists too (marked as such), with whether their rules changed (the order of smart playlists among each other is not compared);
+- which database files differ at all. `hm.db`, `sm.db` and `stm.db` are not itemised: they are written when syncing but only named in the window.
 
 Lists are cut at 200 entries (the counts are complete). Matching is by Engine's own ids, which a working copy shares with its source.
 

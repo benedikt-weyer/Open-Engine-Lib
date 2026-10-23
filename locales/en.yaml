@@ -36,6 +36,8 @@ sync_playlist_moved: "moved from {old}"
 sync_playlist_tracks: "tracks changed"
 sync_playlist_track_counts: "+{added} −{removed} tracks"
 sync_playlist_order: "order changed"
+sync_playlist_rules: "rules changed"
+sync_playlist_smart: "smart playlist"
 nav_library: Library
 nav_settings: Settings
 settings_title: Settings

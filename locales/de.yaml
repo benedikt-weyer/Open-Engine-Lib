@@ -36,6 +36,8 @@ sync_playlist_moved: "verschoben von {old}"
 sync_playlist_tracks: "Titel geändert"
 sync_playlist_track_counts: "+{added} −{removed} Titel"
 sync_playlist_order: "Reihenfolge geändert"
+sync_playlist_rules: "Regeln geändert"
+sync_playlist_smart: "Smart-Playlist"
 nav_library: Bibliothek
 nav_settings: Einstellungen
 settings_title: Einstellungen

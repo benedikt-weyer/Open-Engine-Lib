@@ -296,8 +296,7 @@ message GetSyncDiffResponse {
   // from them, so syncing would also undo their changes.
   bool source_changed_outside = 5;
   // The database files (`m.db`, `hm.db`, ...) whose content differs. Syncing writes
-  // exactly these. They can differ in ways that are not itemised below (the history,
-  // smart playlists, ...).
+  // exactly these. They can differ in ways that are not itemised below (the history, ...).
   repeated string changed_databases = 6;
   uint32 tracks_added = 7;
   uint32 tracks_removed = 8;
@@ -337,6 +336,10 @@ message PlaylistChange {
   uint32 tracks_added = 4;
   uint32 tracks_removed = 5;
   bool order_changed = 6;
+  // A smart playlist (then there are no tracks to count).
+  bool smart = 7;
+  // The rules of a smart playlist differ, whatever `kind` is.
+  bool rules_changed = 8;
 }
 
 enum PlaylistChangeKind {
@@ -347,6 +350,8 @@ enum PlaylistChangeKind {
   PLAYLIST_CHANGE_KIND_MOVED = 4;
   // Only its tracks changed.
   PLAYLIST_CHANGE_KIND_TRACKS = 5;
+  // Only the rules of a smart playlist changed.
+  PLAYLIST_CHANGE_KIND_RULES = 6;
 }
 
 message SyncToSourceRequest {
