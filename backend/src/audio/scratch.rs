@@ -6,6 +6,12 @@
 //! the hand. The sound is the window read at the speed the hand moves, so it is faster and
 //! higher when the hand is quick, backwards when it moves back, and silent when it holds
 //! still, which is what a record does. Only that stretch can be scratched.
+//!
+//! Read faster than it was recorded, a sound's high frequencies would fold back down as
+//! aliasing, so each frame of output is made from a stretch of the window with a windowed
+//! sinc (`kernel`) as a low-pass filter whose cutoff follows the speed: the quicker the
+//! hand, the wider the filter and the duller the sound, as for a record, but clean. The same
+//! kernel interpolates between the frames of the window, at any speed.
 
 use std::fs::File;
 use std::path::Path;
@@ -27,6 +33,10 @@ const MAX_SPEED: f64 = 8.0;
 /// At this speed or above the sound is at full volume; below it is faded down to silence,
 /// so that a hand that comes to rest doesn't leave a constant level (a hum) behind.
 const FULL_VOLUME_SPEED: f64 = 0.03;
+/// How far the filter reaches to either side of the read position, in zero crossings of
+/// the sinc: more is a sharper cutoff and costs more per frame. (At the speed of the track
+/// that is `LOBES` frames each way; at `MAX_SPEED` times that.)
+const LOBES: f64 = 4.0;
 
 /// A stretch of a track, decoded.
 pub struct Window {
@@ -117,6 +127,7 @@ impl Scratch {
             frame: vec![0.0; usize::from(window.channels.get())],
             next: 0,
             follow_frames: (FOLLOW_SECONDS * rate).max(1.0),
+            weights: Vec::with_capacity((2.0 * LOBES * MAX_SPEED) as usize + 3),
             position,
             hand,
             window,
@@ -147,9 +158,29 @@ pub struct ScratchSource {
     /// Where the sound is, in frames of the window.
     position: f64,
     follow_frames: f64,
+    /// The weights of the frames the filter takes in, for the frame being made.
+    weights: Vec<f64>,
     /// The frame being played out, and which of its channels is next.
     frame: Vec<Sample>,
     next: usize,
+}
+
+/// How much a frame of the window `distance` frames from the read position counts for in
+/// the sound at `width` (1 at the track's own speed or slower, else the speed): a sinc that
+/// passes what the speed leaves room for, faded out at its ends by a Hann window so that the
+/// filter is finite.
+fn kernel(distance: f64, width: f64) -> f64 {
+    let x = distance / width;
+    if x.abs() >= LOBES {
+        return 0.0;
+    }
+    let sinc = if x.abs() < 1e-9 {
+        1.0
+    } else {
+        let a = std::f64::consts::PI * x;
+        a.sin() / a
+    };
+    sinc * (0.5 + 0.5 * (std::f64::consts::PI * x / LOBES).cos())
 }
 
 impl ScratchSource {
@@ -169,13 +200,33 @@ impl ScratchSource {
             return;
         }
         let gain = (speed.abs() / FULL_VOLUME_SPEED).min(1.0) as Sample;
-        let index = self.position.floor() as usize;
-        let after = (index + 1).min(frames - 1);
-        let fraction = (self.position - index as f64) as Sample;
+
+        // The frames around the position, weighted. (Past the ends of the window there is
+        // silence.) The weights are made once for all channels, and add up to 1.
+        let width = speed.abs().max(1.0);
+        let reach = LOBES * width;
+        let first = (self.position - reach).ceil() as isize;
+        let last = (self.position + reach).floor() as isize;
+        self.weights.clear();
+        self.weights
+            .extend((first..=last).map(|frame| kernel(frame as f64 - self.position, width)));
+        let total: f64 = self.weights.iter().sum();
+        let scale = if total.abs() > 1e-9 {
+            total.recip()
+        } else {
+            0.0
+        };
+
         for (channel, out) in self.frame.iter_mut().enumerate() {
-            let a = self.window.samples[index * channels + channel];
-            let b = self.window.samples[after * channels + channel];
-            *out = (a + (b - a) * fraction) * gain;
+            let mut mixed = 0.0;
+            for (frame, weight) in (first..).zip(&self.weights) {
+                if let Ok(frame) = usize::try_from(frame)
+                    && frame < frames
+                {
+                    mixed += weight * f64::from(self.window.samples[frame * channels + channel]);
+                }
+            }
+            *out = (mixed * scale) as Sample * gain;
         }
     }
 }
@@ -380,6 +431,60 @@ mod tests {
 
         // Near the start of the track the window starts with the track.
         assert_eq!(early.unwrap().start, Duration::ZERO);
+    }
+
+    /// How loud a sine of `tone` cycles per frame is (its amplitude, 1 for full scale) when the
+    /// hand moves `speed` frames per frame.
+    fn amplitude_at(tone: f64, speed: f64) -> f64 {
+        let window = Window {
+            samples: (0..60_000)
+                .map(|n| (std::f64::consts::TAU * tone * f64::from(n)).sin() as f32)
+                .collect(),
+            channels: NonZero::new(1).unwrap(),
+            rate: NonZero::new(RATE).unwrap(),
+            start: Duration::ZERO,
+        };
+        let (scratch, mut source) = Scratch::begin(window, Duration::from_secs_f64(0.2));
+        let hand = Arc::clone(&scratch.hand);
+        // Let it settle at the speed, then listen.
+        let heard: Vec<f64> = (0..8_000)
+            .map(|_| {
+                hand.set(hand.get() + speed);
+                f64::from(source.next().unwrap())
+            })
+            .skip(4_000)
+            .collect();
+        let mean_square =
+            heard.iter().map(|sample| sample * sample).sum::<f64>() / heard.len() as f64;
+        mean_square.sqrt() * std::f64::consts::SQRT_2
+    }
+
+    #[test]
+    fn what_the_speed_leaves_no_room_for_is_filtered_out_and_not_folded_back_down() {
+        // At twice the speed everything above a quarter of the sample rate would fold down
+        // (a tone at 0.4 would come out at 0.2), at four times everything above an eighth.
+        assert!(amplitude_at(0.4, 2.0) < 0.02, "{}", amplitude_at(0.4, 2.0));
+        assert!(amplitude_at(0.45, 2.0) < 0.02);
+        assert!(amplitude_at(0.2, 4.0) < 0.02, "{}", amplitude_at(0.2, 4.0));
+        assert!(amplitude_at(0.4, 4.0) < 0.02);
+    }
+
+    #[test]
+    fn what_the_speed_has_room_for_goes_through() {
+        assert!(amplitude_at(0.2, 1.0) > 0.97, "{}", amplitude_at(0.2, 1.0));
+        assert!(
+            amplitude_at(0.05, 2.0) > 0.97,
+            "{}",
+            amplitude_at(0.05, 2.0)
+        );
+        assert!(
+            amplitude_at(0.02, 4.0) > 0.97,
+            "{}",
+            amplitude_at(0.02, 4.0)
+        );
+        // Slower than the track's own speed nothing needs filtering: the same cutoff as at
+        // the speed of the track, and a tone in the middle of the band is not dulled.
+        assert!(amplitude_at(0.2, 0.5) > 0.97, "{}", amplitude_at(0.2, 0.5));
     }
 
     #[test]
