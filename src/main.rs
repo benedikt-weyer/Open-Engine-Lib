@@ -12,6 +12,7 @@ mod cue_editor;
 mod cues;
 mod deck;
 mod drives;
+mod handlers;
 mod i18n;
 mod library_sync_view;
 mod local_folders;
@@ -1033,1278 +1034,137 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 fn handle(state: &mut State, message: Message) -> Task<Message> {
-    match message {
-        // A folder of music has nothing to sync, no playlists or ratings to change and no
-        // origins to save (the buttons for these are not shown either).
-        Message::SyncOpen
-        | Message::LibrarySyncOpen
-        | Message::PlaylistNew
-        | Message::PlaylistRename(_)
-        | Message::PlaylistDelete(_)
-        | Message::SmartNew
-        | Message::SmartEdit(_)
-        | Message::MigrateOrigins
-        | Message::SetStars { .. }
-        | Message::MenuSelected(MenuItem::SaveAs)
-            if state.is_folder() => {}
-        Message::Navigate(page) => state.page = page,
-        Message::ThemeSelected(theme) => {
-            state.config_error = state.config.set_theme(theme).err().map(|e| e.to_string());
-        }
-        Message::LanguageSelected(language) => {
-            state.config_error = state
-                .config
-                .set_language(language)
-                .err()
-                .map(|e| e.to_string());
-        }
-        Message::WaveformColorsSelected(colors) => {
-            state.config_error = state
-                .config
-                .set_waveform_colors(colors)
-                .err()
-                .map(|e| e.to_string());
-        }
-        Message::ResizeStarted(column) => {
-            state.resize = Some(Resize {
-                column,
-                width: state.columns.widths.get(column),
-                grab: None,
-            });
-        }
-        Message::ResizeMoved(x) => {
-            if let Some(resize) = &mut state.resize {
-                let grab = *resize.grab.get_or_insert(x);
-                state
-                    .columns
-                    .widths
-                    .set(resize.column, resize.width + (x - grab));
-            }
-        }
-        Message::ResizeEnded => {
-            if state.resize.take().is_some() {
-                // Not being able to remember the widths is not worth bothering the user about.
-                if let Err(error) = state.columns.save() {
-                    eprintln!("could not save the column widths: {error}");
-                }
-            }
-        }
-        Message::WaveformGainDragged(band, gain) => state.gain_draft = Some((band, gain)),
-        Message::WaveformGainReleased => {
-            if let Some((band, gain)) = state.gain_draft.take() {
-                state.config_error = state
-                    .config
-                    .set_waveform_gain(band, gain)
-                    .err()
-                    .map(|e| e.to_string());
-                // The waveform of the track in the player is drawn again with the new gain.
-                state.waveforms.clear();
-            }
-        }
-        Message::ResetWaveformGains => {
-            state.gain_draft = None;
-            state.config_error = state
-                .config
-                .reset_waveform_gains()
-                .err()
-                .map(|e| e.to_string());
-            state.waveforms.clear();
-        }
-        Message::WaveformDelayDragged(delay) => state.delay_draft = Some(delay),
-        Message::WaveformDelayReleased => {
-            if let Some(delay) = state.delay_draft.take() {
-                state.config_error = state
-                    .config
-                    .set_waveform_delay_ms(delay)
-                    .err()
-                    .map(|e| e.to_string());
-            }
-        }
-        Message::ResetWaveformDelay => {
-            state.delay_draft = None;
-            state.config_error = state
-                .config
-                .set_waveform_delay_ms(0)
-                .err()
-                .map(|e| e.to_string());
-        }
-        Message::ReopenLibraryToggled(reopen) => {
-            state.config_error = state
-                .config
-                .set_reopen_library(reopen)
-                .err()
-                .map(|e| e.to_string());
-        }
-        Message::RestorePositionToggled(restore) => {
-            state.config_error = state
-                .config
-                .set_restore_position(restore)
-                .err()
-                .map(|e| e.to_string());
-        }
-        Message::CloseRequested(_) => return state.exit(),
-        Message::ResetOverrides => {
-            state.config_error = state.config.reset_overrides().err().map(|e| e.to_string());
-        }
-
-        Message::BackendStarted(Ok(backend)) => {
-            state.backend = BackendState::Ready(backend);
-            if let Some((path, restore)) = state.open_when_ready.take() {
-                return state.open(path, restore);
-            }
-        }
-        Message::BackendStarted(Err(error)) => state.backend = BackendState::Failed(error),
-        Message::RetryBackend => {
-            state.backend = BackendState::Starting;
-            state.backend_error = None;
-            return start_backend();
-        }
-
-        Message::SyncOpen => {
-            let busy = state.locked()
-                || matches!(state.sync, Some(SyncStage::Syncing { .. }))
-                || state.library_sync.is_some()
-                || state.smart.is_some()
-                || state.playlist_dialog.is_some()
-                || state.cue_editor.is_some()
-                || state.loop_editor.is_some();
-            // (The button starts in the usual direction; "compare again" keeps it.)
-            if !busy && state.sync.is_none() {
-                state.sync_reverse = false;
-            }
-            if !busy
-                && matches!(state.library, LibraryState::Open(_))
-                && let Some(backend) = state.backend()
-            {
-                state.sync = Some(SyncStage::Loading);
-                return Task::perform(
-                    backend::sync_diff(backend, state.sync_reverse),
-                    Message::SyncDiffLoaded,
-                );
-            }
-        }
-        Message::SyncDiffLoaded(result) => {
-            // Only if the window is still waiting for it.
-            if matches!(state.sync, Some(SyncStage::Loading)) {
-                state.sync = Some(match result {
-                    Ok(diff) => SyncStage::Ready {
-                        diff,
-                        acknowledged: false,
-                        error: None,
-                    },
-                    Err(error) => SyncStage::Failed(error),
-                });
-            }
-        }
-        Message::SyncAcknowledged(ticked) => {
-            if let Some(SyncStage::Ready { acknowledged, .. }) = &mut state.sync {
-                *acknowledged = ticked;
-            }
-        }
-        Message::SyncDirection(reverse) => {
-            if matches!(
-                state.sync,
-                Some(SyncStage::Ready { .. } | SyncStage::Failed(_))
-            ) {
-                state.sync_reverse = reverse;
-                return handle(state, Message::SyncOpen);
-            }
-        }
-        Message::SyncStart => {
-            let reverse = state.sync_reverse;
-            if let (
-                Some(SyncStage::Ready {
-                    diff, acknowledged, ..
-                }),
-                Some(backend),
-            ) = (&state.sync, state.backend())
-                && if reverse {
-                    sync_view::can_pull(diff)
-                } else {
-                    sync_view::can_sync(diff, *acknowledged)
-                }
-            {
-                // Overwriting what was changed outside is allowed only if it was ticked.
-                let overwrite = diff.source_changed_outside;
-                state.progress = None;
-                state.sync = Some(SyncStage::Syncing {
-                    diff: Arc::clone(diff),
-                    acknowledged: *acknowledged,
-                });
-                return if reverse {
-                    Task::perform(backend::pull_from_source(backend), Message::SyncPulled)
-                } else {
-                    Task::perform(
-                        backend::sync_to_source(backend, overwrite),
-                        Message::SyncFinished,
-                    )
-                };
-            }
-        }
-        Message::SyncPulled(result) => {
-            if let Some(SyncStage::Syncing { diff, acknowledged }) = &state.sync {
-                match result {
-                    Ok(done) => {
-                        state.sync = Some(SyncStage::Pulled(done));
-                        // The backend reads the new working copy; so must this.
-                        return state.reload_library();
-                    }
-                    // Back to what was shown, with the reason.
-                    Err(error) => {
-                        state.sync = Some(SyncStage::Ready {
-                            diff: Arc::clone(diff),
-                            acknowledged: *acknowledged,
-                            error: Some(error),
-                        });
-                    }
-                }
-            }
-        }
-        Message::LibraryReloaded(result) => {
-            state.reloading = false;
-            match result {
-                Ok(library) => {
-                    // What was open stays open: the list, the song and where it is in the list,
-                    // but nothing is started.
-                    let session = state.snapshot().map(|session| Session {
-                        loaded: false,
-                        ..session
-                    });
-                    state.covers.clear();
-                    state.reachable.clear();
-                    // Pulling from the source can have replaced the cues.
-                    state.cues.clear();
-                    state.loops.clear();
-                    state.library = LibraryState::Open(Browser::new(library));
-                    if let Some(session) = session {
-                        return state.restore_session(session);
-                    }
-                }
-                Err(error) => state.backend_error = Some(error),
-            }
-        }
-        Message::SyncFinished(result) => {
-            if let Some(SyncStage::Syncing { diff, acknowledged }) = &state.sync {
-                state.sync = Some(match result {
-                    Ok(done) => SyncStage::Done(done),
-                    // Back to what was shown, with the reason.
-                    Err(error) => SyncStage::Ready {
-                        diff: Arc::clone(diff),
-                        acknowledged: *acknowledged,
-                        error: Some(error),
-                    },
-                });
-            }
-        }
-        Message::SyncClose => {
-            if state.sync.as_ref().is_some_and(SyncStage::can_close) {
-                state.sync = None;
-            }
-        }
-        // One window at a time, and none while the databases are being cloned.
-        Message::SmartNew
-        | Message::SmartEdit(_)
-        | Message::PlaylistNew
-        | Message::PlaylistRename(_)
-        | Message::PlaylistDelete(_)
-            if state.locked() || state.window_open() => {}
-        Message::SmartNew => {
-            if matches!(state.library, LibraryState::Open(_)) {
-                state.smart = Some(smart_editor::Editor::new());
-            }
-        }
-        Message::SmartEdit(index) => {
-            if let LibraryState::Open(browser) = &state.library
-                && let Some(playlist) = browser.library.playlists.get(index)
-                && playlist.is_smart
-            {
-                state.smart = Some(smart_editor::Editor::edit(
-                    index,
-                    &playlist.title,
-                    playlist.rules.as_ref(),
-                ));
-            }
-        }
-        Message::SmartEditor(event) => {
-            if let Some(editor) = state.smart.as_mut().filter(|editor| !editor.saving) {
-                editor.update(event);
-            }
-        }
-        Message::SmartSave => {
-            let strings = state.config.effective().language.strings();
-            let backend = state.backend();
-            if let (Some(editor), LibraryState::Open(browser)) =
-                (state.smart.as_mut(), &state.library)
-                && !editor.saving
-            {
-                match editor.finished(strings) {
-                    Err(error) => editor.error = Some(error),
-                    Ok((title, rules)) => {
-                        let Some(backend) = backend else {
-                            return Task::none();
-                        };
-                        editor.saving = true;
-                        let library = Arc::clone(&browser.library);
-                        return match editor.target {
-                            Some(index) => Task::perform(
-                                backend::update_smart_playlist(
-                                    backend, library, index, title, rules,
-                                ),
-                                Message::SmartSaved,
-                            ),
-                            None => Task::perform(
-                                backend::create_smart_playlist(backend, library, title, rules),
-                                Message::SmartSaved,
-                            ),
-                        };
-                    }
-                }
-            }
-        }
-        Message::SmartCancel => {
-            if state.smart.as_ref().is_some_and(|editor| !editor.saving) {
-                state.smart = None;
-            }
-        }
-        Message::SmartSaved(result) => match result {
-            Ok(edited) => {
-                let change = match state.smart.as_ref().and_then(|editor| editor.target) {
-                    Some(_) => Change::Same,
-                    None => Change::Inserted(edited.playlist),
-                };
-                state.smart = None;
-                state.backend_error = None;
-                state.playlists_changed(edited.playlists, change, Some(edited.playlist));
-            }
-            Err(error) => {
-                if let Some(editor) = &mut state.smart {
-                    let strings = state.config.effective().language.strings();
-                    editor.saving = false;
-                    editor.error = Some(fill(&strings.smart_save_failed, &[("error", &error)]));
-                }
-            }
-        },
-
-        Message::LibrarySyncOpen => {
-            if !state.locked()
-                && !state.window_open()
-                && matches!(state.library, LibraryState::Open(_))
-            {
-                state.library_sync = Some(LibrarySyncStage::Pick);
-            }
-        }
-        Message::LibrarySyncAdd => {
-            if matches!(state.library_sync, Some(LibrarySyncStage::Pick)) {
-                let title = state
-                    .config
-                    .effective()
-                    .language
-                    .strings()
-                    .libsync_add_title
-                    .clone();
-                return Task::perform(
-                    async move {
-                        rfd::AsyncFileDialog::new()
-                            .set_title(title)
-                            .pick_folder()
-                            .await
-                            .map(|folder| folder.path().to_path_buf())
-                    },
-                    Message::LibrarySyncAdded,
-                );
-            }
-        }
-        Message::LibrarySyncAdded(Some(path)) => {
-            return handle(state, Message::LibrarySyncTarget(path));
-        }
-        Message::LibrarySyncAdded(None) => {}
-        Message::LibrarySyncTarget(target) => {
-            return state.compare_libraries(target, library_sync_view::Options::default(), true);
-        }
-        Message::LibrarySyncOption(setting, on) => {
-            if let Some(LibrarySyncStage::Ready {
-                target, options, ..
-            }) = &state.library_sync
-            {
-                let (target, options) = (target.clone(), options.with(setting, on));
-                return state.compare_libraries(target, options, false);
-            }
-        }
-        Message::LibrarySyncDiffLoaded {
-            target: loaded,
-            options: loaded_options,
-            initial,
-            result,
-        } => {
-            // (An answer to a comparison that was given up on is not wanted.)
-            if let Some(LibrarySyncStage::Loading {
-                target, options, ..
-            }) = &state.library_sync
-                && *target == loaded
-                && *options == loaded_options
-            {
-                // Somewhere without a library: it gets one, with the tracks (what else
-                // would be in it?), unless that is taken back.
-                if let Ok(diff) = &result
-                    && initial
-                    && diff.target_is_new
-                    && !loaded_options.copy_tracks
-                {
-                    let options = loaded_options.with(library_sync_view::Setting::CopyTracks, true);
-                    return state.compare_libraries(loaded, options, false);
-                }
-                state.library_sync = Some(match result {
-                    Ok(diff) => {
-                        // A library that could be compared is worth remembering (one that
-                        // is not there yet is once it is made).
-                        if !diff.target_is_new {
-                            state.recents_error = state
-                                .recents
-                                .add(PathBuf::from(&diff.target_path))
-                                .err()
-                                .map(|error| error.to_string());
-                        }
-                        LibrarySyncStage::Ready {
-                            target: loaded,
-                            options: loaded_options,
-                            diff,
-                            error: None,
-                        }
-                    }
-                    Err(error) => LibrarySyncStage::Failed {
-                        target: loaded,
-                        error,
-                    },
-                });
-            }
-        }
-        Message::LibrarySyncStart => {
-            if let Some(LibrarySyncStage::Ready {
-                target,
-                options,
-                diff,
-                ..
-            }) = &state.library_sync
-                && library_sync_view::has_changes(diff)
-                && let Some(backend) = state.backend()
-            {
-                let (target, options, diff) = (target.clone(), *options, diff.clone());
-                state.progress = None;
-                state.library_sync = Some(LibrarySyncStage::Syncing {
-                    target: target.clone(),
-                    options,
-                    diff,
-                });
-                return Task::perform(
-                    backend::sync_to_library(backend, target, options),
-                    Message::LibrarySyncFinished,
-                );
-            }
-        }
-        Message::LibrarySyncFinished(result) => {
-            if let Some(LibrarySyncStage::Syncing {
-                target,
-                options,
-                diff,
-            }) = state.library_sync.take()
-            {
-                let mut reload = false;
-                state.library_sync = Some(match result {
-                    Ok(done) => {
-                        // The other way round the working copy was changed, and the
-                        // backend reads it again.
-                        reload = options.reverse && !done.backup_path.is_empty();
-                        if done.created {
-                            state.recents_error = state
-                                .recents
-                                .add(PathBuf::from(&done.target_path))
-                                .err()
-                                .map(|error| error.to_string());
-                        }
-                        LibrarySyncStage::Done(done, options.reverse)
-                    }
-                    Err(error) => LibrarySyncStage::Ready {
-                        target,
-                        options,
-                        diff,
-                        error: Some(error),
-                    },
-                });
-                if reload {
-                    return state.reload_library();
-                }
-            }
-        }
-        Message::LibrarySyncBack => {
-            if state
-                .library_sync
-                .as_ref()
-                .is_some_and(LibrarySyncStage::can_close)
-            {
-                state.library_sync = Some(LibrarySyncStage::Pick);
-            }
-        }
-        Message::LibrarySyncClose => {
-            if state
-                .library_sync
-                .as_ref()
-                .is_some_and(LibrarySyncStage::can_close)
-            {
-                state.library_sync = None;
-            }
-        }
-
-        Message::MigrateOrigins => {
-            if matches!(state.library, LibraryState::Open(_))
-                && let Some(backend) = state.backend()
-            {
-                return Task::perform(backend::migrate_origins(backend), Message::OriginsMigrated);
-            }
-        }
-        Message::OriginsMigrated(result) => match result {
-            Ok(done) => {
-                state.backend_error = None;
-                let strings = state.config.effective().language.strings();
-                if let LibraryState::Open(browser) = &mut state.library {
-                    browser.set_origins(done.origins.into_iter().map(|o| (o.track_id, o.origin)));
-                    browser.set_origin_notice(fill(
-                        &strings.origin_migrated,
-                        &[
-                            ("saved", &done.saved),
-                            ("kept", &done.kept),
-                            ("skipped", &done.skipped),
-                        ],
-                    ));
-                }
-            }
-            Err(error) => state.backend_error = Some(error),
-        },
-
-        Message::PlaylistNew => {
-            if matches!(state.library, LibraryState::Open(_)) {
-                state.playlist_dialog = Some(playlist_dialog::Dialog::create());
-            }
-        }
-        Message::PlaylistRename(index) => {
-            if let LibraryState::Open(browser) = &state.library
-                && let Some(playlist) = browser.library.playlists.get(index)
-                && !playlist.is_smart
-            {
-                state.playlist_dialog =
-                    Some(playlist_dialog::Dialog::rename(index, &playlist.title));
-            }
-        }
-        Message::PlaylistDelete(index) => {
-            if let LibraryState::Open(browser) = &state.library
-                && browser
-                    .library
-                    .playlists
-                    .get(index)
-                    .is_some_and(|playlist| !playlist.is_smart)
-            {
-                state.playlist_dialog = Some(playlist_dialog::Dialog::delete(index));
-            }
-        }
-        Message::PlaylistDialog(event) => {
-            if let Some(dialog) = state.playlist_dialog.as_mut().filter(|dialog| !dialog.busy) {
-                dialog.update(event);
-            }
-        }
-        Message::PlaylistConfirm => {
-            let strings = state.config.effective().language.strings();
-            let backend = state.backend();
-            if let (Some(dialog), LibraryState::Open(browser)) =
-                (state.playlist_dialog.as_mut(), &state.library)
-                && !dialog.busy
-            {
-                let name = dialog.name.trim().to_string();
-                if dialog.needs_name() && name.is_empty() {
-                    dialog.error = Some(strings.smart_name_missing.clone());
-                    return Task::none();
-                }
-                let Some(backend) = backend else {
-                    return Task::none();
-                };
-                dialog.busy = true;
-                let library = Arc::clone(&browser.library);
-                return match dialog.kind {
-                    playlist_dialog::Kind::Create { parent } => Task::perform(
-                        backend::create_playlist(backend, library, name, parent),
-                        Message::PlaylistsEdited,
-                    ),
-                    playlist_dialog::Kind::Rename(index) => Task::perform(
-                        backend::rename_playlist(backend, library, index, name),
-                        Message::PlaylistsEdited,
-                    ),
-                    playlist_dialog::Kind::Delete(index) => Task::perform(
-                        backend::delete_playlist(backend, library, index),
-                        Message::PlaylistsEdited,
-                    ),
-                };
-            }
-        }
-        Message::PlaylistCancel => {
-            if state
-                .playlist_dialog
-                .as_ref()
-                .is_some_and(|dialog| !dialog.busy)
-            {
-                state.playlist_dialog = None;
-            }
-        }
-        Message::PlaylistsEdited(result) => match result {
-            Ok(edited) => {
-                state.backend_error = None;
-                let kind = state.playlist_dialog.take().map(|dialog| dialog.kind);
-                let (change, show) = match (kind, edited.playlist, &state.library) {
-                    (
-                        Some(playlist_dialog::Kind::Delete(index)),
-                        _,
-                        LibraryState::Open(browser),
-                    ) => (Change::Removed(browser.library.playlist_span(index)), None),
-                    (_, Some(added), _) => (Change::Inserted(added), Some(added)),
-                    _ => (Change::Same, None),
-                };
-                state.playlists_changed(edited.playlists, change, show);
-            }
-            Err(error) => {
-                if let Some(dialog) = &mut state.playlist_dialog {
-                    let strings = state.config.effective().language.strings();
-                    dialog.busy = false;
-                    dialog.error = Some(fill(&strings.playlist_failed, &[("error", &error)]));
-                }
-            }
-        },
-        Message::MenuSelected(item) => match item {
-            MenuItem::Open => return handle(state, Message::ChooseLibrary),
-            MenuItem::SaveAs => {
-                if !state.locked() && matches!(state.library, LibraryState::Open(_)) {
-                    state.save_error = None;
-                    let strings = state.config.effective().language.strings();
-                    let title = strings.save_as_title.clone();
-                    return Task::perform(
-                        async move {
-                            rfd::AsyncFileDialog::new()
-                                .set_title(title)
-                                .pick_folder()
-                                .await
-                                .map(|folder| folder.path().to_path_buf())
-                        },
-                        Message::SaveAsChosen,
-                    );
-                }
-            }
-            MenuItem::Reload => return state.reload_from_disk(),
-            MenuItem::Exit => return state.exit(),
-        },
-        Message::Reloaded(result) => {
-            let strings = state.config.effective().language.strings();
-            match result {
-                // The backend reads the new working copy; so must this.
-                Ok(done) => {
-                    let message = if done.kept_edits_path.is_empty() {
-                        strings.reload_done.clone()
-                    } else {
-                        fill(
-                            &strings.reload_done_kept,
-                            &[("path", &done.kept_edits_path)],
-                        )
-                    };
-                    state.reload_result = Some((message, false));
-                    return state.reload_library();
-                }
-                Err(error) => {
-                    state.reloading = false;
-                    state.reload_result =
-                        Some((fill(&strings.reload_failed, &[("error", &error)]), true));
-                }
-            }
-        }
-        Message::SaveAsChosen(Some(path)) => {
-            if let (Some(backend), LibraryState::Open(_), None) =
-                (state.backend(), &state.library, &state.saving)
-            {
-                state.saving = Some(path.clone());
-                return Task::perform(
-                    backend::save_library_as(backend, path),
-                    Message::LibrarySaved,
-                );
-            }
-        }
-        Message::SaveAsChosen(None) => {}
-        Message::LibrarySaved(result) => {
-            state.saving = None;
-            match result {
-                // The library is now at its new place. Everything else carries on as it
-                // was: the tracks and playlists are the same, in the same order, and the
-                // player was never interrupted.
-                Ok(saved) => {
-                    state.save_error = None;
-                    if let LibraryState::Open(browser) = &mut state.library {
-                        state.recents_error = state
-                            .recents
-                            .add(PathBuf::from(&saved.path))
-                            .err()
-                            .map(|error| error.to_string());
-                        browser.library = saved;
-                    }
-                }
-                Err(error) => state.save_error = Some(error),
-            }
-        }
-        Message::ChooseLibrary
-        | Message::CloseLibrary
-        | Message::OpenRecent(_)
-        | Message::OpenDrive(_)
-        | Message::AddLocalFolder
-        | Message::OpenLocalFolder(_)
-            if state.locked() => {}
-        Message::AddLocalFolder => {
-            let title = state
-                .config
-                .effective()
-                .language
-                .strings()
-                .local_choose
-                .clone();
-            return Task::perform(
-                async move {
-                    rfd::AsyncFileDialog::new()
-                        .set_title(title)
-                        .pick_folder()
-                        .await
-                        .map(|folder| folder.path().to_path_buf())
-                },
-                Message::LocalFolderChosen,
-            );
-        }
-        Message::LocalFolderChosen(Some(_)) if state.locked() => {}
-        Message::LocalFolderChosen(Some(path)) => {
-            state.recents_error = state
-                .local_folders
-                .add(path.clone())
-                .err()
-                .map(|error| error.to_string());
-            return state.open_folder(path);
-        }
-        Message::LocalFolderChosen(None) => {}
-        Message::OpenLocalFolder(path) => {
-            // One library at a time: the backend would end up with the other one.
-            if !matches!(state.library, LibraryState::Opening(_)) {
-                return state.open_folder(path);
-            }
-        }
-        Message::RemoveLocalFolder(path) => {
-            state.recents_error = state
-                .local_folders
-                .remove(&path)
-                .err()
-                .map(|error| error.to_string());
-            // Taking the open folder out of the list closes it.
-            let open = matches!(
-                &state.library,
-                LibraryState::Open(browser)
-                    if !browser.library.is_engine() && Path::new(&browser.library.path) == path
-            );
-            if open && !state.locked() {
-                return handle(state, Message::CloseLibrary);
-            }
-        }
-        Message::ChooseLibrary => {
-            let title = state
-                .config
-                .effective()
-                .language
-                .strings()
-                .choose_library
-                .clone();
-            return Task::perform(
-                async move {
-                    rfd::AsyncFileDialog::new()
-                        .set_title(title)
-                        .pick_folder()
-                        .await
-                        .map(|folder| folder.path().to_path_buf())
-                },
-                Message::LibraryChosen,
-            );
-        }
-        Message::LibraryChosen(Some(_)) if state.locked() => {}
-        Message::LibraryChosen(Some(path)) => return state.open(path, None),
-        Message::LibraryChosen(None) => {}
-        Message::LibraryOpened(result) => {
-            if matches!(state.library, LibraryState::Opening(_)) {
-                state.library = match result {
-                    Ok(library) => {
-                        // A folder of music is kept in the "Local music" section, not among
-                        // the recent libraries.
-                        let path = PathBuf::from(&library.path);
-                        state.recents_error = if library.is_engine() {
-                            state.recents.add(path)
-                        } else {
-                            state.local_folders.add(path)
-                        }
-                        .err()
-                        .map(|error| error.to_string());
-                        LibraryState::Open(Browser::new(library))
-                    }
-                    Err(error) => {
-                        state.restore = None;
-                        LibraryState::Closed { error: Some(error) }
-                    }
-                };
-                if let Some(session) = state.restore.take() {
-                    return state.restore_session(session);
-                }
-            }
-        }
-        Message::CloseLibrary => {
-            state.library = LibraryState::Closed { error: None };
-            state.reset_playback();
-            state.covers.clear();
-            state.reachable.clear();
-            state.waveforms.clear();
-            state.cues.clear();
-            state.loops.clear();
-            state.sync = None;
-            state.library_sync = None;
-            state.reload_result = None;
-            // Closing a library on purpose means the next start doesn't reopen it.
-            state.save(&Session::default(), true);
-            if let Some(backend) = state.backend() {
-                return Task::perform(backend::close_library(backend), Message::LibraryClosed);
-            }
-        }
-        Message::LibraryClosed(result) => state.backend_error = result.err(),
-        Message::ScanDrives => {
-            if !state.scanning_drives {
-                state.scanning_drives = true;
-                return scan_drives();
-            }
-        }
-        Message::DrivesFound(drives) => {
-            state.scanning_drives = false;
-            // A drive coming or going changes what can be reached.
-            if state.drives != drives {
-                state.reachable.clear();
-            }
-            state.drives = drives;
-        }
-        Message::OpenRecent(path) | Message::OpenDrive(path) => {
-            // One library at a time: the backend would end up with the other one.
-            if !matches!(state.library, LibraryState::Opening(_)) {
-                return state.open(path, None);
-            }
-        }
-        Message::ForgetRecent(path) => {
-            state.recents_error = state
-                .recents
-                .forget(&path)
-                .err()
-                .map(|error| error.to_string());
-        }
-
-        Message::ShowCollection | Message::ShowPlaylist(_) => {
-            if let LibraryState::Open(browser) = &mut state.library {
-                browser.show(match message {
-                    Message::ShowPlaylist(index) => Source::Playlist(index),
-                    _ => Source::Collection,
-                });
-                return browser::scroll_to_top();
-            }
-        }
-        Message::RevealRow(row) => {
-            if let LibraryState::Open(browser) = &mut state.library {
-                return browser.reveal(row);
-            }
-        }
-        Message::ToggleFolder(index) => {
-            if let LibraryState::Open(browser) = &mut state.library {
-                browser.toggle(index);
-            }
-        }
-        Message::SelectTrack(row) => {
-            if let LibraryState::Open(browser) = &mut state.library {
-                browser.selected = Some(row);
-            }
-        }
-        // The databases are being cloned: a rating set now might miss the clone.
-        Message::SetStars { .. } if state.locked() => {}
-        Message::SetStars { track, stars } => {
-            let Some(backend) = state.backend() else {
-                return Task::none();
-            };
-            if let LibraryState::Open(browser) = &mut state.library {
-                // Shown at once; taken back if the backend can't do it.
-                let previous = browser.rating(track);
-                let rating = u32::from(stars.min(5)) * 20;
-                browser.set_rating(track, Some(rating));
-                return Task::perform(backend::set_rating(backend, track, rating), move |result| {
-                    Message::RatingSet {
-                        track,
-                        previous,
-                        result,
-                    }
-                });
-            }
-        }
-        Message::RatingSet {
-            track,
-            previous,
-            result,
-        } => match result {
-            Ok(()) => state.backend_error = None,
-            Err(error) => {
-                if let LibraryState::Open(browser) = &mut state.library {
-                    browser.set_rating(track, previous);
-                }
-                state.backend_error = Some(error);
-            }
-        },
-        Message::PlayTrack(row) => {
-            if let LibraryState::Open(browser) = &mut state.library {
-                browser.selected = Some(row);
-            }
-            return state.play_row(row);
-        }
-        Message::TrackListScrolled(viewport) => {
-            if let LibraryState::Open(browser) = &mut state.library {
-                browser.scrolled(viewport);
-            }
-        }
-
-        Message::PlayPause => {
-            if state.is_stopped() {
-                let LibraryState::Open(browser) = &state.library else {
-                    return Task::none();
-                };
-                let row = browser.selected.unwrap_or(0);
-                return state.play_row(row);
-            }
-            return state.control(Control::TogglePause);
-        }
-        Message::Stop => return state.control(Control::Stop),
-        Message::Next => return state.control(Control::Next),
-        Message::Previous => return state.control(Control::Previous),
-        Message::Tick => return state.control(Control::Poll),
-        Message::SeekTo(seconds) => {
-            return state.control(Control::Seek {
-                position_ms: (seconds.max(0.0) * 1000.0) as u64,
-            });
-        }
-        Message::CueJump(slot) => {
-            let position = state
-                .playing_id()
-                .and_then(|id| state.cues.get(id))
-                .and_then(|cues| cues.iter().find(|cue| cue.slot == slot))
-                .map(|cue| cue.position);
-            if let Some(position) = position {
-                return handle(state, Message::SeekTo(position as f32));
-            }
-        }
-        // The databases are being cloned: a cue set now might miss the clone. And one
-        // change is written at a time.
-        Message::CueAdd(_) | Message::CueRemove(_) | Message::CueEditorSave
-            if state.locked() || state.cues_busy => {}
-        Message::CueEditorOpen if state.locked() || state.window_open() => {}
-        Message::CueAdd(slot) => {
-            if let Some(id) = state.playing_id()
-                && let Some(cues) = state.cues.get(id)
-                && slot < cues::SLOTS
-                && cues.iter().all(|cue| cue.slot != slot)
-            {
-                let cues = cues::with(cues, Cue::new(slot, state.playhead()));
-                return state.save_cues(id, cues);
-            }
-        }
-        Message::CueRemove(slot) => {
-            if let Some(id) = state.playing_id()
-                && let Some(cues) = state.cues.get(id)
-                && cues.iter().any(|cue| cue.slot == slot)
-            {
-                let cues = cues::without(cues, slot);
-                return state.save_cues(id, cues);
-            }
-        }
-        Message::CueEditorOpen => {
-            if let Some(id) = state.playing_id()
-                && let Some(cues) = state.cues.get(id)
-                && let LibraryState::Open(browser) = &state.library
-                && let Some(track) = browser.library.track_by_id(id)
-            {
-                state.cue_editor = Some(cue_editor::Editor::new(id, &track.title, cues));
-            }
-        }
-        Message::CueEditor(event) => {
-            let playhead = state.playhead();
-            if let cue_editor::Event::Go(slot) = &event {
-                let position = state
-                    .cue_editor
-                    .as_ref()
-                    .and_then(|editor| editor.position_of(*slot));
-                if let Some(position) = position {
-                    return handle(state, Message::SeekTo(position as f32));
-                }
-            } else if let Some(editor) = state.cue_editor.as_mut().filter(|editor| !editor.busy) {
-                editor.update(event, playhead);
-            }
-        }
-        Message::CueEditorSave => {
-            let strings = state.config.effective().language.strings();
-            let Some(editor) = state.cue_editor.as_mut().filter(|editor| !editor.busy) else {
-                return Task::none();
-            };
-            match editor.cues() {
-                Err(bad) => {
-                    editor.error = Some(fill(
-                        &strings.cue_bad_position,
-                        &[("number", &(bad.slot + 1)), ("text", &bad.text)],
-                    ));
-                }
-                Ok(cues) => {
-                    let track = editor.track;
-                    editor.busy = true;
-                    return state.save_cues(track, cues);
-                }
-            }
-        }
-        Message::CueEditorCancel => {
-            if state.cue_editor.as_ref().is_some_and(|editor| !editor.busy) {
-                state.cue_editor = None;
-            }
-        }
-        Message::LoopJump(slot) => {
-            let start = state
-                .playing_id()
-                .and_then(|id| state.loops.get(id))
-                .and_then(|loops| loops.iter().find(|saved| saved.slot == slot))
-                .map(|saved| saved.start);
-            if let Some(start) = start {
-                return handle(state, Message::SeekTo(start as f32));
-            }
-        }
-        // The databases are being cloned: a loop set now might miss the clone. And one
-        // change is written at a time.
-        Message::LoopAdd(_) | Message::LoopRemove(_) | Message::LoopEditorSave
-            if state.locked() || state.loops_busy => {}
-        Message::LoopEditorOpen if state.locked() || state.window_open() => {}
-        Message::LoopAdd(slot) => {
-            if let Some(id) = state.playing_id()
-                && let Some(loops) = state.loops.get(id)
-                && slot < cues::SLOTS
-                && loops.iter().all(|saved| saved.slot != slot)
-            {
-                let length = state.new_loop_length();
-                let mut start = state.playhead();
-                let mut end = start + length;
-                // A loop can't reach past the end of the track: it is moved back to fit.
-                if let Some(duration) = state.playing_duration()
-                    && end > duration
-                {
-                    end = duration;
-                    start = (duration - length).max(0.0);
-                }
-                if end > start {
-                    let loops = loops::with(loops, Loop::new(slot, start, end));
-                    return state.save_loops(id, loops);
-                }
-            }
-        }
-        Message::LoopRemove(slot) => {
-            if let Some(id) = state.playing_id()
-                && let Some(loops) = state.loops.get(id)
-                && loops.iter().any(|saved| saved.slot == slot)
-            {
-                let loops = loops::without(loops, slot);
-                return state.save_loops(id, loops);
-            }
-        }
-        Message::LoopEditorOpen => {
-            if let Some(id) = state.playing_id()
-                && let Some(loops) = state.loops.get(id)
-                && let LibraryState::Open(browser) = &state.library
-                && let Some(track) = browser.library.track_by_id(id)
-            {
-                state.loop_editor = Some(loop_editor::Editor::new(
-                    id,
-                    &track.title,
-                    loops,
-                    state.new_loop_length(),
-                ));
-            }
-        }
-        Message::LoopEditor(event) => {
-            let playhead = state.playhead();
-            if let loop_editor::Event::Go(slot) = &event {
-                let start = state
-                    .loop_editor
-                    .as_ref()
-                    .and_then(|editor| editor.start_of(*slot));
-                if let Some(start) = start {
-                    return handle(state, Message::SeekTo(start as f32));
-                }
-            } else if let Some(editor) = state.loop_editor.as_mut().filter(|editor| !editor.busy) {
-                editor.update(event, playhead);
-            }
-        }
-        Message::LoopEditorSave => {
-            let strings = state.config.effective().language.strings();
-            let Some(editor) = state.loop_editor.as_mut().filter(|editor| !editor.busy) else {
-                return Task::none();
-            };
-            match editor.loops() {
-                Err(loop_editor::Problem::BadPosition { slot, text }) => {
-                    editor.error = Some(fill(
-                        &strings.loop_bad_position,
-                        &[("number", &(slot + 1)), ("text", &text)],
-                    ));
-                }
-                Err(loop_editor::Problem::BadRange { slot }) => {
-                    editor.error = Some(fill(&strings.loop_bad_range, &[("number", &(slot + 1))]));
-                }
-                Ok(loops) => {
-                    let track = editor.track;
-                    editor.busy = true;
-                    return state.save_loops(track, loops);
-                }
-            }
-        }
-        Message::LoopEditorCancel => {
-            if state
-                .loop_editor
-                .as_ref()
-                .is_some_and(|editor| !editor.busy)
-            {
-                state.loop_editor = None;
-            }
-        }
-        Message::LoopsLoaded(generation, id, result) => match result {
-            Ok(loops) => state.loops.set(generation, id, loops),
-            Err(error) => {
-                // Not asked again (that would be a request after every message), so there
-                // are no pads for this track.
-                state.backend_error = Some(error);
-            }
-        },
-        Message::LoopsEdited {
-            generation,
-            track,
-            result,
-        } => {
-            state.loops_busy = false;
-            match result {
-                Ok(loops) => {
-                    state.backend_error = None;
-                    // (An answer about another library's track means nothing here.)
-                    if generation == state.loops.generation() {
-                        if let LibraryState::Open(browser) = &mut state.library {
-                            browser.set_loop_count(track, loops.len() as u32);
-                        }
-                        state.loops.set(generation, track, loops);
-                    }
-                    if state
-                        .loop_editor
-                        .as_ref()
-                        .is_some_and(|editor| editor.track == track)
-                    {
-                        state.loop_editor = None;
-                    }
-                }
-                Err(error) => match &mut state.loop_editor {
-                    Some(editor) => {
-                        let strings = state.config.effective().language.strings();
-                        editor.busy = false;
-                        editor.error = Some(fill(&strings.loop_failed, &[("error", &error)]));
-                    }
-                    None => state.backend_error = Some(error),
-                },
-            }
-        }
-        Message::CuesLoaded(generation, id, result) => match result {
-            Ok(cues) => state.cues.set(generation, id, cues),
-            Err(error) => {
-                // Not asked again (that would be a request after every message), so there
-                // are no pads for this track.
-                state.backend_error = Some(error);
-            }
-        },
-        Message::CuesEdited {
-            generation,
-            track,
-            result,
-        } => {
-            state.cues_busy = false;
-            match result {
-                Ok(cues) => {
-                    state.backend_error = None;
-                    // (An answer about another library's track means nothing here.)
-                    if generation == state.cues.generation() {
-                        if let LibraryState::Open(browser) = &mut state.library {
-                            browser.set_cue_count(track, cues.len() as u32);
-                        }
-                        state.cues.set(generation, track, cues);
-                    }
-                    if state
-                        .cue_editor
-                        .as_ref()
-                        .is_some_and(|editor| editor.track == track)
-                    {
-                        state.cue_editor = None;
-                    }
-                }
-                Err(error) => match &mut state.cue_editor {
-                    Some(editor) => {
-                        let strings = state.config.effective().language.strings();
-                        editor.busy = false;
-                        editor.error = Some(fill(&strings.cue_failed, &[("error", &error)]));
-                    }
-                    None => state.backend_error = Some(error),
-                },
-            }
-        }
-        Message::Status(Ok(status)) => {
-            state.status = status;
-            state.clock.report(
-                state.status.position_ms as f64 / 1000.0,
-                state.status.state() == PlaybackState::Playing,
-                Instant::now(),
-            );
-            state.backend_error = None;
-            if state.is_stopped() {
-                state.play_source = None;
-            }
-        }
-        Message::Status(Err(error)) => state.backend_error = Some(error),
-        Message::WaveformLoaded(generation, id, result) => match result {
-            Ok(waveform) => state.waveforms.set(generation, id, waveform),
-            Err(error) => {
-                state.waveforms.set(generation, id, None);
-                state.backend_error = Some(error);
-            }
-        },
-        Message::ProgressTick => {
-            if state.syncing()
-                && let Some(backend) = state.backend()
-            {
-                return Task::perform(backend::progress(backend), Message::ProgressUpdated);
-            }
-        }
-        Message::ProgressUpdated(result) => {
-            // (An answer that comes after the sync ended is not wanted.)
-            if state.syncing() {
-                state.progress = result.ok();
-            }
-        }
-        Message::PathsChecked(generation, answers) => state.reachable.set(generation, answers),
-        Message::CoverLoaded(generation, id, result) => match result {
-            Ok(image) => state.covers.set(generation, id, image),
-            Err(error) => {
-                state.covers.set(generation, id, None);
-                state.backend_error = Some(error);
-            }
-        },
+    // A folder of music has nothing to sync, no playlists or ratings to change and no
+    // origins to save (the buttons for these are not shown either).
+    if state.is_folder()
+        && matches!(
+            message,
+            Message::SyncOpen
+                | Message::LibrarySyncOpen
+                | Message::PlaylistNew
+                | Message::PlaylistRename(_)
+                | Message::PlaylistDelete(_)
+                | Message::SmartNew
+                | Message::SmartEdit(_)
+                | Message::MigrateOrigins
+                | Message::SetStars { .. }
+                | Message::MenuSelected(MenuItem::SaveAs)
+        )
+    {
+        return Task::none();
     }
-    Task::none()
+    match message {
+        Message::BackendStarted(..)
+        | Message::CloseRequested(..)
+        | Message::LanguageSelected(..)
+        | Message::Navigate(..)
+        | Message::ReopenLibraryToggled(..)
+        | Message::ResetOverrides
+        | Message::ResetWaveformDelay
+        | Message::ResetWaveformGains
+        | Message::ResizeEnded
+        | Message::ResizeMoved(..)
+        | Message::ResizeStarted(..)
+        | Message::RestorePositionToggled(..)
+        | Message::RetryBackend
+        | Message::ThemeSelected(..)
+        | Message::WaveformColorsSelected(..)
+        | Message::WaveformDelayDragged(..)
+        | Message::WaveformDelayReleased
+        | Message::WaveformGainDragged(..)
+        | Message::WaveformGainReleased => handlers::settings::handle(state, message),
+        Message::LibraryReloaded(..)
+        | Message::SyncAcknowledged(..)
+        | Message::SyncClose
+        | Message::SyncDiffLoaded(..)
+        | Message::SyncDirection(..)
+        | Message::SyncFinished(..)
+        | Message::SyncOpen
+        | Message::SyncPulled(..)
+        | Message::SyncStart => handlers::sync::handle(state, message),
+        Message::MigrateOrigins
+        | Message::OriginsMigrated(..)
+        | Message::PlaylistCancel
+        | Message::PlaylistConfirm
+        | Message::PlaylistDelete(..)
+        | Message::PlaylistDialog(..)
+        | Message::PlaylistNew
+        | Message::PlaylistRename(..)
+        | Message::PlaylistsEdited(..)
+        | Message::SmartCancel
+        | Message::SmartEdit(..)
+        | Message::SmartEditor(..)
+        | Message::SmartNew
+        | Message::SmartSave
+        | Message::SmartSaved(..) => handlers::playlists::handle(state, message),
+        Message::LibrarySyncAdd
+        | Message::LibrarySyncAdded(..)
+        | Message::LibrarySyncBack
+        | Message::LibrarySyncClose
+        | Message::LibrarySyncDiffLoaded { .. }
+        | Message::LibrarySyncFinished(..)
+        | Message::LibrarySyncOpen
+        | Message::LibrarySyncOption(..)
+        | Message::LibrarySyncStart
+        | Message::LibrarySyncTarget(..) => handlers::library_sync::handle(state, message),
+        Message::AddLocalFolder
+        | Message::ChooseLibrary
+        | Message::CloseLibrary
+        | Message::DrivesFound(..)
+        | Message::ForgetRecent(..)
+        | Message::LibraryChosen(..)
+        | Message::LibraryClosed(..)
+        | Message::LibraryOpened(..)
+        | Message::LibrarySaved(..)
+        | Message::LocalFolderChosen(..)
+        | Message::MenuSelected(..)
+        | Message::OpenDrive(..)
+        | Message::OpenLocalFolder(..)
+        | Message::OpenRecent(..)
+        | Message::Reloaded(..)
+        | Message::RemoveLocalFolder(..)
+        | Message::SaveAsChosen(..)
+        | Message::ScanDrives => handlers::library::handle(state, message),
+        Message::CoverLoaded(..)
+        | Message::Next
+        | Message::PathsChecked(..)
+        | Message::PlayPause
+        | Message::PlayTrack(..)
+        | Message::Previous
+        | Message::ProgressTick
+        | Message::ProgressUpdated(..)
+        | Message::RatingSet { .. }
+        | Message::RevealRow(..)
+        | Message::SeekTo(..)
+        | Message::SelectTrack(..)
+        | Message::SetStars { .. }
+        | Message::ShowCollection
+        | Message::ShowPlaylist(..)
+        | Message::Status(..)
+        | Message::Stop
+        | Message::Tick
+        | Message::ToggleFolder(..)
+        | Message::TrackListScrolled(..)
+        | Message::WaveformLoaded(..) => handlers::playback::handle(state, message),
+        Message::CueAdd(..)
+        | Message::CueEditor(..)
+        | Message::CueEditorCancel
+        | Message::CueEditorOpen
+        | Message::CueEditorSave
+        | Message::CueJump(..)
+        | Message::CueRemove(..)
+        | Message::CuesEdited { .. }
+        | Message::CuesLoaded(..) => handlers::cues::handle(state, message),
+        Message::LoopAdd(..)
+        | Message::LoopEditor(..)
+        | Message::LoopEditorCancel
+        | Message::LoopEditorOpen
+        | Message::LoopEditorSave
+        | Message::LoopJump(..)
+        | Message::LoopRemove(..)
+        | Message::LoopsEdited { .. }
+        | Message::LoopsLoaded(..) => handlers::loops::handle(state, message),
+    }
 }
 
 fn view(state: &State) -> Element<'_, Message> {
