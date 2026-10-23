@@ -78,6 +78,19 @@ service LibraryService {
   // Errors: FAILED_PRECONDITION if no library is open, INTERNAL if the database can't
   // be opened or written.
   rpc MigrateOrigins(MigrateOriginsRequest) returns (MigrateOriginsResponse);
+  // What making the playlists and smart playlists of another library the same as the
+  // open one's would change. The tracks of a playlist are matched by where they came
+  // from (`originDatabaseUuid` and `originTrackId`), else by a file name that only one
+  // track of each library has. Tracks and audio files are never copied: tracks the other
+  // library lacks are left out of its playlists and counted. Nothing is written.
+  // Errors: FAILED_PRECONDITION if no library is open or the other library is being
+  // written to by another program, NOT_FOUND if the path has no Engine library,
+  // INVALID_ARGUMENT if it is the open library, INTERNAL if reading fails.
+  rpc GetLibrarySyncDiff(GetLibrarySyncDiffRequest) returns (GetLibrarySyncDiffResponse);
+  // Does what `GetLibrarySyncDiff` lists: the other library's `m.db` is replaced by one
+  // with the changes, after the old one was kept in `open-engine-lib-backup` next to it.
+  // Errors as for `GetLibrarySyncDiff`.
+  rpc SyncToLibrary(SyncToLibraryRequest) returns (SyncToLibraryResponse);
   // Closes the library and stops playback. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
@@ -185,6 +198,35 @@ message TrackOrigin {
   // `Track.id`.
   uint32 track_id = 1;
   string origin = 2;
+}
+
+message GetLibrarySyncDiffRequest {
+  // The other library's `Engine Library` folder, the folder or drive that contains it, or
+  // its `Database2` folder.
+  string target_path = 1;
+  // Also delete playlists and smart playlists that only the other library has.
+  bool remove_missing = 2;
+}
+// Lists are cut at 200 entries, the counts are complete.
+message GetLibrarySyncDiffResponse {
+  // The other library's `Engine Library` folder.
+  string target_path = 1;
+  uint32 playlists_changed = 2;
+  repeated PlaylistChange changed_playlists = 3;
+  // Tracks of the open library, in the playlists, that the other library does not have.
+  uint32 tracks_missing = 4;
+  repeated TrackRef missing_tracks = 5;
+}
+message SyncToLibraryRequest {
+  string target_path = 1;
+  bool remove_missing = 2;
+}
+message SyncToLibraryResponse {
+  string target_path = 1;
+  uint32 playlists_changed = 2;
+  uint32 tracks_missing = 3;
+  // Where the replaced database was kept; empty if nothing needed to be written.
+  string backup_path = 4;
 }
 
 message CloseLibraryRequest {}
@@ -402,6 +444,9 @@ message PlaylistChange {
   bool smart = 7;
   // The rules of a smart playlist differ, whatever `kind` is.
   bool rules_changed = 8;
+  // Only when syncing to another library: tracks of the playlist that the other library
+  // does not have and that are left out.
+  uint32 tracks_missing = 9;
 }
 
 enum PlaylistChangeKind {

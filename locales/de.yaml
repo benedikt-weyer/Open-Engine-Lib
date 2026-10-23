@@ -166,3 +166,23 @@ origin_migrate: Orte als Herkunft speichern
 origin_migrate_tip: "Speichert den aktuellen Ort der Datei jedes Titels als Herkunft, wenn noch keine gespeichert ist. Die Herkunft liegt in der eigenen Datenbank von Open Engine Lib, nicht in der Engine-Bibliothek."
 origin_migrated: "Herkunft gespeichert: {saved} neu, {kept} schon bekannt, {skipped} ohne Datei hier."
 origin_none: Nicht gespeichert
+sync_playlist_missing: "{count} nicht in der anderen Bibliothek"
+libsync_button: Mit anderer Bibliothek abgleichen…
+libsync_title: Playlists mit anderer Bibliothek abgleichen
+libsync_pick: "Wähle die Bibliothek, die die Playlists der geöffneten bekommt:"
+libsync_add: Bibliothek hinzufügen…
+libsync_add_title: Engine-Bibliothek zum Abgleichen wählen
+libsync_target: "Abgleich mit: {path}"
+libsync_comparing: Playlists werden verglichen…
+libsync_failed: "Die Bibliotheken konnten nicht verglichen werden: {error}"
+libsync_back: Andere Bibliothek wählen
+libsync_summary: "Playlists: {count} würden sich ändern"
+libsync_nothing: Die Playlists sind bereits gleich.
+libsync_hint: "Die andere Bibliothek bekommt die Playlists und Smart-Playlists der geöffneten. Titel werden über ihre Herkunft zugeordnet oder über einen Dateinamen, den nur ein Titel hat. Titel und Audiodateien werden nie kopiert: Titel, die die andere Bibliothek nicht hat, fehlen in ihren Playlists."
+libsync_remove: Auch Playlists löschen, die nur die andere Bibliothek hat
+libsync_missing: "Titel, die die andere Bibliothek nicht hat: {count}"
+libsync_run: Playlists abgleichen
+libsync_writing: Playlists werden geschrieben…
+libsync_run_failed: "Der Abgleich ist fehlgeschlagen: {error}"
+libsync_done: "Fertig: {count} Playlists geändert. Die vorherige Datenbank der anderen Bibliothek liegt in {backup}"
+libsync_none_written: Es musste nichts geschrieben werden.

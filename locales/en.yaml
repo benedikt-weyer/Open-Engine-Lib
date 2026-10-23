@@ -166,3 +166,23 @@ origin_migrate: Save locations as origins
 origin_migrate_tip: "Saves where each track's file is now as its origin, for tracks that have none yet. Origins are kept in Open Engine Lib's own database, not in the Engine library."
 origin_migrated: "Origins saved: {saved} new, {kept} already known, {skipped} without a file here."
 origin_none: Not saved
+sync_playlist_missing: "{count} not in the other library"
+libsync_button: Sync to another library…
+libsync_title: Sync playlists to another library
+libsync_pick: "Choose the library that gets the playlists of the open one:"
+libsync_add: Add library…
+libsync_add_title: Choose the Engine library to sync to
+libsync_target: "Syncing to: {path}"
+libsync_comparing: Comparing the playlists…
+libsync_failed: "Could not compare the libraries: {error}"
+libsync_back: Choose another library
+libsync_summary: "Playlists: {count} would change"
+libsync_nothing: The playlists are already the same.
+libsync_hint: "The other library gets the playlists and smart playlists of the open one. Tracks are matched by where they came from, or by a file name only one track has. Tracks and audio files are never copied: tracks the other library doesn't have are left out of its playlists."
+libsync_remove: Also delete playlists that only the other library has
+libsync_missing: "Tracks the other library doesn't have: {count}"
+libsync_run: Sync playlists
+libsync_writing: Writing the playlists…
+libsync_run_failed: "Syncing failed: {error}"
+libsync_done: "Done: {count} playlists changed. The other library's previous database is kept in {backup}"
+libsync_none_written: Nothing needed to be written.

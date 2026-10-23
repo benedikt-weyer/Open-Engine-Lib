@@ -16,6 +16,7 @@ use tonic::{Request, Response, Status};
 
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, EditError, Library, OpenError};
+use crate::mirror::{self, MirrorError};
 use crate::origins::Origins;
 use crate::player::Start;
 use crate::save::{self, SaveError};
@@ -341,6 +342,49 @@ impl LibraryService for Service {
         .map(Response::new)
     }
 
+    async fn get_library_sync_diff(
+        &self,
+        request: Request<api::GetLibrarySyncDiffRequest>,
+    ) -> Result<Response<api::GetLibrarySyncDiffResponse>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        let scratch = self.0.cache_root.clone();
+        // Copies a database and reads it: not on the async threads.
+        tokio::task::spawn_blocking(move || {
+            mirror::diff(
+                &library,
+                std::path::Path::new(&request.target_path),
+                &scratch,
+                request.remove_missing,
+            )
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map(Response::new)
+        .map_err(mirror_status)
+    }
+
+    async fn sync_to_library(
+        &self,
+        request: Request<api::SyncToLibraryRequest>,
+    ) -> Result<Response<api::SyncToLibraryResponse>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        let scratch = self.0.cache_root.clone();
+        tokio::task::spawn_blocking(move || {
+            mirror::push(
+                &library,
+                std::path::Path::new(&request.target_path),
+                &scratch,
+                request.remove_missing,
+            )
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map(Response::new)
+        .map_err(mirror_status)
+    }
+
     async fn close_library(
         &self,
         _: Request<api::CloseLibraryRequest>,
@@ -584,6 +628,16 @@ async fn playlists_edited(
     .map_err(|error| Status::internal(error.to_string()))?
     .map(Response::new)
     .map_err(edit_status)
+}
+
+fn mirror_status(error: MirrorError) -> Status {
+    match error {
+        MirrorError::NotALibrary(_) => Status::not_found(error.to_string()),
+        MirrorError::SameLibrary => Status::invalid_argument(error.to_string()),
+        MirrorError::Busy => Status::failed_precondition(error.to_string()),
+        MirrorError::Edit(error) => edit_status(error),
+        MirrorError::Io(_) | MirrorError::Open(_) => Status::internal(error.to_string()),
+    }
 }
 
 fn edit_status(error: EditError) -> Status {

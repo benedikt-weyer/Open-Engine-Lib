@@ -293,7 +293,7 @@ fn track_change<'a>(change: &'a TrackChange) -> Element<'a, Message> {
     lines.into()
 }
 
-fn playlist_change<'a>(change: &'a PlaylistChange, language: Language) -> Element<'a, Message> {
+pub fn playlist_change<'a>(change: &'a PlaylistChange, language: Language) -> Element<'a, Message> {
     let strings = language.strings();
     let (mark, style): (&str, fn(&Theme) -> text::Style) = match change.kind() {
         PlaylistChangeKind::Added => ("+", text::success),
@@ -317,6 +317,12 @@ fn playlist_change<'a>(change: &'a PlaylistChange, language: Language) -> Elemen
     }
     if change.rules_changed {
         notes.push(strings.sync_playlist_rules.clone());
+    }
+    if change.tracks_missing > 0 {
+        notes.push(fill(
+            &strings.sync_playlist_missing,
+            &[("count", &change.tracks_missing)],
+        ));
     }
     if change.tracks_added > 0 || change.tracks_removed > 0 {
         notes.push(fill(

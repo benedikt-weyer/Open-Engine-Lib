@@ -27,7 +27,7 @@ use crate::cache::{self, DATABASE_DIR};
 use crate::library::Library;
 
 /// Where the databases that a sync replaces are kept, inside the source's `Database2`.
-const BACKUP_DIR: &str = "open-engine-lib-backup";
+pub const BACKUP_DIR: &str = "open-engine-lib-backup";
 const MAIN_DATABASE: &str = "m.db";
 /// Lists in a diff are cut here, so that a library that has changed completely doesn't
 /// produce a message of many megabytes. The counts are complete.
@@ -113,7 +113,7 @@ fn working_databases(library: &Library) -> PathBuf {
 
 /// Whether another program has a write in progress in the source: a journal or a
 /// write-ahead log with something in it.
-fn is_busy(source: &Path) -> bool {
+pub fn is_busy(source: &Path) -> bool {
     fs::read_dir(source).is_ok_and(|entries| {
         entries.flatten().any(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();

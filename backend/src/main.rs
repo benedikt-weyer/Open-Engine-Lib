@@ -12,6 +12,7 @@ mod beatgrid;
 mod cache;
 mod engine;
 mod library;
+mod mirror;
 mod origins;
 mod player;
 mod save;

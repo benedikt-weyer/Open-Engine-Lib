@@ -19,11 +19,12 @@ use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
-    GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest, GetSyncDiffResponse,
-    GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest,
-    MigrateOriginsResponse, NextRequest, OpenLibraryRequest, PlayRequest, PlaybackStatus,
-    PreviousRequest, RenamePlaylistRequest, SaveLibraryAsRequest, SeekRequest, SetRatingRequest,
-    SmartRules, SoundSwitchState, StopRequest, SyncToSourceRequest, SyncToSourceResponse,
+    GetAlbumArtRequest, GetInfoRequest, GetLibrarySyncDiffRequest, GetLibrarySyncDiffResponse,
+    GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest,
+    ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse, NextRequest,
+    OpenLibraryRequest, PlayRequest, PlaybackStatus, PreviousRequest, RenamePlaylistRequest,
+    SaveLibraryAsRequest, SeekRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
+    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
     TogglePauseRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
@@ -535,6 +536,41 @@ pub async fn migrate_origins(mut backend: Backend) -> Result<MigrateOriginsRespo
     backend
         .library
         .migrate_origins(MigrateOriginsRequest {})
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// What making the playlists of the library at `target` the same as the open one's would
+/// change.
+pub async fn library_sync_diff(
+    mut backend: Backend,
+    target: PathBuf,
+    remove_missing: bool,
+) -> Result<Arc<GetLibrarySyncDiffResponse>, String> {
+    backend
+        .library
+        .get_library_sync_diff(GetLibrarySyncDiffRequest {
+            target_path: target.display().to_string(),
+            remove_missing,
+        })
+        .await
+        .map(|response| Arc::new(response.into_inner()))
+        .map_err(describe)
+}
+
+/// Makes the playlists of the library at `target` the same as the open one's.
+pub async fn sync_to_library(
+    mut backend: Backend,
+    target: PathBuf,
+    remove_missing: bool,
+) -> Result<SyncToLibraryResponse, String> {
+    backend
+        .library
+        .sync_to_library(SyncToLibraryRequest {
+            target_path: target.display().to_string(),
+            remove_missing,
+        })
         .await
         .map(|response| response.into_inner())
         .map_err(describe)

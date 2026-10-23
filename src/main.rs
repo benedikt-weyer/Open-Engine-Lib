@@ -10,6 +10,7 @@ mod covers;
 mod deck;
 mod drives;
 mod i18n;
+mod library_sync_view;
 mod menubar;
 mod model;
 mod navbar;
@@ -37,6 +38,7 @@ use drives::Drive;
 use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text, tooltip};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
+use library_sync_view::Stage as LibrarySyncStage;
 use menubar::MenuItem;
 use model::Library;
 use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
@@ -135,6 +137,8 @@ struct State {
     delay_draft: Option<i32>,
     /// The window comparing the working copy with the source, while it is open.
     sync: Option<SyncStage>,
+    /// The window for syncing the playlists to another library, while it is open.
+    library_sync: Option<LibrarySyncStage>,
     /// The window for adding or changing a smart playlist, while it is open.
     smart: Option<smart_editor::Editor>,
     /// The window for adding, renaming or deleting a playlist, while it is open.
@@ -177,6 +181,27 @@ pub enum Message {
     SyncStart,
     SyncFinished(Result<open_engine_api::v1::SyncToSourceResponse, String>),
     SyncClose,
+
+    /// The button for syncing the playlists to another library.
+    LibrarySyncOpen,
+    /// The button for adding a library by its folder.
+    LibrarySyncAdd,
+    /// A folder was chosen to add (`None`: the dialog was closed).
+    LibrarySyncAdded(Option<PathBuf>),
+    /// The library to sync to was chosen, from the lists or by its folder.
+    LibrarySyncTarget(PathBuf),
+    LibrarySyncDiffLoaded {
+        target: PathBuf,
+        remove_missing: bool,
+        result: Result<Arc<open_engine_api::v1::GetLibrarySyncDiffResponse>, String>,
+    },
+    /// The tick that also deletes the playlists only the other library has.
+    LibrarySyncRemove(bool),
+    LibrarySyncStart,
+    LibrarySyncFinished(Result<open_engine_api::v1::SyncToLibraryResponse, String>),
+    /// Back to choosing the library.
+    LibrarySyncBack,
+    LibrarySyncClose,
 
     /// The button for a new smart playlist.
     SmartNew,
@@ -297,6 +322,7 @@ impl State {
             gain_draft: None,
             delay_draft: None,
             sync: None,
+            library_sync: None,
             smart: None,
             playlist_dialog: None,
             saving: None,
@@ -365,6 +391,41 @@ impl State {
         if let Some(Source::Playlist(index)) = self.play_source {
             self.play_source = change.map(index).map(Source::Playlist);
         }
+    }
+
+    /// Whether one of the windows that lie over the app is open. Only one is at a time.
+    fn window_open(&self) -> bool {
+        self.sync.is_some()
+            || self.library_sync.is_some()
+            || self.smart.is_some()
+            || self.playlist_dialog.is_some()
+    }
+
+    /// Starts comparing the playlists of the open library with those of the library at
+    /// `target`, for the window that syncs them.
+    fn compare_libraries(&mut self, target: PathBuf, remove_missing: bool) -> Task<Message> {
+        let Some(backend) = self.backend() else {
+            return Task::none();
+        };
+        if !matches!(
+            self.library_sync,
+            Some(LibrarySyncStage::Pick | LibrarySyncStage::Ready { .. })
+        ) {
+            return Task::none();
+        }
+        self.library_sync = Some(LibrarySyncStage::Loading {
+            target: target.clone(),
+            remove_missing,
+        });
+        let answered = target.clone();
+        Task::perform(
+            backend::library_sync_diff(backend, target, remove_missing),
+            move |result| Message::LibrarySyncDiffLoaded {
+                target: answered.clone(),
+                remove_missing,
+                result,
+            },
+        )
     }
 
     /// Sends a playback request to the backend; its answer arrives as `Message::Status`.
@@ -737,8 +798,11 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::SyncOpen => {
-            let busy =
-                state.saving.is_some() || matches!(state.sync, Some(SyncStage::Syncing { .. }));
+            let busy = state.saving.is_some()
+                || matches!(state.sync, Some(SyncStage::Syncing { .. }))
+                || state.library_sync.is_some()
+                || state.smart.is_some()
+                || state.playlist_dialog.is_some();
             if !busy
                 && matches!(state.library, LibraryState::Open(_))
                 && let Some(backend) = state.backend()
@@ -810,10 +874,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::PlaylistNew
         | Message::PlaylistRename(_)
         | Message::PlaylistDelete(_)
-            if state.saving.is_some()
-                || state.sync.is_some()
-                || state.smart.is_some()
-                || state.playlist_dialog.is_some() => {}
+            if state.saving.is_some() || state.window_open() => {}
         Message::SmartNew => {
             if matches!(state.library, LibraryState::Open(_)) {
                 state.smart = Some(smart_editor::Editor::new());
@@ -890,6 +951,141 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
         },
+
+        Message::LibrarySyncOpen => {
+            if state.saving.is_none()
+                && !state.window_open()
+                && matches!(state.library, LibraryState::Open(_))
+            {
+                state.library_sync = Some(LibrarySyncStage::Pick);
+            }
+        }
+        Message::LibrarySyncAdd => {
+            if matches!(state.library_sync, Some(LibrarySyncStage::Pick)) {
+                let title = state
+                    .config
+                    .effective()
+                    .language
+                    .strings()
+                    .libsync_add_title
+                    .clone();
+                return Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .set_title(title)
+                            .pick_folder()
+                            .await
+                            .map(|folder| folder.path().to_path_buf())
+                    },
+                    Message::LibrarySyncAdded,
+                );
+            }
+        }
+        Message::LibrarySyncAdded(Some(path)) => {
+            return handle(state, Message::LibrarySyncTarget(path));
+        }
+        Message::LibrarySyncAdded(None) => {}
+        Message::LibrarySyncTarget(target) => return state.compare_libraries(target, false),
+        Message::LibrarySyncRemove(remove_missing) => {
+            if let Some(LibrarySyncStage::Ready { target, .. }) = &state.library_sync {
+                let target = target.clone();
+                return state.compare_libraries(target, remove_missing);
+            }
+        }
+        Message::LibrarySyncDiffLoaded {
+            target: loaded,
+            remove_missing: loaded_remove,
+            result,
+        } => {
+            // (An answer to a comparison that was given up on is not wanted.)
+            if let Some(LibrarySyncStage::Loading {
+                target,
+                remove_missing,
+            }) = &state.library_sync
+                && *target == loaded
+                && *remove_missing == loaded_remove
+            {
+                state.library_sync = Some(match result {
+                    Ok(diff) => {
+                        // A library that could be compared is worth remembering.
+                        state.recents_error = state
+                            .recents
+                            .add(PathBuf::from(&diff.target_path))
+                            .err()
+                            .map(|error| error.to_string());
+                        LibrarySyncStage::Ready {
+                            target: loaded,
+                            remove_missing: loaded_remove,
+                            diff,
+                            error: None,
+                        }
+                    }
+                    Err(error) => LibrarySyncStage::Failed {
+                        target: loaded,
+                        error,
+                    },
+                });
+            }
+        }
+        Message::LibrarySyncStart => {
+            if let Some(LibrarySyncStage::Ready {
+                target,
+                remove_missing,
+                diff,
+                ..
+            }) = &state.library_sync
+                && diff.playlists_changed > 0
+                && let Some(backend) = state.backend()
+            {
+                let (target, remove_missing, diff) =
+                    (target.clone(), *remove_missing, diff.clone());
+                state.library_sync = Some(LibrarySyncStage::Syncing {
+                    target: target.clone(),
+                    remove_missing,
+                    diff,
+                });
+                return Task::perform(
+                    backend::sync_to_library(backend, target, remove_missing),
+                    Message::LibrarySyncFinished,
+                );
+            }
+        }
+        Message::LibrarySyncFinished(result) => {
+            if let Some(LibrarySyncStage::Syncing {
+                target,
+                remove_missing,
+                diff,
+            }) = state.library_sync.take()
+            {
+                state.library_sync = Some(match result {
+                    Ok(done) => LibrarySyncStage::Done(done),
+                    Err(error) => LibrarySyncStage::Ready {
+                        target,
+                        remove_missing,
+                        diff,
+                        error: Some(error),
+                    },
+                });
+            }
+        }
+        Message::LibrarySyncBack => {
+            if state
+                .library_sync
+                .as_ref()
+                .is_some_and(LibrarySyncStage::can_close)
+            {
+                state.library_sync = Some(LibrarySyncStage::Pick);
+            }
+        }
+        Message::LibrarySyncClose => {
+            if state
+                .library_sync
+                .as_ref()
+                .is_some_and(LibrarySyncStage::can_close)
+            {
+                state.library_sync = None;
+            }
+        }
 
         Message::MigrateOrigins => {
             if matches!(state.library, LibraryState::Open(_))
@@ -1119,6 +1315,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.covers.clear();
             state.waveforms.clear();
             state.sync = None;
+            state.library_sync = None;
             // Closing a library on purpose means the next start doesn't reopen it.
             state.save(&Session::default(), true);
             if let Some(backend) = state.backend() {
@@ -1296,17 +1493,27 @@ fn view(state: &State) -> Element<'_, Message> {
     .into();
     // The sync window lies over the whole app, which is dimmed and can't be used meanwhile.
     // So do the windows for playlists (only one is open at a time).
-    match (
-        &state.sync,
-        &state.smart,
-        &state.playlist_dialog,
-        &state.library,
-    ) {
-        (Some(stage), ..) => iced::widget::stack![window, sync_view::modal(stage, language)].into(),
-        (None, Some(editor), ..) => {
-            iced::widget::stack![window, smart_editor::modal(editor, language)].into()
-        }
-        (None, None, Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
+    if let Some(stage) = &state.sync {
+        return iced::widget::stack![window, sync_view::modal(stage, language)].into();
+    }
+    if let Some(stage) = &state.library_sync {
+        let current = match &state.library {
+            LibraryState::Open(browser) => browser.library.path.as_str(),
+            _ => "",
+        };
+        let sources = library_sync_view::Sources {
+            recents: &state.recents,
+            drives: &state.drives,
+            current,
+        };
+        return iced::widget::stack![window, library_sync_view::modal(stage, sources, language)]
+            .into();
+    }
+    if let Some(editor) = &state.smart {
+        return iced::widget::stack![window, smart_editor::modal(editor, language)].into();
+    }
+    match (&state.playlist_dialog, &state.library) {
+        (Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
             window,
             playlist_dialog::modal(dialog, &browser.library, language)
         ]
@@ -1610,6 +1817,7 @@ mod tests {
             gain_draft: None,
             delay_draft: None,
             sync: None,
+            library_sync: None,
             smart: None,
             playlist_dialog: None,
             saving: None,
@@ -2192,6 +2400,117 @@ mod tests {
             Message::OriginsMigrated(Err("no database".into())),
         );
         assert_eq!(state.backend_error.as_deref(), Some("no database"));
+    }
+
+    fn library_diff(count: u32) -> Arc<open_engine_api::v1::GetLibrarySyncDiffResponse> {
+        Arc::new(open_engine_api::v1::GetLibrarySyncDiffResponse {
+            target_path: "/media/STICK/Engine Library".into(),
+            playlists_changed: count,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn playlists_are_synced_to_another_library_in_steps() {
+        let mut state = state();
+        let target = PathBuf::from("/media/STICK/Engine Library");
+
+        // The window opens on the choice, and no second window opens over it.
+        let _ = handle(&mut state, Message::LibrarySyncOpen);
+        assert!(matches!(state.library_sync, Some(LibrarySyncStage::Pick)));
+        let _ = handle(&mut state, Message::PlaylistNew);
+        assert!(state.playlist_dialog.is_none());
+        let _ = handle(&mut state, Message::SyncOpen);
+        assert!(state.sync.is_none());
+
+        // An answer for a comparison that is not under way is not wanted.
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncDiffLoaded {
+                target: target.clone(),
+                remove_missing: false,
+                result: Ok(library_diff(2)),
+            },
+        );
+        assert!(matches!(state.library_sync, Some(LibrarySyncStage::Pick)));
+
+        // A comparison that is under way takes its own answer, and not another's.
+        state.library_sync = Some(LibrarySyncStage::Loading {
+            target: target.clone(),
+            remove_missing: false,
+        });
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncDiffLoaded {
+                target: target.clone(),
+                remove_missing: true,
+                result: Ok(library_diff(9)),
+            },
+        );
+        assert!(matches!(
+            state.library_sync,
+            Some(LibrarySyncStage::Loading { .. })
+        ));
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncDiffLoaded {
+                target: target.clone(),
+                remove_missing: false,
+                result: Ok(library_diff(2)),
+            },
+        );
+        assert!(matches!(
+            &state.library_sync,
+            Some(LibrarySyncStage::Ready { diff, .. }) if diff.playlists_changed == 2
+        ));
+        assert_eq!(
+            state.recents.paths().first(),
+            Some(&PathBuf::from("/media/STICK/Engine Library")),
+            "a library that could be compared is remembered"
+        );
+
+        // Writing can't be closed; when it fails the differences come back with the reason.
+        state.library_sync = Some(LibrarySyncStage::Syncing {
+            target: target.clone(),
+            remove_missing: false,
+            diff: library_diff(2),
+        });
+        let _ = handle(&mut state, Message::LibrarySyncClose);
+        let _ = handle(&mut state, Message::LibrarySyncBack);
+        assert!(matches!(
+            state.library_sync,
+            Some(LibrarySyncStage::Syncing { .. })
+        ));
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncFinished(Err("the stick is read-only".into())),
+        );
+        assert!(matches!(
+            &state.library_sync,
+            Some(LibrarySyncStage::Ready { error: Some(error), .. }) if error.contains("read-only")
+        ));
+
+        // A comparison that failed leads back to the choice.
+        state.library_sync = Some(LibrarySyncStage::Loading {
+            target: target.clone(),
+            remove_missing: false,
+        });
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncDiffLoaded {
+                target,
+                remove_missing: false,
+                result: Err("not a library".into()),
+            },
+        );
+        assert!(matches!(
+            state.library_sync,
+            Some(LibrarySyncStage::Failed { .. })
+        ));
+        let _ = handle(&mut state, Message::LibrarySyncBack);
+        assert!(matches!(state.library_sync, Some(LibrarySyncStage::Pick)));
+        let _ = handle(&mut state, Message::LibrarySyncClose);
+        assert!(state.library_sync.is_none());
     }
 
     #[test]

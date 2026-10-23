@@ -89,6 +89,9 @@ pub fn view<'a>(
             button(text(&strings.sync_button))
                 .width(Fill)
                 .on_press_maybe(can_sync.then_some(Message::SyncOpen)),
+            button(text(&strings.libsync_button))
+                .width(Fill)
+                .on_press_maybe(can_sync.then_some(Message::LibrarySyncOpen)),
             container(drive_section).max_height(DRIVES_MAX_HEIGHT),
             container(section).max_height(RECENT_MAX_HEIGHT)
         ],
