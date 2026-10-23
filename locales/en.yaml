@@ -197,3 +197,9 @@ libsync_files: "Files to copy: {count} ({size})"
 libsync_files_missing: "Files of the open library that can't be found, so they are not copied: {count}"
 libsync_conflicts: "Locations that stay as they are because another track has the path: {count}"
 libsync_new_track: new track
+progress_preparing: Making a copy of the other library's database…
+progress_copying: Copying the tracks
+progress_updating: Changing the tracks, playlists and origins…
+progress_writing: Writing the databases…
+progress_bytes: "{done} of {total}"
+progress_files: "{done} of {total} files"

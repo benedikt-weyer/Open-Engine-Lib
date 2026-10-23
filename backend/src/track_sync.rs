@@ -16,6 +16,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::library::Library;
 use crate::mirror::MirrorError;
+use crate::progress::{Phase, Progress};
 
 /// The folder the tracks are copied to, next to the `Engine Library` folder.
 pub const TRACKS_DIR: &str = "Engine-Tracks";
@@ -227,7 +228,7 @@ fn stars(rating: Option<u32>) -> String {
 }
 
 /// Copies `from` to `to` (making its folders) so that `to` is never half written.
-fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+fn copy_file(from: &Path, to: &Path, progress: &Progress) -> std::io::Result<()> {
     if let Some(folder) = to.parent() {
         fs::create_dir_all(folder)?;
     }
@@ -235,7 +236,9 @@ fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
         ".copying-{}",
         to.file_name().map_or(0, |name| name.len())
     ));
-    let result = fs::copy(from, &temporary).and_then(|_| fs::rename(&temporary, to));
+    let result = progress
+        .copy(from, &temporary, true)
+        .and_then(|_| fs::rename(&temporary, to));
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -260,6 +263,7 @@ pub fn sync(
     database: &Path,
     options: Options,
     copy_files: bool,
+    progress: &Progress,
 ) -> Result<Report, MirrorError> {
     let mut report = Report::default();
     let destinations = if options.copy_tracks {
@@ -267,6 +271,16 @@ pub fn sync(
     } else {
         HashMap::new()
     };
+    if copy_files {
+        // What there is to copy is known now; the copying is done track by track below.
+        let (files, bytes) = destinations
+            .values()
+            .filter(|destination| !destination.present)
+            .fold((0u32, 0u64), |(files, bytes), d| {
+                (files + 1, bytes + d.size)
+            });
+        progress.phase(Phase::CopyingTracks, bytes, files);
+    }
 
     let mut connection = Connection::open_with_flags(
         database,
@@ -381,7 +395,7 @@ pub fn sync(
                     });
                 }
                 if let (true, Some(destination)) = (copy_it, destination) {
-                    place(destination, track, copy_files, &mut report)?;
+                    place(destination, track, copy_files, progress, &mut report)?;
                 }
             }
             None => {
@@ -446,7 +460,7 @@ pub fn sync(
                     )?;
                 }
                 report.added.push(index);
-                place(destination, track, copy_files, &mut report)?;
+                place(destination, track, copy_files, progress, &mut report)?;
             }
         }
     }
@@ -460,6 +474,7 @@ fn place(
     destination: &Destination,
     track: &crate::library::Track,
     copy_files: bool,
+    progress: &Progress,
     report: &mut Report,
 ) -> Result<(), MirrorError> {
     if destination.present {
@@ -468,7 +483,7 @@ fn place(
     report.files_to_copy += 1;
     report.bytes_to_copy += destination.size;
     if copy_files {
-        copy_file(&track.path, &destination.absolute)?;
+        copy_file(&track.path, &destination.absolute, progress)?;
         report.copied.push(destination.absolute.clone());
     }
     Ok(())

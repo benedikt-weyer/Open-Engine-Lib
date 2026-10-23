@@ -26,6 +26,7 @@ use rusqlite::{Connection, OpenFlags};
 use crate::cache::{self, DATABASE_DIR};
 use crate::library::Library;
 use crate::origins;
+use crate::progress::{Phase, Progress};
 
 /// Where the databases that a sync replaces are kept, inside the source's `Database2`.
 pub const BACKUP_DIR: &str = "open-engine-lib-backup";
@@ -678,6 +679,7 @@ fn playlist_changes(connection: &Connection) -> rusqlite::Result<Vec<api::Playli
 pub fn push(
     library: &Library,
     overwrite_outside_changes: bool,
+    progress: &Progress,
 ) -> Result<api::SyncToSourceResponse, SyncError> {
     let (working, source) = (working_databases(library), source_databases(library));
     if !source.join(MAIN_DATABASE).is_file() {
@@ -692,6 +694,16 @@ pub fn push(
 
     let changed = changed_databases(library)?;
     let backup = source.join(BACKUP_DIR);
+    // What there is to copy: the old files to the backup and the new ones to the source.
+    let size = |path: PathBuf| fs::metadata(path).map_or(0, |metadata| metadata.len());
+    progress.phase(
+        Phase::Writing,
+        changed
+            .iter()
+            .map(|name| size(source.join(name)) + size(working.join(name)))
+            .sum(),
+        0,
+    );
     if !changed.is_empty() {
         // Keep what is about to be replaced. (One backup, the latest, so the source doesn't
         // fill up with them.)
@@ -699,7 +711,7 @@ pub fn push(
         fs::create_dir_all(&backup)?;
         for name in &changed {
             if source.join(name).is_file() {
-                fs::copy(source.join(name), backup.join(name))?;
+                progress.copy(&source.join(name), &backup.join(name), false)?;
             }
         }
     }
@@ -708,7 +720,8 @@ pub fn push(
     for name in &changed {
         // Written beside the file and moved over it, so that a file is never half written.
         let temporary = source.join(format!(".{name}.syncing"));
-        let result = fs::copy(working.join(name), &temporary)
+        let result = progress
+            .copy(&working.join(name), &temporary, false)
             .and_then(|_| fs::rename(&temporary, source.join(name)));
         if let Err(error) = result {
             let _ = fs::remove_file(&temporary);
@@ -988,7 +1001,7 @@ mod tests {
         assert_eq!(found.origins_changed, 2);
         assert!(!database.exists(), "the source has none yet");
 
-        let done = push(&library, false).unwrap();
+        let done = push(&library, false, &Progress::default()).unwrap();
         assert_eq!(done.files_written, 1);
         assert!(database.is_file());
         assert_eq!(
@@ -1009,7 +1022,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(diff(&library).unwrap().origins_changed, 2);
-        let done = push(&library, false).unwrap();
+        let done = push(&library, false, &Progress::default()).unwrap();
         assert!(Path::new(&done.backup_path).join(origins::FILE).is_file());
         let synced = origins::Origins::open(&database).unwrap().all().unwrap();
         assert_eq!(synced[&("db".to_string(), 1)], "/stick/one.flac");
@@ -1065,7 +1078,7 @@ mod tests {
         fs::write(library.cache.join("Database2/hm.db"), b"history v2").unwrap();
         let old_main = fs::read(source(&library)).unwrap();
 
-        let done = push(&library, false).unwrap();
+        let done = push(&library, false, &Progress::default()).unwrap();
         assert_eq!(done.files_written, 2);
 
         // The source holds what the working copy does, and what was there is kept.
@@ -1089,7 +1102,9 @@ mod tests {
         let after = diff(&library).unwrap();
         assert!(after.changed_databases.is_empty() && !after.source_changed_outside);
         assert_eq!(
-            push(&library, false).unwrap().files_written,
+            push(&library, false, &Progress::default())
+                .unwrap()
+                .files_written,
             0,
             "nothing to write"
         );
@@ -1110,7 +1125,7 @@ mod tests {
         let theirs = fs::read(source(&library)).unwrap();
 
         assert!(matches!(
-            push(&library, false),
+            push(&library, false, &Progress::default()),
             Err(SyncError::ChangedOutside)
         ));
         assert_eq!(
@@ -1119,7 +1134,12 @@ mod tests {
             "refusing changes nothing"
         );
 
-        assert_eq!(push(&library, true).unwrap().files_written, 1);
+        assert_eq!(
+            push(&library, true, &Progress::default())
+                .unwrap()
+                .files_written,
+            1
+        );
         assert_eq!(
             fs::read(source(&library)).unwrap(),
             fs::read(working(&library)).unwrap()
@@ -1140,13 +1160,16 @@ mod tests {
         let before = fs::read(source(&library)).unwrap();
 
         fs::write(library.dir.join("Database2/m.db-wal"), b"uncommitted").unwrap();
-        assert!(matches!(push(&library, true), Err(SyncError::Busy)));
+        assert!(matches!(
+            push(&library, true, &Progress::default()),
+            Err(SyncError::Busy)
+        ));
         assert_eq!(fs::read(source(&library)).unwrap(), before);
         fs::remove_file(library.dir.join("Database2/m.db-wal")).unwrap();
 
         fs::rename(&library.dir, temp.0.join("gone")).unwrap();
         assert!(matches!(
-            push(&library, true),
+            push(&library, true, &Progress::default()),
             Err(SyncError::Unavailable(_))
         ));
     }
@@ -1166,7 +1189,10 @@ mod tests {
         fs::create_dir_all(library.dir.join("Database2/.m.db.syncing/in-the-way")).unwrap();
         let old_main = fs::read(source(&library)).unwrap();
 
-        assert!(matches!(push(&library, false), Err(SyncError::Failed(_))));
+        assert!(matches!(
+            push(&library, false, &Progress::default()),
+            Err(SyncError::Failed(_))
+        ));
         assert_eq!(
             fs::read(library.dir.join("Database2/hm.db")).unwrap(),
             b"history v1",

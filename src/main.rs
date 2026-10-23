@@ -16,6 +16,7 @@ mod model;
 mod navbar;
 mod player_bar;
 mod playlist_dialog;
+mod progress_view;
 mod reachable;
 mod recent;
 mod session;
@@ -141,6 +142,8 @@ struct State {
     delay_draft: Option<i32>,
     /// The window comparing the working copy with the source, while it is open.
     sync: Option<SyncStage>,
+    /// How far the sync that is writing has got, as the backend last said.
+    progress: Option<open_engine_api::v1::OperationProgress>,
     /// The window for syncing the playlists to another library, while it is open.
     library_sync: Option<LibrarySyncStage>,
     /// The window for adding or changing a smart playlist, while it is open.
@@ -283,6 +286,10 @@ pub enum Message {
     Status(Result<PlaybackStatus, String>),
     /// A fetched cover: the covers' generation it was asked in, its id and its image.
     CoverLoaded(u32, u32, Result<Option<Vec<u8>>, String>),
+    /// The sync that is running has got this far, as the backend last said.
+    ProgressUpdated(Result<open_engine_api::v1::OperationProgress, String>),
+    /// Time to ask the backend how far the sync is.
+    ProgressTick,
     /// Which of the paths in view can be reached, in the generation they were asked in.
     PathsChecked(u32, Vec<(String, bool)>),
     /// A fetched waveform: the waveforms' generation it was asked in, the track id and the waveform.
@@ -329,6 +336,7 @@ impl State {
             gain_draft: None,
             delay_draft: None,
             sync: None,
+            progress: None,
             library_sync: None,
             smart: None,
             playlist_dialog: None,
@@ -368,9 +376,16 @@ impl State {
         } else {
             Subscription::none()
         };
+        // While a sync is writing, ask how far it is.
+        let progress = if self.syncing() {
+            iced::time::every(progress_view::POLL_INTERVAL).map(|_| Message::ProgressTick)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             poll,
             resizing,
+            progress,
             iced::time::every(DRIVE_SCAN_INTERVAL).map(|_| Message::ScanDrives),
             iced::window::close_requests().map(Message::CloseRequested),
         ])
@@ -398,6 +413,12 @@ impl State {
         if let Some(Source::Playlist(index)) = self.play_source {
             self.play_source = change.map(index).map(Source::Playlist);
         }
+    }
+
+    /// Whether a sync is writing, so that how far it is gets asked.
+    fn syncing(&self) -> bool {
+        matches!(self.sync, Some(SyncStage::Syncing { .. }))
+            || matches!(self.library_sync, Some(LibrarySyncStage::Syncing { .. }))
     }
 
     /// Whether one of the windows that lie over the app is open. Only one is at a time.
@@ -872,6 +893,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             {
                 // Overwriting what was changed outside is allowed only if it was ticked.
                 let overwrite = diff.source_changed_outside;
+                state.progress = None;
                 state.sync = Some(SyncStage::Syncing {
                     diff: Arc::clone(diff),
                     acknowledged: *acknowledged,
@@ -1072,6 +1094,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 && let Some(backend) = state.backend()
             {
                 let (target, options, diff) = (target.clone(), *options, diff.clone());
+                state.progress = None;
                 state.library_sync = Some(LibrarySyncStage::Syncing {
                     target: target.clone(),
                     options,
@@ -1493,6 +1516,19 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 state.backend_error = Some(error);
             }
         },
+        Message::ProgressTick => {
+            if state.syncing()
+                && let Some(backend) = state.backend()
+            {
+                return Task::perform(backend::progress(backend), Message::ProgressUpdated);
+            }
+        }
+        Message::ProgressUpdated(result) => {
+            // (An answer that comes after the sync ended is not wanted.)
+            if state.syncing() {
+                state.progress = result.ok();
+            }
+        }
         Message::PathsChecked(generation, answers) => state.reachable.set(generation, answers),
         Message::CoverLoaded(generation, id, result) => match result {
             Ok(image) => state.covers.set(generation, id, image),
@@ -1533,7 +1569,11 @@ fn view(state: &State) -> Element<'_, Message> {
     // The sync window lies over the whole app, which is dimmed and can't be used meanwhile.
     // So do the windows for playlists (only one is open at a time).
     if let Some(stage) = &state.sync {
-        return iced::widget::stack![window, sync_view::modal(stage, language)].into();
+        return iced::widget::stack![
+            window,
+            sync_view::modal(stage, state.progress.as_ref(), language)
+        ]
+        .into();
     }
     if let Some(stage) = &state.library_sync {
         let current = match &state.library {
@@ -1545,8 +1585,11 @@ fn view(state: &State) -> Element<'_, Message> {
             drives: &state.drives,
             current,
         };
-        return iced::widget::stack![window, library_sync_view::modal(stage, sources, language)]
-            .into();
+        return iced::widget::stack![
+            window,
+            library_sync_view::modal(stage, sources, state.progress.as_ref(), language)
+        ]
+        .into();
     }
     if let Some(editor) = &state.smart {
         return iced::widget::stack![window, smart_editor::modal(editor, language)].into();
@@ -1858,6 +1901,7 @@ mod tests {
             gain_draft: None,
             delay_draft: None,
             sync: None,
+            progress: None,
             library_sync: None,
             smart: None,
             playlist_dialog: None,
@@ -2586,6 +2630,42 @@ mod tests {
             state.reachable.claim_unrequested(["/media/STICK/a.flac"]),
             ["/media/STICK/a.flac"]
         );
+    }
+
+    #[test]
+    fn how_far_a_sync_is_gets_asked_only_while_it_writes() {
+        let mut state = state();
+        let progress = |done: u64| open_engine_api::v1::OperationProgress {
+            running: true,
+            total_bytes: 100,
+            done_bytes: done,
+            ..Default::default()
+        };
+
+        // Not writing: an answer is not wanted, and nothing is asked.
+        assert!(!state.syncing());
+        let _ = handle(&mut state, Message::ProgressUpdated(Ok(progress(10))));
+        assert!(state.progress.is_none());
+
+        state.library_sync = Some(LibrarySyncStage::Syncing {
+            target: PathBuf::from("/media/STICK/Engine Library"),
+            options: library_sync_view::Options::default(),
+            diff: library_diff(1),
+        });
+        assert!(state.syncing());
+        let _ = handle(&mut state, Message::ProgressUpdated(Ok(progress(40))));
+        assert_eq!(state.progress.as_ref().map(|p| p.done_bytes), Some(40));
+        // A failed question just leaves the bar to say it is working.
+        let _ = handle(&mut state, Message::ProgressUpdated(Err("busy".into())));
+        assert!(state.progress.is_none());
+
+        // The sync with the source writes too.
+        state.library_sync = None;
+        state.sync = Some(SyncStage::Syncing {
+            diff: Arc::new(open_engine_api::v1::GetSyncDiffResponse::default()),
+            acknowledged: false,
+        });
+        assert!(state.syncing());
     }
 
     #[test]

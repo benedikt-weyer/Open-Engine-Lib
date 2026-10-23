@@ -18,6 +18,7 @@ use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, EditError, Library, OpenError};
 use crate::mirror::{self, MirrorError};
 use crate::player::Start;
+use crate::progress::{Phase, Progress};
 use crate::save::{self, SaveError};
 use crate::smartlist::Rules;
 use crate::sync::{self, SyncError};
@@ -58,6 +59,8 @@ struct Shared {
     engine: Engine,
     /// Where copies of the libraries' databases are kept.
     cache_root: PathBuf,
+    /// How far the sync that is running has got.
+    progress: Progress,
 }
 
 #[derive(Clone)]
@@ -70,6 +73,7 @@ impl Service {
             waveforms: Mutex::new(WaveformCache::default()),
             engine,
             cache_root,
+            progress: Progress::default(),
         }))
     }
 
@@ -187,10 +191,14 @@ impl LibraryService for Service {
     ) -> Result<Response<api::SyncToSourceResponse>, Status> {
         let library = self.library()?;
         let overwrite = request.into_inner().overwrite_outside_changes;
-        let done = tokio::task::spawn_blocking(move || sync::push(&library, overwrite))
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?
-            .map_err(sync_status)?;
+        let progress = self.0.progress.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            let _running = progress.begin();
+            sync::push(&library, overwrite, &progress)
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map_err(sync_status)?;
         Ok(Response::new(done))
     }
 
@@ -362,7 +370,9 @@ impl LibraryService for Service {
         let library = self.library()?;
         let request = request.into_inner();
         let scratch = self.0.cache_root.clone();
+        let progress = self.0.progress.clone();
         tokio::task::spawn_blocking(move || {
+            let _running = progress.begin();
             mirror::push(
                 &library,
                 std::path::Path::new(&request.target_path),
@@ -373,12 +383,36 @@ impl LibraryService for Service {
                     request.sync_locations,
                     request.copy_tracks,
                 ),
+                &progress,
             )
         })
         .await
         .map_err(|error| Status::internal(error.to_string()))?
         .map(Response::new)
         .map_err(mirror_status)
+    }
+
+    async fn get_progress(
+        &self,
+        _: Request<api::GetProgressRequest>,
+    ) -> Result<Response<api::OperationProgress>, Status> {
+        let snapshot = self.0.progress.snapshot();
+        Ok(Response::new(api::OperationProgress {
+            running: snapshot.running,
+            phase: match snapshot.phase {
+                Phase::Idle => api::ProgressPhase::Unspecified,
+                Phase::Preparing => api::ProgressPhase::Preparing,
+                Phase::CopyingTracks => api::ProgressPhase::CopyingTracks,
+                Phase::Updating => api::ProgressPhase::Updating,
+                Phase::Writing => api::ProgressPhase::Writing,
+            }
+            .into(),
+            done_bytes: snapshot.done_bytes,
+            total_bytes: snapshot.total_bytes,
+            done_files: snapshot.done_files,
+            total_files: snapshot.total_files,
+            current: snapshot.current,
+        }))
     }
 
     async fn close_library(

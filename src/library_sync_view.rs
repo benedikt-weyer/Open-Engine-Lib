@@ -8,12 +8,13 @@ use iced::widget::{
     Space, button, center, checkbox, column, container, opaque, row, scrollable, text,
 };
 use iced::{Color, Element, Fill, Theme};
-use open_engine_api::v1::{GetLibrarySyncDiffResponse, SyncToLibraryResponse};
+use open_engine_api::v1::{GetLibrarySyncDiffResponse, OperationProgress, SyncToLibraryResponse};
 
 use crate::Message;
 use crate::config::Language;
 use crate::drives::Drive;
 use crate::i18n::fill;
+use crate::progress_view::{self, format_size};
 use crate::recent::{Recents, display_name};
 use crate::sync_view::{describe, playlist_change, track_change};
 
@@ -127,6 +128,7 @@ pub struct Sources<'a> {
 pub fn modal<'a>(
     stage: &'a Stage,
     sources: Sources<'a>,
+    progress: Option<&'a OperationProgress>,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -183,7 +185,7 @@ pub fn modal<'a>(
         } => ready(diff, *options, error.as_deref(), true, language),
         Stage::Syncing { options, diff, .. } => column![
             ready(diff, *options, None, false, language),
-            text(&strings.libsync_writing),
+            progress_view::view(progress, language),
         ]
         .spacing(12)
         .into(),
@@ -411,22 +413,6 @@ fn ready<'a>(
     .spacing(10);
 
     column![content, buttons].spacing(14).into()
-}
-
-/// `1.4 GB`, `23.0 MB`, `512 B`: a size for people.
-fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 /// The scrolling list of what would change: playlists, tracks to add, tracks that change.

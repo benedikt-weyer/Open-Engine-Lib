@@ -91,6 +91,10 @@ service LibraryService {
   // with the changes, after the old one was kept in `open-engine-lib-backup` next to it.
   // Errors as for `GetLibrarySyncDiff`.
   rpc SyncToLibrary(SyncToLibraryRequest) returns (SyncToLibraryResponse);
+  // How far the sync that is running (`SyncToSource`, `SyncToLibrary`) has got, to be
+  // asked again and again while it runs. Not running: `running` is false and the rest is
+  // empty. Does not need a library to be open.
+  rpc GetProgress(GetProgressRequest) returns (OperationProgress);
   // Closes the library and stops playback. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
@@ -262,6 +266,32 @@ message SyncToLibraryResponse {
   uint32 tracks_added = 6;
   uint32 tracks_changed = 7;
   uint32 files_copied = 8;
+}
+
+message GetProgressRequest {}
+
+message OperationProgress {
+  bool running = 1;
+  ProgressPhase phase = 2;
+  // In the current phase: bytes copied and to copy. Both 0 for a phase that copies none.
+  uint64 done_bytes = 3;
+  uint64 total_bytes = 4;
+  // Of the audio files of the phase.
+  uint32 done_files = 5;
+  uint32 total_files = 6;
+  // The file that is being copied.
+  string current = 7;
+}
+
+enum ProgressPhase {
+  PROGRESS_PHASE_UNSPECIFIED = 0;
+  // Making a copy of the other library's database to work on.
+  PROGRESS_PHASE_PREPARING = 1;
+  PROGRESS_PHASE_COPYING_TRACKS = 2;
+  // Changing the tracks, playlists and origins in that copy.
+  PROGRESS_PHASE_UPDATING = 3;
+  // Keeping the old databases and putting the new ones in place.
+  PROGRESS_PHASE_WRITING = 4;
 }
 
 message CloseLibraryRequest {}

@@ -20,12 +20,12 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
     GetAlbumArtRequest, GetInfoRequest, GetLibrarySyncDiffRequest, GetLibrarySyncDiffResponse,
-    GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest,
-    ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse, NextRequest,
-    OpenLibraryRequest, PlayRequest, PlaybackStatus, PreviousRequest, RenamePlaylistRequest,
-    SaveLibraryAsRequest, SeekRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
-    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
-    TogglePauseRequest, UpdateSmartPlaylistRequest,
+    GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest,
+    ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
+    NextRequest, OpenLibraryRequest, OperationProgress, PlayRequest, PlaybackStatus,
+    PreviousRequest, RenamePlaylistRequest, SaveLibraryAsRequest, SeekRequest, SetRatingRequest,
+    SmartRules, SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
+    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -577,6 +577,16 @@ pub async fn sync_to_library(
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,
         })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// How far the sync that is running has got.
+pub async fn progress(mut backend: Backend) -> Result<OperationProgress, String> {
+    backend
+        .library
+        .get_progress(GetProgressRequest {})
         .await
         .map(|response| response.into_inner())
         .map_err(describe)

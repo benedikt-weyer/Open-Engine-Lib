@@ -15,6 +15,7 @@ mod library;
 mod mirror;
 mod origins;
 mod player;
+mod progress;
 mod save;
 mod service;
 mod smartlist;

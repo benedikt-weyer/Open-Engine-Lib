@@ -7,8 +7,8 @@ use iced::widget::{
 };
 use iced::{Color, Element, Fill, Theme};
 use open_engine_api::v1::{
-    GetSyncDiffResponse, PlaylistChange, PlaylistChangeKind, SyncToSourceResponse, TrackChange,
-    TrackRef,
+    GetSyncDiffResponse, OperationProgress, PlaylistChange, PlaylistChangeKind,
+    SyncToSourceResponse, TrackChange, TrackRef,
 };
 
 use crate::Message;
@@ -58,7 +58,11 @@ pub fn can_sync(diff: &GetSyncDiffResponse, acknowledged: bool) -> bool {
 }
 
 /// The window, centred over a dimmed view of the app that can't be clicked.
-pub fn modal<'a>(stage: &'a Stage, language: Language) -> Element<'a, Message> {
+pub fn modal<'a>(
+    stage: &'a Stage,
+    progress: Option<&'a OperationProgress>,
+    language: Language,
+) -> Element<'a, Message> {
     let strings = language.strings();
 
     let body: Element<'a, Message> = match stage {
@@ -78,7 +82,7 @@ pub fn modal<'a>(stage: &'a Stage, language: Language) -> Element<'a, Message> {
             acknowledged,
             error,
         } => ready(diff, *acknowledged, error.as_deref(), language),
-        Stage::Syncing { .. } => text(&strings.sync_writing).into(),
+        Stage::Syncing { .. } => crate::progress_view::view(progress, language),
         Stage::Done(done) => {
             let message = if done.files_written == 0 {
                 strings.sync_nothing_written.clone()

@@ -12,10 +12,10 @@ use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, CreateSmartPlaylistRequest, GetAlbumArtRequest, GetInfoRequest,
-    GetSyncDiffRequest, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest,
-    MigrateOriginsRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind, PlaybackState,
-    SaveLibraryAsRequest, SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest,
-    UpdateSmartPlaylistRequest,
+    GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest, ListPlaylistsRequest,
+    ListTracksRequest, MigrateOriginsRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind,
+    PlaybackState, SaveLibraryAsRequest, SetRatingRequest, SmartRule, SmartRules,
+    SyncToSourceRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -521,6 +521,18 @@ async fn remembers_where_tracks_were_in_its_own_database() {
         tracks
     };
     assert_eq!(origins(list(library.clone()).await), [None, None, None]);
+
+    // Nothing is running.
+    let idle = library
+        .get_progress(GetProgressRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!idle.running);
+    assert_eq!(
+        (idle.total_bytes, idle.done_files, idle.current.as_str()),
+        (0, 0, "")
+    );
 
     // Tracks 1 and 2 have files here; 3 is a streaming track.
     let done = library

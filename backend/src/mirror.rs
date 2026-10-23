@@ -20,6 +20,7 @@ use open_engine_api::v1 as api;
 use crate::cache::DATABASE_DIR;
 use crate::library::{self, EditError, Library, OpenError, Playlist};
 use crate::origins;
+use crate::progress::{Phase, Progress};
 use crate::sync::{BACKUP_DIR, is_busy};
 use crate::track_sync;
 
@@ -129,7 +130,12 @@ struct Work {
     tracks: track_sync::Report,
 }
 
-fn prepare(source: &Library, target: &Path, scratch_root: &Path) -> Result<Copy, MirrorError> {
+fn prepare(
+    source: &Library,
+    target: &Path,
+    scratch_root: &Path,
+    progress: &Progress,
+) -> Result<Copy, MirrorError> {
     let dir = library::locate(target).ok_or_else(|| MirrorError::NotALibrary(target.into()))?;
     let same = match (fs::canonicalize(&dir), fs::canonicalize(&source.dir)) {
         (Ok(a), Ok(b)) => a == b,
@@ -146,14 +152,25 @@ fn prepare(source: &Library, target: &Path, scratch_root: &Path) -> Result<Copy,
     let scratch = scratch_root.join(SCRATCH_DIR);
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(scratch.join(DATABASE_DIR))?;
-    fs::copy(
-        databases.join(MAIN_DATABASE),
-        scratch.join(DATABASE_DIR).join(MAIN_DATABASE),
+    let origins = databases.join(origins::FILE);
+    let size = |path: &Path| fs::metadata(path).map_or(0, |metadata| metadata.len());
+    progress.phase(
+        Phase::Preparing,
+        size(&databases.join(MAIN_DATABASE)) + size(&origins),
+        0,
+    );
+    progress.copy(
+        &databases.join(MAIN_DATABASE),
+        &scratch.join(DATABASE_DIR).join(MAIN_DATABASE),
+        false,
     )?;
     // The origins it has, if any, to be changed along with the playlists.
-    let origins = databases.join(origins::FILE);
     if origins.is_file() {
-        fs::copy(&origins, scratch.join(DATABASE_DIR).join(origins::FILE))?;
+        progress.copy(
+            &origins,
+            &scratch.join(DATABASE_DIR).join(origins::FILE),
+            false,
+        )?;
     }
     Ok(Copy { dir, scratch })
 }
@@ -166,6 +183,7 @@ fn work(
     copy: &Copy,
     options: Options,
     copy_files: bool,
+    progress: &Progress,
 ) -> Result<Work, MirrorError> {
     let tracks = if options.tracks.any() {
         let probe = copy.open()?;
@@ -177,10 +195,12 @@ fn work(
             &copy.database(),
             options.tracks,
             copy_files,
+            progress,
         )?
     } else {
         track_sync::Report::default()
     };
+    progress.phase(Phase::Updating, 0, 0);
     let library = match copy.open() {
         Ok(library) => library,
         Err(error) => {
@@ -212,8 +232,10 @@ pub fn diff(
     scratch_root: &Path,
     options: Options,
 ) -> Result<api::GetLibrarySyncDiffResponse, MirrorError> {
-    let copy = prepare(source, target, scratch_root)?;
-    let Work { outcome, tracks } = work(source, &copy, options, false)?;
+    // (A diff is quick and nobody asks how far it is.)
+    let progress = Progress::default();
+    let copy = prepare(source, target, scratch_root, &progress)?;
+    let Work { outcome, tracks } = work(source, &copy, options, false, &progress)?;
     let dir = copy.dir.display().to_string();
     let scratch = copy.scratch.clone();
     drop(copy);
@@ -267,9 +289,10 @@ pub fn push(
     target: &Path,
     scratch_root: &Path,
     options: Options,
+    progress: &Progress,
 ) -> Result<api::SyncToLibraryResponse, MirrorError> {
-    let copy = prepare(source, target, scratch_root)?;
-    let Work { outcome, tracks } = work(source, &copy, options, true)?;
+    let copy = prepare(source, target, scratch_root, progress)?;
+    let Work { outcome, tracks } = work(source, &copy, options, true, progress)?;
     let Copy { dir, scratch } = copy;
 
     let mut response = api::SyncToLibraryResponse {
@@ -293,7 +316,7 @@ pub fn push(
     }
     if !changed.is_empty() {
         let databases = dir.join(DATABASE_DIR);
-        let result = install(&databases, &scratch, &changed);
+        let result = install(&databases, &scratch, &changed, progress);
         let _ = fs::remove_dir_all(&scratch);
         match result {
             Ok(backup) => response.backup_path = backup.display().to_string(),
@@ -310,18 +333,32 @@ pub fn push(
 
 /// Puts the changed databases from the copy in `scratch` into the library's `databases`
 /// folder, after keeping the ones they replace in a backup folder, which is returned.
-fn install(databases: &Path, scratch: &Path, changed: &[&str]) -> Result<PathBuf, MirrorError> {
+fn install(
+    databases: &Path,
+    scratch: &Path,
+    changed: &[&str],
+    progress: &Progress,
+) -> Result<PathBuf, MirrorError> {
     // Another program may have started writing since the copy was made.
     if is_busy(databases) {
         return Err(MirrorError::Busy);
     }
     // Keep what is about to be replaced. (One backup, the latest.)
     let backup = databases.join(BACKUP_DIR);
+    let size = |path: PathBuf| fs::metadata(path).map_or(0, |metadata| metadata.len());
+    progress.phase(
+        Phase::Writing,
+        changed
+            .iter()
+            .map(|name| size(databases.join(name)) + size(scratch.join(DATABASE_DIR).join(name)))
+            .sum(),
+        0,
+    );
     let _ = fs::remove_dir_all(&backup);
     fs::create_dir_all(&backup)?;
     for name in changed {
         if databases.join(name).is_file() {
-            fs::copy(databases.join(name), backup.join(name))?;
+            progress.copy(&databases.join(name), &backup.join(name), false)?;
         }
     }
 
@@ -330,7 +367,8 @@ fn install(databases: &Path, scratch: &Path, changed: &[&str]) -> Result<PathBuf
     let mut replaced: Vec<&str> = Vec::new();
     for name in changed {
         let temporary = databases.join(format!(".{name}.syncing"));
-        let result = fs::copy(scratch.join(DATABASE_DIR).join(name), &temporary)
+        let result = progress
+            .copy(&scratch.join(DATABASE_DIR).join(name), &temporary, false)
             .and_then(|_| fs::rename(&temporary, databases.join(name)));
         if let Err(error) = result {
             let _ = fs::remove_file(&temporary);
@@ -820,7 +858,14 @@ mod tests {
         let before = fs::read(stick.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap();
         let source = open(&pc, &temp.0.join("source-scratch"));
 
-        let done = push(&source, &stick, &temp.0.join("scratch"), remove(false)).unwrap();
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            remove(false),
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!((done.playlists_changed, done.tracks_missing), (4, 1));
         let backup = stick
             .join(DATABASE_DIR)
@@ -865,7 +910,14 @@ mod tests {
         );
 
         // Pushing again has nothing left to do and writes nothing.
-        let again = push(&source, &stick, &temp.0.join("scratch"), remove(false)).unwrap();
+        let again = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            remove(false),
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!(
             (again.playlists_changed, again.backup_path.as_str()),
             (0, "")
@@ -887,7 +939,14 @@ mod tests {
             .unwrap();
         assert_eq!(mine.kind(), api::PlaylistChangeKind::Removed);
 
-        push(&source, &stick, &temp.0.join("scratch"), remove(true)).unwrap();
+        push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            remove(true),
+            &Progress::default(),
+        )
+        .unwrap();
         let after = open(&stick, &temp.0.join("check"));
         assert!(!lists(&after).iter().any(|(n, _)| n == "Mine"));
     }
@@ -972,7 +1031,14 @@ mod tests {
             "a is new and b differs; c has no match"
         );
 
-        let done = push(&source, &stick, &scratch, remove(false)).unwrap();
+        let done = push(
+            &source,
+            &stick,
+            &scratch,
+            remove(false),
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!(done.origins_changed, 2);
         let written = origins::Origins::open(&stick.join(DATABASE_DIR).join(origins::FILE))
             .unwrap()
@@ -992,7 +1058,14 @@ mod tests {
             "the playlists changed as well"
         );
 
-        let again = push(&source, &stick, &scratch, remove(false)).unwrap();
+        let again = push(
+            &source,
+            &stick,
+            &scratch,
+            remove(false),
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!((again.playlists_changed, again.origins_changed), (0, 0));
     }
 
@@ -1009,7 +1082,14 @@ mod tests {
             .unwrap();
         let before = fs::read(stick.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap();
 
-        let done = push(&source, &stick, &temp.0.join("scratch"), remove(false)).unwrap();
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            remove(false),
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!((done.playlists_changed, done.origins_changed), (0, 1));
         assert_eq!(
             fs::read(stick.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap(),
@@ -1108,7 +1188,14 @@ mod tests {
         );
         assert_eq!((found.tracks_added, found.files_to_copy), (0, 0));
 
-        let done = push(&source, &stick, &temp.0.join("scratch"), options).unwrap();
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!(done.tracks_changed, 1);
         let after = open(&stick, &temp.0.join("check"));
         assert_eq!(
@@ -1127,9 +1214,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            push(&source, &stick, &temp.0.join("scratch"), options)
-                .unwrap()
-                .tracks_changed,
+            push(
+                &source,
+                &stick,
+                &temp.0.join("scratch"),
+                options,
+                &Progress::default()
+            )
+            .unwrap()
+            .tracks_changed,
             0
         );
     }
@@ -1177,7 +1270,14 @@ mod tests {
             "b would get a's old path, which a has"
         );
 
-        push(&source, &stick, &temp.0.join("scratch"), options).unwrap();
+        push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
         let after = open(&stick, &temp.0.join("check"));
         let paths: Vec<_> = after
             .tracks
@@ -1237,7 +1337,14 @@ mod tests {
             .unwrap();
         assert_eq!((mix.tracks_added, mix.tracks_missing), (2, 0));
 
-        let done = push(&source, &stick, &temp.0.join("scratch"), options).unwrap();
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!(
             (done.tracks_added, done.tracks_changed, done.files_copied),
             (1, 2, 3)
@@ -1291,7 +1398,14 @@ mod tests {
         assert_eq!(performance, 3);
 
         // A second time everything is there.
-        let again = push(&source, &stick, &temp.0.join("scratch"), options).unwrap();
+        let again = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!(
             (
                 again.tracks_added,
@@ -1326,7 +1440,14 @@ mod tests {
             ..Default::default()
         });
 
-        let done = push(&source, &stick, &temp.0.join("scratch"), options).unwrap();
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
         assert_eq!((done.tracks_added, done.files_copied), (2, 2));
         let found = diff(&source, &stick, &temp.0.join("scratch"), options).unwrap();
         assert_eq!(found.files_missing, 1, "gone.mp3 has no file");
@@ -1348,6 +1469,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_progress_follows_the_phases_and_the_bytes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let temp = TempDir::new("progress");
+        let (pc, stick) = with_files(&temp.0);
+        // A file big enough to be copied in more than one step.
+        fs::write(
+            temp.0.join("pc/Music/c.flac"),
+            vec![1u8; 3 * 1024 * 1024 + 5],
+        )
+        .unwrap();
+        let source = open_source(&pc, &temp.0.join("source"));
+        let options = tracks(track_sync::Options {
+            copy_tracks: true,
+            ..Default::default()
+        });
+        let progress = Progress::default();
+        let finished = AtomicBool::new(false);
+
+        let seen = std::thread::scope(|scope| {
+            let sampler = scope.spawn(|| {
+                let mut seen = Vec::new();
+                while !finished.load(Ordering::Relaxed) {
+                    seen.push(progress.snapshot());
+                    std::thread::yield_now();
+                }
+                seen
+            });
+            let _running = progress.begin();
+            let done = push(&source, &stick, &temp.0.join("scratch"), options, &progress);
+            let last = progress.snapshot();
+            finished.store(true, Ordering::Relaxed);
+            assert!(done.is_ok());
+            (sampler.join().unwrap(), last)
+        });
+        let (seen, last) = seen;
+
+        // Whatever was seen made sense: never more done than to do.
+        assert!(seen.iter().all(|s| s.done_bytes <= s.total_bytes));
+        assert!(seen.iter().all(|s| s.done_files <= s.total_files));
+        // The copying of the tracks was seen: 3 files, the big one and two small ones.
+        let copying: Vec<_> = seen
+            .iter()
+            .filter(|s| s.phase == Phase::CopyingTracks)
+            .collect();
+        assert!(!copying.is_empty(), "the copying phase was not seen");
+        assert!(copying.iter().all(|s| s.total_files == 3));
+        assert!(
+            copying
+                .iter()
+                .all(|s| s.total_bytes == 4 + 2 + 3 * 1024 * 1024 + 5)
+        );
+        // At the end the databases were written, all of it.
+        assert_eq!(last.phase, Phase::Writing);
+        assert!(last.total_bytes > 0 && last.done_bytes == last.total_bytes);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_failed_sync_takes_the_copied_files_away_again() {
@@ -1367,7 +1546,13 @@ mod tests {
         // The files are copied before the database is put in place; when that cannot be
         // done (the database folder can't be written to), they are taken away again.
         fs::set_permissions(&databases, fs::Permissions::from_mode(0o555)).unwrap();
-        let result = push(&source, &stick, &temp.0.join("scratch"), options);
+        let result = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        );
         fs::set_permissions(&databases, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(result.is_err());
