@@ -203,3 +203,20 @@ progress_updating: Titel, Playlists und Herkünfte werden geändert…
 progress_writing: Datenbanken werden geschrieben…
 progress_bytes: "{done} von {total}"
 progress_files: "{done} von {total} Dateien"
+sync_direction_push: Die Arbeitskopie in die Quelle schreiben
+sync_direction_pull: Die Arbeitskopie durch die Quelle ersetzen (Rückabgleich)
+sync_pull_run: Arbeitskopie ersetzen
+sync_pull_hint: "Die Arbeitskopie wird so, wie die Quelle ist. Änderungen, die noch nicht abgeglichen waren, werden im Cache-Ordner aufbewahrt. In die Quelle wird nichts geschrieben."
+sync_pull_done: "Die Arbeitskopie entspricht jetzt der Quelle. Nicht abgeglichene Änderungen liegen in {path}"
+sync_pull_done_clean: Die Arbeitskopie entspricht jetzt der Quelle.
+libsync_direction_forward: Von der geöffneten Bibliothek in die andere kopieren
+libsync_direction_reverse: Aus der anderen Bibliothek in die geöffnete kopieren (Rückabgleich)
+libsync_from: "Abgleich von: {path}"
+libsync_hint_reverse: "Die Arbeitskopie der geöffneten Bibliothek bekommt die Playlists und Smart-Playlists der anderen und die unten angehakten Dinge. In die geöffnete Bibliothek selbst wird erst geschrieben, wenn du mit der Quelle abgleichst."
+libsync_remove_reverse: Auch Playlists löschen, die nur die geöffnete Bibliothek hat
+libsync_stars_reverse: Die Sterne auf die der anderen Bibliothek setzen
+libsync_locations_reverse: Die Orte (Pfade) mit denen der anderen Bibliothek überschreiben
+libsync_copy_reverse: "Die Titel in einen Ordner Engine-Tracks (Interpret/Album) neben der geöffneten Bibliothek kopieren und fehlende hinzufügen"
+libsync_run_reverse: In die geöffnete Bibliothek kopieren
+libsync_done_reverse: "Fertig: {count} Playlists, {tracks} Titel und {origins} Herkünfte in der Arbeitskopie geändert, {files} Dateien kopiert. Mit „Mit der Quelle abgleichen“ schreibst du sie in die Bibliothek. Die Arbeitskopie davor liegt in {backup}"
+progress_pulling: Die Datenbanken der Quelle werden geholt…

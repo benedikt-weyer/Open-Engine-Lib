@@ -38,6 +38,14 @@ service LibraryService {
   // changed by someone else since the working copy was made and
   // `overwrite_outside_changes` is not set; INTERNAL if writing fails.
   rpc SyncToSource(SyncToSourceRequest) returns (SyncToSourceResponse);
+  // Replaces the working copy by the library at its source (the reverse of
+  // `SyncToSource`): edits that were not synced are kept in `unsynced-edits` in the cache
+  // folder. The library that is open is replaced by one read from the new working copy,
+  // so track and playlist ids must be fetched again (tracks only get new ids if the source
+  // has other tracks).
+  // Errors: FAILED_PRECONDITION if no library is open, the source can't be reached or is in
+  // use; INTERNAL if copying fails.
+  rpc PullFromSource(PullFromSourceRequest) returns (PullFromSourceResponse);
   // Sets a track's star rating in the working copy. The source is not touched until
   // `SyncToSource`, and `ListTracks` answers with the new rating from now on.
   // Errors: FAILED_PRECONDITION if no library is open, INVALID_ARGUMENT for a rating
@@ -221,6 +229,14 @@ message GetLibrarySyncDiffRequest {
   // that exFAT accepts, and the tracks' paths there lead to the copies. Tracks the other
   // library lacks are added to it. Replaces `sync_locations`.
   bool copy_tracks = 5;
+  // The other way round: the other library is the master and the open library's working
+  // copy gets what is different (playlists, stars, locations, tracks, origins), as a
+  // change to be synced to the open library's source afterwards. The files of copied
+  // tracks go to `Engine-Tracks` beside the open library's `Engine Library` folder. The
+  // fields of the response then describe the open library's changes. After a change the
+  // open library is replaced by one read from the new working copy, as with
+  // `PullFromSource`.
+  bool reverse = 6;
 }
 // Lists are cut at 200 entries, the counts are complete.
 message GetLibrarySyncDiffResponse {
@@ -255,6 +271,8 @@ message SyncToLibraryRequest {
   bool sync_stars = 3;
   bool sync_locations = 4;
   bool copy_tracks = 5;
+  // As for `GetLibrarySyncDiffRequest`.
+  bool reverse = 6;
 }
 message SyncToLibraryResponse {
   string target_path = 1;
@@ -266,6 +284,13 @@ message SyncToLibraryResponse {
   uint32 tracks_added = 6;
   uint32 tracks_changed = 7;
   uint32 files_copied = 8;
+}
+
+message PullFromSourceRequest {}
+message PullFromSourceResponse {
+  uint32 files_written = 1;
+  // Where the edits that had not been synced were kept; empty if there were none.
+  string kept_edits_path = 2;
 }
 
 message GetProgressRequest {}
@@ -292,6 +317,8 @@ enum ProgressPhase {
   PROGRESS_PHASE_UPDATING = 3;
   // Keeping the old databases and putting the new ones in place.
   PROGRESS_PHASE_WRITING = 4;
+  // Copying the source's databases into the working copy (`PullFromSource`).
+  PROGRESS_PHASE_PULLING = 5;
 }
 
 message CloseLibraryRequest {}
@@ -447,7 +474,13 @@ message BeatMarker {
   int64 beat_number = 2;
 }
 
-message GetSyncDiffRequest {}
+message GetSyncDiffRequest {
+  // The other way round: what would change in the working copy if it were replaced by the
+  // source (`PullFromSource`). Then "added" is in the source and not in the working copy,
+  // and in a change `source_value` is the working copy's value and `working_value` the
+  // source's, i.e. what the working copy would get.
+  bool reverse = 1;
+}
 
 // What syncing would do to the source. "Added" is in the working copy and not in the
 // source, so syncing adds it there; "removed" is in the source and not in the working

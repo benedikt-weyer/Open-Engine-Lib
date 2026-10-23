@@ -203,3 +203,20 @@ progress_updating: Changing the tracks, playlists and origins…
 progress_writing: Writing the databases…
 progress_bytes: "{done} of {total}"
 progress_files: "{done} of {total} files"
+sync_direction_push: Write the working copy to the source
+sync_direction_pull: Replace the working copy with the source (back-sync)
+sync_pull_run: Replace the working copy
+sync_pull_hint: "The working copy becomes what the source is. Edits that were not synced yet are kept aside in the cache folder. Nothing is written to the source."
+sync_pull_done: "The working copy now matches the source. Edits that were not synced are kept in {path}"
+sync_pull_done_clean: The working copy now matches the source.
+libsync_direction_forward: Copy from the open library to the other one
+libsync_direction_reverse: Copy from the other library into the open one (back-sync)
+libsync_from: "Syncing from: {path}"
+libsync_hint_reverse: "The working copy of the open library gets the playlists and smart playlists of the other one, and the ticked things below. Nothing is written to the open library itself until you sync with the source."
+libsync_remove_reverse: Also delete playlists that only the open library has
+libsync_stars_reverse: Set the stars to those of the other library
+libsync_locations_reverse: Overwrite the locations (paths) with those of the other library
+libsync_copy_reverse: "Copy the tracks into an Engine-Tracks folder (Artist/Album) beside the open library, and add the ones it lacks"
+libsync_run_reverse: Copy into the open library
+libsync_done_reverse: "Done: {count} playlists, {tracks} tracks and {origins} origins changed in the working copy, {files} files copied. Use “Sync with the source” to write them to the library. The working copy before is kept in {backup}"
+progress_pulling: Getting the databases of the source…

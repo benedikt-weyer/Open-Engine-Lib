@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use open_engine_api::v1 as api;
 
+use crate::cache;
 use crate::cache::DATABASE_DIR;
 use crate::library::{self, EditError, Library, OpenError, Playlist};
 use crate::origins;
@@ -26,6 +27,9 @@ use crate::track_sync;
 
 const MAIN_DATABASE: &str = "m.db";
 const SCRATCH_DIR: &str = "library-sync";
+/// Where the working copy it replaces is kept, in the cache folder, by a sync the other
+/// way round.
+const BACK_SYNC_BACKUP: &str = "before-back-sync";
 /// Lists are cut at this many entries; the counts are complete.
 const MAX_LISTED: usize = 200;
 
@@ -94,6 +98,9 @@ pub struct Options {
     /// Also delete playlists and smart playlists that only the other library has.
     pub remove_missing: bool,
     pub tracks: track_sync::Options,
+    /// The other way round: the other library is the master and the open library's
+    /// working copy is changed.
+    pub reverse: bool,
 }
 
 /// What the work on the copy found.
@@ -130,49 +137,133 @@ struct Work {
     tracks: track_sync::Report,
 }
 
+/// Where the result of a sync goes.
+struct Place {
+    /// The `Database2` folder the changed databases are put in.
+    databases: PathBuf,
+    /// Where the ones they replace are kept.
+    backup: PathBuf,
+    /// Whether another program writing there is a reason to refuse (it is for a library,
+    /// not for a working copy).
+    check_busy: bool,
+}
+
+/// Everything a sync starts from.
+struct Prepared {
+    /// The folder the work is done in, with `target` and `master` in it.
+    base: PathBuf,
+    /// The other library's `Engine Library` folder.
+    other: PathBuf,
+    /// The library that is changed, as a copy to work on.
+    copy: Copy,
+    place: Place,
+    /// The library whose state is wanted, if it is not the open one: the other library, as
+    /// a copy, for a sync the other way round.
+    master: Option<Library>,
+}
+
+impl Prepared {
+    /// The library whose state is wanted.
+    fn master<'a>(&'a self, open: &'a Library) -> &'a Library {
+        self.master.as_ref().unwrap_or(open)
+    }
+}
+
+/// Copies the main database and the origins of the `Database2` folder `from` to the same
+/// place in `to`, which is made.
+fn copy_databases(from: &Path, to: &Path, progress: &Progress) -> Result<(), MirrorError> {
+    fs::create_dir_all(to.join(DATABASE_DIR))?;
+    for name in [MAIN_DATABASE, origins::FILE] {
+        if from.join(name).is_file() {
+            progress.copy(&from.join(name), &to.join(DATABASE_DIR).join(name), false)?;
+        }
+    }
+    Ok(())
+}
+
+/// What the files to be copied add up to.
+fn databases_size(databases: &Path) -> u64 {
+    [MAIN_DATABASE, origins::FILE]
+        .iter()
+        .map(|name| fs::metadata(databases.join(name)).map_or(0, |metadata| metadata.len()))
+        .sum()
+}
+
 fn prepare(
-    source: &Library,
-    target: &Path,
+    open: &Library,
+    other: &Path,
     scratch_root: &Path,
+    reverse: bool,
     progress: &Progress,
-) -> Result<Copy, MirrorError> {
-    let dir = library::locate(target).ok_or_else(|| MirrorError::NotALibrary(target.into()))?;
-    let same = match (fs::canonicalize(&dir), fs::canonicalize(&source.dir)) {
+) -> Result<Prepared, MirrorError> {
+    let dir = library::locate(other).ok_or_else(|| MirrorError::NotALibrary(other.into()))?;
+    let same = match (fs::canonicalize(&dir), fs::canonicalize(&open.dir)) {
         (Ok(a), Ok(b)) => a == b,
-        _ => dir == source.dir,
+        _ => dir == open.dir,
     };
     if same {
         return Err(MirrorError::SameLibrary);
     }
-    let databases = dir.join(DATABASE_DIR);
-    if is_busy(&databases) {
+    let other_databases = dir.join(DATABASE_DIR);
+    if is_busy(&other_databases) {
         return Err(MirrorError::Busy);
     }
 
-    let scratch = scratch_root.join(SCRATCH_DIR);
-    let _ = fs::remove_dir_all(&scratch);
-    fs::create_dir_all(scratch.join(DATABASE_DIR))?;
-    let origins = databases.join(origins::FILE);
-    let size = |path: &Path| fs::metadata(path).map_or(0, |metadata| metadata.len());
+    let base = scratch_root.join(SCRATCH_DIR);
+    let _ = fs::remove_dir_all(&base);
+    let (target_scratch, master_scratch) = (base.join("target"), base.join("master"));
+
+    // What is changed is a copy of the other library's databases; the other way round it is
+    // a copy of the working copy of the open one, and the other library is only read.
+    let (changed, place) = if reverse {
+        let working = open.cache.join(DATABASE_DIR);
+        let place = Place {
+            databases: working.clone(),
+            backup: open.cache.join(BACK_SYNC_BACKUP),
+            check_busy: false,
+        };
+        (working, place)
+    } else {
+        let place = Place {
+            databases: other_databases.clone(),
+            backup: other_databases.join(BACKUP_DIR),
+            check_busy: true,
+        };
+        (other_databases.clone(), place)
+    };
     progress.phase(
         Phase::Preparing,
-        size(&databases.join(MAIN_DATABASE)) + size(&origins),
+        databases_size(&changed)
+            + if reverse {
+                databases_size(&other_databases)
+            } else {
+                0
+            },
         0,
     );
-    progress.copy(
-        &databases.join(MAIN_DATABASE),
-        &scratch.join(DATABASE_DIR).join(MAIN_DATABASE),
-        false,
-    )?;
-    // The origins it has, if any, to be changed along with the playlists.
-    if origins.is_file() {
-        progress.copy(
-            &origins,
-            &scratch.join(DATABASE_DIR).join(origins::FILE),
-            false,
-        )?;
-    }
-    Ok(Copy { dir, scratch })
+    copy_databases(&changed, &target_scratch, progress)?;
+    let master = if reverse {
+        copy_databases(&other_databases, &master_scratch, progress)?;
+        Some(Library::open_copy(
+            &master_scratch.join(DATABASE_DIR).join(MAIN_DATABASE),
+            dir.clone(),
+            master_scratch,
+        )?)
+    } else {
+        None
+    };
+    Ok(Prepared {
+        base,
+        other: dir.clone(),
+        copy: Copy {
+            // The folder the changed library's tracks are relative to (and the copied
+            // files go beside).
+            dir: if reverse { open.dir.clone() } else { dir },
+            scratch: target_scratch,
+        },
+        place,
+        master,
+    })
 }
 
 /// The work: first the tracks (stars, paths, files, tracks the other library lacks), which
@@ -224,36 +315,34 @@ fn remove_files(files: &[PathBuf]) {
     }
 }
 
-/// What making the other library's playlists (and, if asked, tracks) the same as `source`'s
-/// would change.
+/// What making the other library's playlists (and, if asked, tracks) the same as the open
+/// library's would change, or with `reverse` the open library's the same as the other's.
 pub fn diff(
-    source: &Library,
-    target: &Path,
+    open: &Library,
+    other: &Path,
     scratch_root: &Path,
     options: Options,
 ) -> Result<api::GetLibrarySyncDiffResponse, MirrorError> {
     // (A diff is quick and nobody asks how far it is.)
     let progress = Progress::default();
-    let copy = prepare(source, target, scratch_root, &progress)?;
-    let Work { outcome, tracks } = work(source, &copy, options, false, &progress)?;
-    let dir = copy.dir.display().to_string();
-    let scratch = copy.scratch.clone();
-    drop(copy);
-    let _ = fs::remove_dir_all(scratch);
+    let prepared = prepare(open, other, scratch_root, options.reverse, &progress)?;
+    let master = prepared.master(open);
+    let Work { outcome, tracks } = work(master, &prepared.copy, options, false, &progress)?;
+    let dir = prepared.other.display().to_string();
 
     let mut changes = outcome.changes;
     changes.sort_by(|a, b| a.name.cmp(&b.name));
     let playlists_changed = changes.len() as u32;
     changes.truncate(MAX_LISTED);
     let reference = |index: usize| {
-        let track = &source.tracks[index];
+        let track = &master.tracks[index];
         api::TrackRef {
             title: track.title.clone(),
             artist: track.artist.clone(),
             path: track.relative_path.clone(),
         }
     };
-    Ok(api::GetLibrarySyncDiffResponse {
+    let response = api::GetLibrarySyncDiffResponse {
         target_path: dir,
         playlists_changed,
         changed_playlists: changes,
@@ -278,25 +367,39 @@ pub fn diff(
         bytes_to_copy: tracks.bytes_to_copy,
         files_missing: tracks.files_missing,
         location_conflicts: tracks.location_conflicts,
-    })
+    };
+    let base = prepared.base.clone();
+    drop(prepared);
+    let _ = fs::remove_dir_all(base);
+    Ok(response)
 }
 
-/// Makes the other library the same as `source`: the changes are made on a copy of its
+/// Makes the other library the same as the open one: the changes are made on a copy of its
 /// `m.db`, which then replaces the original, which is kept in a backup folder. Audio files
-/// are copied first (when asked for), and taken away again if the sync then fails.
+/// are copied first (when asked for), and taken away again if the sync then fails. With
+/// `reverse` it is the open library's working copy that is changed, from the other library;
+/// the open library then has to be read again.
 pub fn push(
-    source: &Library,
-    target: &Path,
+    open: &Library,
+    other: &Path,
     scratch_root: &Path,
     options: Options,
     progress: &Progress,
 ) -> Result<api::SyncToLibraryResponse, MirrorError> {
-    let copy = prepare(source, target, scratch_root, progress)?;
-    let Work { outcome, tracks } = work(source, &copy, options, true, progress)?;
-    let Copy { dir, scratch } = copy;
+    let prepared = prepare(open, other, scratch_root, options.reverse, progress)?;
+    let master = prepared.master(open);
+    let Work { outcome, tracks } = work(master, &prepared.copy, options, true, progress)?;
+    let Prepared {
+        base,
+        other: other_dir,
+        copy,
+        place,
+        master,
+    } = prepared;
+    drop(master);
 
     let mut response = api::SyncToLibraryResponse {
-        target_path: dir.display().to_string(),
+        target_path: other_dir.display().to_string(),
         playlists_changed: outcome.changes.len() as u32,
         tracks_missing: outcome.missing.len() as u32,
         origins_changed: outcome.origins_changed as u32,
@@ -315,18 +418,23 @@ pub fn push(
         changed.push(origins::FILE);
     }
     if !changed.is_empty() {
-        let databases = dir.join(DATABASE_DIR);
-        let result = install(&databases, &scratch, &changed, progress);
-        let _ = fs::remove_dir_all(&scratch);
+        let result = install(&place, &copy.scratch, &changed, progress);
+        let _ = fs::remove_dir_all(&base);
         match result {
-            Ok(backup) => response.backup_path = backup.display().to_string(),
+            Ok(backup) => {
+                response.backup_path = backup.display().to_string();
+                if options.reverse {
+                    // The working copy has changes the source does not have.
+                    cache::mark_edited(&open.cache)?;
+                }
+            }
             Err(error) => {
                 remove_files(&tracks.copied);
                 return Err(error);
             }
         }
     } else {
-        let _ = fs::remove_dir_all(&scratch);
+        let _ = fs::remove_dir_all(&base);
     }
     Ok(response)
 }
@@ -334,17 +442,18 @@ pub fn push(
 /// Puts the changed databases from the copy in `scratch` into the library's `databases`
 /// folder, after keeping the ones they replace in a backup folder, which is returned.
 fn install(
-    databases: &Path,
+    place: &Place,
     scratch: &Path,
     changed: &[&str],
     progress: &Progress,
 ) -> Result<PathBuf, MirrorError> {
+    let databases = place.databases.as_path();
     // Another program may have started writing since the copy was made.
-    if is_busy(databases) {
+    if place.check_busy && is_busy(databases) {
         return Err(MirrorError::Busy);
     }
     // Keep what is about to be replaced. (One backup, the latest.)
-    let backup = databases.join(BACKUP_DIR);
+    let backup = place.backup.clone();
     let size = |path: PathBuf| fs::metadata(path).map_or(0, |metadata| metadata.len());
     progress.phase(
         Phase::Writing,
@@ -1576,6 +1685,140 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn the_other_way_round_the_other_library_is_copied_into_the_working_copy() {
+        let temp = TempDir::new("reverse");
+        let (pc, stick) = with_files(&temp.0);
+        // The stick is the open library, the pc library the one that has more.
+        let open_library = open_source(&stick, &temp.0.join("working-copy"));
+        let working = temp
+            .0
+            .join("working-copy")
+            .join(DATABASE_DIR)
+            .join(MAIN_DATABASE);
+        let working_before = fs::read(&working).unwrap();
+        let stick_before = fs::read(stick.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap();
+        let pc_before = fs::read(pc.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap();
+        // The pc library has origins for its tracks.
+        let master = open(&pc, &temp.0.join("pc-scratch"));
+        master
+            .save_origins(&[(("db".to_string(), 1), "/pc/Music/a.flac".into())], false)
+            .unwrap();
+        fs::copy(
+            temp.0
+                .join("pc-scratch")
+                .join(DATABASE_DIR)
+                .join(origins::FILE),
+            pc.join(DATABASE_DIR).join(origins::FILE),
+        )
+        .unwrap();
+        let options = Options {
+            reverse: true,
+            tracks: track_sync::Options {
+                stars: true,
+                copy_tracks: true,
+                ..Default::default()
+            },
+            ..Options::default()
+        };
+        let scratch = temp.0.join("scratch");
+        let tracks_dir = temp.0.join("stick").join(track_sync::TRACKS_DIR);
+
+        // The diff is about the open library, and changes nothing.
+        let found = diff(&open_library, &pc, &scratch, options).unwrap();
+        assert_eq!(
+            found.target_path,
+            pc.display().to_string(),
+            "the other library"
+        );
+        assert_eq!(
+            (found.tracks_added, found.added_tracks[0].title.as_str()),
+            (1, "c.flac")
+        );
+        assert_eq!(found.tracks_changed, 2, "a: stars and path; b: path");
+        assert_eq!(found.origins_changed, 1);
+        let mix = found
+            .changed_playlists
+            .iter()
+            .find(|p| p.name == "Mix")
+            .unwrap();
+        assert_eq!(mix.kind(), api::PlaylistChangeKind::Added);
+        assert!(!tracks_dir.exists());
+        assert_eq!(fs::read(&working).unwrap(), working_before);
+
+        let done = push(&open_library, &pc, &scratch, options, &Progress::default()).unwrap();
+        assert_eq!(
+            (done.tracks_added, done.files_copied, done.origins_changed),
+            (1, 3, 1)
+        );
+        // The working copy has it all; its old state is kept; it is noted as edited.
+        let changed =
+            Library::open_copy(&working, stick.clone(), temp.0.join("working-copy")).unwrap();
+        assert_eq!(
+            ratings_and_paths(&changed),
+            [
+                (
+                    "a.flac".into(),
+                    Some(80),
+                    "../Engine-Tracks/AC_DC/Back_ In Black_/a.flac".into()
+                ),
+                (
+                    "b.flac".into(),
+                    Some(40),
+                    "../Engine-Tracks/Unknown Artist/Unknown Album/b.flac".into()
+                ),
+                (
+                    "c.flac".into(),
+                    Some(100),
+                    "../Engine-Tracks/Zed/Z/c.flac".into()
+                ),
+            ]
+        );
+        let mix = changed
+            .playlists()
+            .iter()
+            .find(|p| p.title == "Mix")
+            .map(|p| p.tracks.clone());
+        assert_eq!(mix, Some(vec![0, 2]));
+        assert_eq!(changed.origins().len(), 1);
+        let backup = temp.0.join("working-copy").join(BACK_SYNC_BACKUP);
+        assert_eq!(done.backup_path, backup.display().to_string());
+        assert_eq!(
+            fs::read(backup.join(MAIN_DATABASE)).unwrap(),
+            working_before
+        );
+        assert!(temp.0.join("working-copy").join(cache::EDITED).exists());
+        // The files were copied beside the library that is open; nothing else was touched.
+        assert_eq!(
+            fs::read(tracks_dir.join("Zed/Z/c.flac")).unwrap(),
+            b"cccccc"
+        );
+        assert_eq!(
+            fs::read(stick.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap(),
+            stick_before
+        );
+        assert_eq!(
+            fs::read(pc.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap(),
+            pc_before
+        );
+        assert!(!stick.join(DATABASE_DIR).join(BACKUP_DIR).exists());
+    }
+
+    #[test]
+    fn the_other_way_round_still_refuses_the_open_library_itself() {
+        let temp = TempDir::new("reverse-same");
+        let (pc, _) = with_files(&temp.0);
+        let open_library = open_source(&pc, &temp.0.join("working-copy"));
+        let options = Options {
+            reverse: true,
+            ..Options::default()
+        };
+        assert!(matches!(
+            diff(&open_library, &pc, &temp.0.join("scratch"), options),
+            Err(MirrorError::SameLibrary)
+        ));
     }
 
     #[test]

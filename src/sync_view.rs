@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use iced::widget::{
-    Space, button, center, checkbox, column, container, opaque, row, scrollable, text,
+    Space, button, center, checkbox, column, container, opaque, radio, row, scrollable, text,
 };
 use iced::{Color, Element, Fill, Theme};
 use open_engine_api::v1::{
     GetSyncDiffResponse, OperationProgress, PlaylistChange, PlaylistChangeKind,
-    SyncToSourceResponse, TrackChange, TrackRef,
+    PullFromSourceResponse, SyncToSourceResponse, TrackChange, TrackRef,
 };
 
 use crate::Message;
@@ -39,6 +39,8 @@ pub enum Stage {
         acknowledged: bool,
     },
     Done(SyncToSourceResponse),
+    /// The working copy was replaced by the source.
+    Pulled(PullFromSourceResponse),
 }
 
 impl Stage {
@@ -57,10 +59,18 @@ pub fn can_sync(diff: &GetSyncDiffResponse, acknowledged: bool) -> bool {
         && (!diff.source_changed_outside || acknowledged)
 }
 
-/// The window, centred over a dimmed view of the app that can't be clicked.
+/// Whether the working copy may be replaced by the source: the source can be read, and it
+/// differs. (Someone else having changed it is no reason to hold back: that is the point.)
+pub fn can_pull(diff: &GetSyncDiffResponse) -> bool {
+    diff.source_available && !diff.source_busy && !diff.changed_databases.is_empty()
+}
+
+/// The window, centred over a dimmed view of the app that can't be clicked. With `reverse`
+/// it is about replacing the working copy by the source, not writing it to the source.
 pub fn modal<'a>(
     stage: &'a Stage,
     progress: Option<&'a OperationProgress>,
+    reverse: bool,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -81,8 +91,21 @@ pub fn modal<'a>(
             diff,
             acknowledged,
             error,
-        } => ready(diff, *acknowledged, error.as_deref(), language),
+        } => ready(diff, *acknowledged, error.as_deref(), reverse, language),
         Stage::Syncing { .. } => crate::progress_view::view(progress, language),
+        Stage::Pulled(done) => {
+            let message = if done.kept_edits_path.is_empty() {
+                strings.sync_pull_done_clean.clone()
+            } else {
+                fill(&strings.sync_pull_done, &[("path", &done.kept_edits_path)])
+            };
+            column![
+                text(message),
+                button(text(&strings.sync_close)).on_press(Message::SyncClose),
+            ]
+            .spacing(12)
+            .into()
+        }
         Stage::Done(done) => {
             let message = if done.files_written == 0 {
                 strings.sync_nothing_written.clone()
@@ -128,12 +151,25 @@ fn ready<'a>(
     diff: &'a Arc<GetSyncDiffResponse>,
     acknowledged: bool,
     error: Option<&'a str>,
+    reverse: bool,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
     let secondary = |content: String| text(content).size(13).style(text::secondary);
 
     let mut content = column![
+        radio(
+            &strings.sync_direction_push,
+            false,
+            Some(reverse),
+            Message::SyncDirection
+        ),
+        radio(
+            &strings.sync_direction_pull,
+            true,
+            Some(reverse),
+            Message::SyncDirection
+        ),
         secondary(fill(&strings.sync_source, &[("path", &diff.source_path)])),
         secondary(fill(
             &strings.sync_working_copy,
@@ -154,7 +190,7 @@ fn ready<'a>(
     if diff.source_busy {
         content = content.push(text(&strings.sync_busy).style(text::danger));
     }
-    if diff.source_changed_outside && diff.source_available {
+    if diff.source_changed_outside && diff.source_available && !reverse {
         content = content
             .push(text(&strings.sync_outside_warning).style(text::danger))
             .push(
@@ -164,17 +200,30 @@ fn ready<'a>(
             );
     }
     if !diff.changed_databases.is_empty() && diff.source_available {
-        content = content.push(secondary(strings.sync_direction_hint.clone()));
+        content = content.push(secondary(if reverse {
+            strings.sync_pull_hint.clone()
+        } else {
+            strings.sync_direction_hint.clone()
+        }));
     }
     if let Some(error) = error {
         content = content
             .push(text(fill(&strings.sync_failed, &[("error", &error)])).style(text::danger));
     }
 
+    let runnable = if reverse {
+        can_pull(diff)
+    } else {
+        can_sync(diff, acknowledged)
+    };
     let buttons = row![
-        button(text(&strings.sync_run))
-            .style(button::primary)
-            .on_press_maybe(can_sync(diff, acknowledged).then_some(Message::SyncStart)),
+        button(text(if reverse {
+            &strings.sync_pull_run
+        } else {
+            &strings.sync_run
+        }))
+        .style(button::primary)
+        .on_press_maybe(runnable.then_some(Message::SyncStart)),
         button(text(&strings.sync_refresh))
             .style(button::secondary)
             .on_press(Message::SyncOpen),

@@ -157,8 +157,9 @@ fn changed_databases(library: &Library) -> io::Result<Vec<String>> {
         .collect())
 }
 
-/// What would change in the source if the working copy were written to it.
-pub fn diff(library: &Library) -> Result<api::GetSyncDiffResponse, SyncError> {
+/// What would change in the source if the working copy were written to it, or with
+/// `reverse` what would change in the working copy if the source replaced it.
+pub fn diff(library: &Library, reverse: bool) -> Result<api::GetSyncDiffResponse, SyncError> {
     let mut response = api::GetSyncDiffResponse {
         source_path: library.dir.display().to_string(),
         cache_path: library.cache.display().to_string(),
@@ -177,10 +178,15 @@ pub fn diff(library: &Library) -> Result<api::GetSyncDiffResponse, SyncError> {
         .iter()
         .any(|name| name == origins::FILE)
     {
-        response.origins_changed = changed_origins(
-            &working_databases(library).join(origins::FILE),
-            &source.join(origins::FILE),
+        let (working, source) = (
+            working_databases(library).join(origins::FILE),
+            source.join(origins::FILE),
         );
+        response.origins_changed = if reverse {
+            changed_origins(&source, &working)
+        } else {
+            changed_origins(&working, &source)
+        };
     }
 
     if response
@@ -188,11 +194,16 @@ pub fn diff(library: &Library) -> Result<api::GetSyncDiffResponse, SyncError> {
         .iter()
         .any(|name| name == MAIN_DATABASE)
     {
-        compare_main_databases(
-            &working_databases(library).join(MAIN_DATABASE),
-            &source.join(MAIN_DATABASE),
-            &mut response,
-        )?;
+        let (working, source) = (
+            working_databases(library).join(MAIN_DATABASE),
+            source.join(MAIN_DATABASE),
+        );
+        // The first is what the second would become.
+        if reverse {
+            compare_main_databases(&source, &working, &mut response)?;
+        } else {
+            compare_main_databases(&working, &source, &mut response)?;
+        }
     }
     Ok(response)
 }
@@ -206,7 +217,7 @@ fn compare_main_databases(
     response: &mut api::GetSyncDiffResponse,
 ) -> Result<(), SyncError> {
     let connection = Connection::open_with_flags(
-        working,
+        source_uri(working),
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -674,6 +685,54 @@ fn playlist_changes(connection: &Connection) -> rusqlite::Result<Vec<api::Playli
     Ok(changes)
 }
 
+/// Replaces the working copy by the databases of the source (the reverse of `push`). The
+/// working copy's edits that never reached the source are first moved to `unsynced-edits`
+/// in the cache folder; the response says where, if there were any.
+pub fn pull(
+    library: &Library,
+    progress: &Progress,
+) -> Result<api::PullFromSourceResponse, SyncError> {
+    let source = source_databases(library);
+    if !source.join(MAIN_DATABASE).is_file() {
+        return Err(SyncError::Unavailable(library.dir.clone()));
+    }
+    if is_busy(&source) {
+        return Err(SyncError::Busy);
+    }
+
+    let files = cache::database_files(&source)?;
+    let size = |name: &str| fs::metadata(source.join(name)).map_or(0, |metadata| metadata.len());
+    progress.phase(
+        Phase::Pulling,
+        files.iter().map(|file| size(&file.name)).sum(),
+        0,
+    );
+
+    let had_edits = library.cache.join(cache::EDITED).exists();
+    if had_edits {
+        cache::keep_unsynced_edits(&library.cache)?;
+    }
+    let working = working_databases(library);
+    match fs::remove_dir_all(&working) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    fs::create_dir_all(&working)?;
+    for file in &files {
+        progress.copy(&source.join(&file.name), &working.join(&file.name), false)?;
+    }
+    // The working copy and the source are the same now.
+    cache::record_source(&library.dir, &library.cache)?;
+    Ok(api::PullFromSourceResponse {
+        files_written: files.len() as u32,
+        kept_edits_path: if had_edits {
+            library.cache.join(cache::UNSYNCED).display().to_string()
+        } else {
+            String::new()
+        },
+    })
+}
+
 /// Writes the working copy's databases to the source. Returns how many files were written
 /// and where the replaced ones were kept.
 pub fn push(
@@ -829,7 +888,7 @@ mod tests {
     fn a_working_copy_that_was_not_changed_has_no_differences() {
         let temp = TempDir::new("same");
         let library = library(&temp.0);
-        let diff = diff(&library).unwrap();
+        let diff = diff(&library, false).unwrap();
 
         assert!(diff.source_available && !diff.source_busy && !diff.source_changed_outside);
         assert!(diff.changed_databases.is_empty());
@@ -858,7 +917,7 @@ mod tests {
              INSERT INTO PlaylistEntity VALUES (13, 2, 4, 'db', 0);",
         );
 
-        let diff = diff(&library).unwrap();
+        let diff = diff(&library, false).unwrap();
         assert_eq!(diff.changed_databases, ["m.db"], "the history is as it was");
 
         // Tracks: one added, one removed, two changed (one by its fields, one by its beatgrid).
@@ -918,7 +977,7 @@ mod tests {
                 ('f', 'Moves', 'House;', '', '', 'r6', NULL);";
         edit(&source(&library), table);
         edit(&working(&library), table);
-        assert_eq!(diff(&library).unwrap().playlists_changed, 0);
+        assert_eq!(diff(&library, false).unwrap().playlists_changed, 0);
 
         edit(
             &working(&library),
@@ -928,7 +987,7 @@ mod tests {
              UPDATE Smartlist SET parentPlaylistPath = '' WHERE listUuid = 'f';
              INSERT INTO Smartlist VALUES ('e', 'Fresh', '', '', '', 'r5', NULL);",
         );
-        let diff = diff(&library).unwrap();
+        let diff = diff(&library, false).unwrap();
         assert_eq!(diff.playlists_changed, 5);
         let by_name = |name: &str| {
             diff.changed_playlists
@@ -966,7 +1025,7 @@ mod tests {
              DELETE FROM Playlist WHERE id = 3;
              DELETE FROM PlaylistEntity WHERE id = 12;",
         );
-        let diff = diff(&library).unwrap();
+        let diff = diff(&library, false).unwrap();
         let deep = diff
             .changed_playlists
             .iter()
@@ -988,7 +1047,7 @@ mod tests {
         let temp = TempDir::new("origins");
         let library = library(&temp.0);
         let database = library.dir.join("Database2").join(origins::FILE);
-        assert_eq!(diff(&library).unwrap().origins_changed, 0);
+        assert_eq!(diff(&library, false).unwrap().origins_changed, 0);
 
         // Saved in the working copy, the origins are a difference the source lacks.
         let entries = [
@@ -996,7 +1055,7 @@ mod tests {
             (("db".to_string(), 2), "/pc/two.flac".to_string()),
         ];
         assert_eq!(library.save_origins(&entries, false).unwrap(), 2);
-        let found = diff(&library).unwrap();
+        let found = diff(&library, false).unwrap();
         assert_eq!(found.changed_databases, [origins::FILE]);
         assert_eq!(found.origins_changed, 2);
         assert!(!database.exists(), "the source has none yet");
@@ -1008,7 +1067,7 @@ mod tests {
             origins::Origins::open(&database).unwrap().all().unwrap(),
             entries.iter().cloned().collect::<HashMap<_, _>>()
         );
-        assert_eq!(diff(&library).unwrap().origins_changed, 0);
+        assert_eq!(diff(&library, false).unwrap().origins_changed, 0);
 
         // A changed origin and a new one are counted; the file is replaced, and the old
         // one is kept in the backup.
@@ -1021,7 +1080,7 @@ mod tests {
                 true,
             )
             .unwrap();
-        assert_eq!(diff(&library).unwrap().origins_changed, 2);
+        assert_eq!(diff(&library, false).unwrap().origins_changed, 2);
         let done = push(&library, false, &Progress::default()).unwrap();
         assert!(Path::new(&done.backup_path).join(origins::FILE).is_file());
         let synced = origins::Origins::open(&database).unwrap().all().unwrap();
@@ -1030,11 +1089,91 @@ mod tests {
     }
 
     #[test]
+    fn the_reverse_diff_says_what_the_working_copy_would_get() {
+        let temp = TempDir::new("reverse-diff");
+        let library = library(&temp.0);
+        edit(
+            &working(&library),
+            "UPDATE Track SET title = 'Uno' WHERE id = 1;
+             INSERT INTO Track (id, title, artist, path, originDatabaseUuid, originTrackId)
+                VALUES (4, 'Four', 'D', '../Music/four.flac', 'db', 4);",
+        );
+
+        // Writing: the source gets 'Uno' and a track.
+        let forward = diff(&library, false).unwrap();
+        assert_eq!((forward.tracks_added, forward.tracks_removed), (1, 0));
+        let title = field(&forward.changed_tracks[0], "title");
+        assert_eq!(
+            (title.source_value.as_str(), title.working_value.as_str()),
+            ("One", "Uno")
+        );
+
+        // The other way round: the working copy loses the track and gets 'One' back.
+        let reverse = diff(&library, true).unwrap();
+        assert_eq!((reverse.tracks_added, reverse.tracks_removed), (0, 1));
+        assert_eq!(reverse.removed_tracks[0].title, "Four");
+        let title = field(&reverse.changed_tracks[0], "title");
+        assert_eq!(
+            (title.source_value.as_str(), title.working_value.as_str()),
+            ("Uno", "One")
+        );
+        assert_eq!(reverse.changed_databases, forward.changed_databases);
+    }
+
+    #[test]
+    fn pulling_replaces_the_working_copy_and_keeps_what_was_not_synced() {
+        let temp = TempDir::new("pull");
+        let library = library(&temp.0);
+        let source_before = fs::read(source(&library)).unwrap();
+
+        // Nothing edited: the working copy is replaced, nothing is kept.
+        edit(
+            &working(&library),
+            "UPDATE Track SET title = 'Uno' WHERE id = 1;",
+        );
+        let done = pull(&library, &Progress::default()).unwrap();
+        assert_eq!((done.files_written, done.kept_edits_path.as_str()), (2, ""));
+        assert_eq!(fs::read(working(&library)).unwrap(), source_before);
+
+        // Edited through the library (read again, as the backend does after a pull), so that
+        // the edit is noted: it is kept aside.
+        let library = Library::open(&library.dir, &temp.0.join("cache")).unwrap();
+        library.set_rating(0, 60).unwrap();
+        assert!(library.cache.join(cache::EDITED).exists());
+        let edited = fs::read(working(&library)).unwrap();
+        let done = pull(&library, &Progress::default()).unwrap();
+        let kept = library.cache.join(cache::UNSYNCED);
+        assert_eq!(done.kept_edits_path, kept.display().to_string());
+        assert_eq!(fs::read(kept.join("Database2/m.db")).unwrap(), edited);
+        assert_eq!(fs::read(working(&library)).unwrap(), source_before);
+        assert!(!library.cache.join(cache::EDITED).exists());
+        assert_eq!(diff(&library, false).unwrap().changed_databases.len(), 0);
+        assert!(!diff(&library, false).unwrap().source_changed_outside);
+    }
+
+    #[test]
+    fn pulling_is_refused_when_the_source_is_gone_or_busy() {
+        let temp = TempDir::new("pull-refused");
+        let library = library(&temp.0);
+        fs::write(library.dir.join("Database2/m.db-journal"), b"x").unwrap();
+        assert!(matches!(
+            pull(&library, &Progress::default()),
+            Err(SyncError::Busy)
+        ));
+        fs::remove_file(library.dir.join("Database2/m.db-journal")).unwrap();
+        fs::remove_file(library.dir.join("Database2/m.db")).unwrap();
+        assert!(matches!(
+            pull(&library, &Progress::default()),
+            Err(SyncError::Unavailable(_))
+        ));
+    }
+
+    #[test]
     fn other_databases_that_differ_are_named() {
         let temp = TempDir::new("others");
         let library = library(&temp.0);
         fs::write(library.cache.join("Database2/hm.db"), b"history v2, longer").unwrap();
-        let diff = diff(&library).unwrap();
+        let diff = diff(&library, false).unwrap();
         assert_eq!(diff.changed_databases, ["hm.db"]);
         assert_eq!(diff.tracks_changed, 0, "only m.db is itemised");
     }
@@ -1049,7 +1188,7 @@ mod tests {
             &source(&library),
             "UPDATE Track SET title = 'Edited elsewhere' WHERE id = 1;",
         );
-        let outside = diff(&library).unwrap();
+        let outside = diff(&library, false).unwrap();
         assert!(outside.source_changed_outside);
         // The difference is there too: syncing would put 'One' back.
         let change = &outside.changed_tracks[0];
@@ -1058,11 +1197,11 @@ mod tests {
 
         // A journal with something in it means a write is going on.
         fs::write(library.dir.join("Database2/m.db-journal"), b"half a write").unwrap();
-        assert!(diff(&library).unwrap().source_busy);
+        assert!(diff(&library, false).unwrap().source_busy);
 
         // And a source that is gone (the drive was unplugged).
         fs::rename(&library.dir, temp.0.join("gone")).unwrap();
-        let gone = diff(&library).unwrap();
+        let gone = diff(&library, false).unwrap();
         assert!(!gone.source_available);
         assert!(gone.changed_databases.is_empty());
     }
@@ -1099,7 +1238,7 @@ mod tests {
         );
 
         // Now there is nothing left to sync, and nothing looks changed from outside.
-        let after = diff(&library).unwrap();
+        let after = diff(&library, false).unwrap();
         assert!(after.changed_databases.is_empty() && !after.source_changed_outside);
         assert_eq!(
             push(&library, false, &Progress::default())

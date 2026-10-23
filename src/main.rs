@@ -142,6 +142,8 @@ struct State {
     delay_draft: Option<i32>,
     /// The window comparing the working copy with the source, while it is open.
     sync: Option<SyncStage>,
+    /// The sync window is about replacing the working copy by the source (the reverse).
+    sync_reverse: bool,
     /// How far the sync that is writing has got, as the backend last said.
     progress: Option<open_engine_api::v1::OperationProgress>,
     /// The window for syncing the playlists to another library, while it is open.
@@ -186,6 +188,12 @@ pub enum Message {
     /// The tick that allows overwriting changes made outside this app.
     SyncAcknowledged(bool),
     SyncStart,
+    /// Which way the sync window works: `true` replaces the working copy by the source.
+    SyncDirection(bool),
+    /// The working copy was replaced by the source.
+    SyncPulled(Result<open_engine_api::v1::PullFromSourceResponse, String>),
+    /// The library was read again, because its working copy was replaced or changed.
+    LibraryReloaded(Result<Arc<Library>, String>),
     SyncFinished(Result<open_engine_api::v1::SyncToSourceResponse, String>),
     SyncClose,
 
@@ -336,6 +344,7 @@ impl State {
             gain_draft: None,
             delay_draft: None,
             sync: None,
+            sync_reverse: false,
             progress: None,
             library_sync: None,
             smart: None,
@@ -413,6 +422,23 @@ impl State {
         if let Some(Source::Playlist(index)) = self.play_source {
             self.play_source = change.map(index).map(Source::Playlist);
         }
+    }
+
+    /// Fetches the open library again, after the backend read its working copy again.
+    fn reload_library(&mut self) -> Task<Message> {
+        let (Some(backend), LibraryState::Open(browser)) = (self.backend(), &self.library) else {
+            return Task::none();
+        };
+        let library = &browser.library;
+        Task::perform(
+            backend::reload_library(
+                backend,
+                library.path.clone(),
+                library.cache_path.clone(),
+                library.tracks.len() as u32,
+            ),
+            Message::LibraryReloaded,
+        )
     }
 
     /// Whether a sync is writing, so that how far it is gets asked.
@@ -856,12 +882,19 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 || state.library_sync.is_some()
                 || state.smart.is_some()
                 || state.playlist_dialog.is_some();
+            // (The button starts in the usual direction; "compare again" keeps it.)
+            if !busy && state.sync.is_none() {
+                state.sync_reverse = false;
+            }
             if !busy
                 && matches!(state.library, LibraryState::Open(_))
                 && let Some(backend) = state.backend()
             {
                 state.sync = Some(SyncStage::Loading);
-                return Task::perform(backend::sync_diff(backend), Message::SyncDiffLoaded);
+                return Task::perform(
+                    backend::sync_diff(backend, state.sync_reverse),
+                    Message::SyncDiffLoaded,
+                );
             }
         }
         Message::SyncDiffLoaded(result) => {
@@ -882,14 +915,28 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 *acknowledged = ticked;
             }
         }
+        Message::SyncDirection(reverse) => {
+            if matches!(
+                state.sync,
+                Some(SyncStage::Ready { .. } | SyncStage::Failed(_))
+            ) {
+                state.sync_reverse = reverse;
+                return handle(state, Message::SyncOpen);
+            }
+        }
         Message::SyncStart => {
+            let reverse = state.sync_reverse;
             if let (
                 Some(SyncStage::Ready {
                     diff, acknowledged, ..
                 }),
                 Some(backend),
             ) = (&state.sync, state.backend())
-                && sync_view::can_sync(diff, *acknowledged)
+                && if reverse {
+                    sync_view::can_pull(diff)
+                } else {
+                    sync_view::can_sync(diff, *acknowledged)
+                }
             {
                 // Overwriting what was changed outside is allowed only if it was ticked.
                 let overwrite = diff.source_changed_outside;
@@ -898,12 +945,52 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                     diff: Arc::clone(diff),
                     acknowledged: *acknowledged,
                 });
-                return Task::perform(
-                    backend::sync_to_source(backend, overwrite),
-                    Message::SyncFinished,
-                );
+                return if reverse {
+                    Task::perform(backend::pull_from_source(backend), Message::SyncPulled)
+                } else {
+                    Task::perform(
+                        backend::sync_to_source(backend, overwrite),
+                        Message::SyncFinished,
+                    )
+                };
             }
         }
+        Message::SyncPulled(result) => {
+            if let Some(SyncStage::Syncing { diff, acknowledged }) = &state.sync {
+                match result {
+                    Ok(done) => {
+                        state.sync = Some(SyncStage::Pulled(done));
+                        // The backend reads the new working copy; so must this.
+                        return state.reload_library();
+                    }
+                    // Back to what was shown, with the reason.
+                    Err(error) => {
+                        state.sync = Some(SyncStage::Ready {
+                            diff: Arc::clone(diff),
+                            acknowledged: *acknowledged,
+                            error: Some(error),
+                        });
+                    }
+                }
+            }
+        }
+        Message::LibraryReloaded(result) => match result {
+            Ok(library) => {
+                // What was open stays open: the list, the song and where it is in the list,
+                // but nothing is started.
+                let session = state.snapshot().map(|session| Session {
+                    loaded: false,
+                    ..session
+                });
+                state.covers.clear();
+                state.reachable.clear();
+                state.library = LibraryState::Open(Browser::new(library));
+                if let Some(session) = session {
+                    return state.restore_session(session);
+                }
+            }
+            Err(error) => state.backend_error = Some(error),
+        },
         Message::SyncFinished(result) => {
             if let Some(SyncStage::Syncing { diff, acknowledged }) = &state.sync {
                 state.sync = Some(match result {
@@ -1113,8 +1200,14 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 diff,
             }) = state.library_sync.take()
             {
+                let mut reload = false;
                 state.library_sync = Some(match result {
-                    Ok(done) => LibrarySyncStage::Done(done),
+                    Ok(done) => {
+                        // The other way round the working copy was changed, and the
+                        // backend reads it again.
+                        reload = options.reverse && !done.backup_path.is_empty();
+                        LibrarySyncStage::Done(done, options.reverse)
+                    }
                     Err(error) => LibrarySyncStage::Ready {
                         target,
                         options,
@@ -1122,6 +1215,9 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                         error: Some(error),
                     },
                 });
+                if reload {
+                    return state.reload_library();
+                }
             }
         }
         Message::LibrarySyncBack => {
@@ -1571,7 +1667,7 @@ fn view(state: &State) -> Element<'_, Message> {
     if let Some(stage) = &state.sync {
         return iced::widget::stack![
             window,
-            sync_view::modal(stage, state.progress.as_ref(), language)
+            sync_view::modal(stage, state.progress.as_ref(), state.sync_reverse, language)
         ]
         .into();
     }
@@ -1901,6 +1997,7 @@ mod tests {
             gain_draft: None,
             delay_draft: None,
             sync: None,
+            sync_reverse: false,
             progress: None,
             library_sync: None,
             smart: None,
@@ -2666,6 +2763,116 @@ mod tests {
             acknowledged: false,
         });
         assert!(state.syncing());
+    }
+
+    #[test]
+    fn the_sync_window_can_replace_the_working_copy_by_the_source() {
+        let mut state = state();
+        let diff = Arc::new(open_engine_api::v1::GetSyncDiffResponse {
+            source_available: true,
+            changed_databases: vec!["m.db".into()],
+            ..Default::default()
+        });
+        state.sync = Some(SyncStage::Ready {
+            diff: Arc::clone(&diff),
+            acknowledged: false,
+            error: None,
+        });
+
+        // The direction is chosen in the window; opening it again starts the usual way.
+        let _ = handle(&mut state, Message::SyncDirection(true));
+        assert!(state.sync_reverse);
+        state.sync = None;
+        let _ = handle(&mut state, Message::SyncOpen);
+        assert!(!state.sync_reverse);
+        assert!(sync_view::can_pull(&diff));
+        assert!(!sync_view::can_pull(
+            &open_engine_api::v1::GetSyncDiffResponse {
+                source_busy: true,
+                ..(*diff).clone()
+            }
+        ));
+
+        // A pull that fails leaves the differences with the reason; one that works ends
+        // in the report (and the library is fetched again, which needs a backend).
+        state.sync = Some(SyncStage::Syncing {
+            diff: Arc::clone(&diff),
+            acknowledged: false,
+        });
+        let _ = handle(&mut state, Message::SyncPulled(Err("disk full".into())));
+        assert!(matches!(
+            &state.sync,
+            Some(SyncStage::Ready { error: Some(error), .. }) if error == "disk full"
+        ));
+        state.sync = Some(SyncStage::Syncing {
+            diff,
+            acknowledged: false,
+        });
+        let _ = handle(
+            &mut state,
+            Message::SyncPulled(Ok(open_engine_api::v1::PullFromSourceResponse {
+                files_written: 2,
+                kept_edits_path: "/cache/unsynced-edits".into(),
+            })),
+        );
+        assert!(matches!(&state.sync, Some(SyncStage::Pulled(done)) if done.files_written == 2));
+    }
+
+    #[test]
+    fn a_library_that_is_read_again_keeps_the_list_and_the_song_but_starts_nothing() {
+        let mut state = state();
+        let LibraryState::Open(open) = &mut state.library else {
+            unreachable!()
+        };
+        open.show(Source::Playlist(1));
+        open.selected = Some(1);
+
+        let _ = handle(
+            &mut state,
+            Message::LibraryReloaded(Ok(Arc::new(library_at("/media/DRIVE/Engine Library")))),
+        );
+        assert_eq!(browser(&state).source, Source::Playlist(1));
+        assert_eq!(browser(&state).selected, Some(1));
+        assert!(state.is_stopped(), "nothing was started");
+
+        let _ = handle(&mut state, Message::LibraryReloaded(Err("gone".into())));
+        assert_eq!(state.backend_error.as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn the_other_way_round_the_open_library_is_read_again_only_when_it_changed() {
+        let mut state = state();
+        let target = PathBuf::from("/media/STICK/Engine Library");
+        let syncing = |options| LibrarySyncStage::Syncing {
+            target: target.clone(),
+            options,
+            diff: library_diff(1),
+        };
+        let reverse = library_sync_view::Options {
+            reverse: true,
+            ..Default::default()
+        };
+
+        // Nothing was written: the stage is the report of that, and the way is remembered.
+        state.library_sync = Some(syncing(reverse));
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncFinished(Ok(open_engine_api::v1::SyncToLibraryResponse::default())),
+        );
+        assert!(matches!(
+            state.library_sync,
+            Some(LibrarySyncStage::Done(_, true))
+        ));
+
+        state.library_sync = Some(syncing(library_sync_view::Options::default()));
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncFinished(Ok(open_engine_api::v1::SyncToLibraryResponse::default())),
+        );
+        assert!(matches!(
+            state.library_sync,
+            Some(LibrarySyncStage::Done(_, false))
+        ));
     }
 
     #[test]

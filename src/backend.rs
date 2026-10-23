@@ -23,9 +23,10 @@ use open_engine_api::v1::{
     GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest,
     ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
     NextRequest, OpenLibraryRequest, OperationProgress, PlayRequest, PlaybackStatus,
-    PreviousRequest, RenamePlaylistRequest, SaveLibraryAsRequest, SeekRequest, SetRatingRequest,
-    SmartRules, SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
-    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
+    PreviousRequest, PullFromSourceRequest, PullFromSourceResponse, RenamePlaylistRequest,
+    SaveLibraryAsRequest, SeekRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
+    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
+    TogglePauseRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -556,6 +557,7 @@ pub async fn library_sync_diff(
             sync_stars: options.stars,
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,
+            reverse: options.reverse,
         })
         .await
         .map(|response| Arc::new(response.into_inner()))
@@ -576,6 +578,7 @@ pub async fn sync_to_library(
             sync_stars: options.stars,
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,
+            reverse: options.reverse,
         })
         .await
         .map(|response| response.into_inner())
@@ -593,13 +596,38 @@ pub async fn progress(mut backend: Backend) -> Result<OperationProgress, String>
 }
 
 /// What would change in the source if the working copy were written to it.
-pub async fn sync_diff(mut backend: Backend) -> Result<Arc<GetSyncDiffResponse>, String> {
+pub async fn sync_diff(
+    mut backend: Backend,
+    reverse: bool,
+) -> Result<Arc<GetSyncDiffResponse>, String> {
     backend
         .library
-        .get_sync_diff(GetSyncDiffRequest {})
+        .get_sync_diff(GetSyncDiffRequest { reverse })
         .await
         .map(|response| Arc::new(response.into_inner()))
         .map_err(describe)
+}
+
+/// Replaces the working copy by the source's databases (edits that were not synced are
+/// kept aside).
+pub async fn pull_from_source(mut backend: Backend) -> Result<PullFromSourceResponse, String> {
+    backend
+        .library
+        .pull_from_source(PullFromSourceRequest {})
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Fetches the library the backend has open again, after its working copy was replaced or
+/// changed (the backend reads it again by itself).
+pub async fn reload_library(
+    mut backend: Backend,
+    path: String,
+    cache_path: String,
+    track_count: u32,
+) -> Result<Arc<Library>, String> {
+    load_library(&mut backend, path, cache_path, track_count).await
 }
 
 /// Writes the working copy to the source.

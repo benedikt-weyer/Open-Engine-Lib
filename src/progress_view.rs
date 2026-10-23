@@ -51,6 +51,7 @@ pub fn view<'a>(
         ProgressPhase::CopyingTracks => &strings.progress_copying,
         ProgressPhase::Updating => &strings.progress_updating,
         ProgressPhase::Writing => &strings.progress_writing,
+        ProgressPhase::Pulling => &strings.progress_pulling,
         ProgressPhase::Unspecified => &strings.libsync_writing,
     };
     let mut lines = column![text(name)].spacing(6).width(Fill);

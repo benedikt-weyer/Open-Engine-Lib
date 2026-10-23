@@ -24,6 +24,8 @@ pub enum Phase {
     Updating,
     /// Putting the databases in place.
     Writing,
+    /// Copying the source's databases into the working copy.
+    Pulling,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -14,8 +14,8 @@ use open_engine_api::v1::{
     CloseLibraryRequest, CreateSmartPlaylistRequest, GetAlbumArtRequest, GetInfoRequest,
     GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest, ListPlaylistsRequest,
     ListTracksRequest, MigrateOriginsRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind,
-    PlaybackState, SaveLibraryAsRequest, SetRatingRequest, SmartRule, SmartRules,
-    SyncToSourceRequest, UpdateSmartPlaylistRequest,
+    PlaybackState, PullFromSourceRequest, SaveLibraryAsRequest, SetRatingRequest, SmartRule,
+    SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -578,6 +578,79 @@ async fn remembers_where_tracks_were_in_its_own_database() {
         .await
         .unwrap();
     assert_eq!(origins(list(library).await), [Some(one), Some(two), None]);
+}
+
+#[tokio::test]
+async fn pulling_replaces_the_working_copy_with_the_source() {
+    let temp = TempDir::new("pull");
+    let library_dir = fixture_library(&temp.0);
+    // The fixture has no rating column; the working copy gets one through an edit.
+    rusqlite::Connection::open(library_dir.join("Database2/m.db"))
+        .unwrap()
+        .execute_batch("ALTER TABLE Track ADD COLUMN rating INTEGER;")
+        .unwrap();
+    let running = start(&temp.0.join("cache"));
+    let first = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(first, with_token as fn(_) -> _));
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+    let rating_of = |mut library: LibraryServiceClient<Connection>| async move {
+        let mut stream = library
+            .list_tracks(ListTracksRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        stream.message().await.unwrap().unwrap().tracks[0].rating
+    };
+
+    library
+        .set_rating(SetRatingRequest {
+            track_id: 0,
+            rating: 80,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rating_of(library.clone()).await, Some(80));
+    // The other way round, the diff says the working copy would lose it.
+    let diff = library
+        .get_sync_diff(GetSyncDiffRequest { reverse: true })
+        .await
+        .unwrap()
+        .into_inner();
+    let change = diff
+        .changed_tracks
+        .iter()
+        .find(|c| c.fields.iter().any(|f| f.field == "rating"));
+    let field = &change.unwrap().fields[0];
+    assert_eq!(
+        (field.source_value.as_str(), field.working_value.as_str()),
+        ("80", "")
+    );
+
+    let pulled = library
+        .pull_from_source(PullFromSourceRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(pulled.kept_edits_path.ends_with("unsynced-edits"));
+    assert!(
+        Path::new(&pulled.kept_edits_path)
+            .join("Database2/m.db")
+            .is_file()
+    );
+    // The library that is open reads the new working copy: the rating is the source's.
+    assert_eq!(rating_of(library.clone()).await, None);
+    let diff = library
+        .get_sync_diff(GetSyncDiffRequest::default())
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(diff.changed_databases.is_empty());
 }
 
 #[tokio::test]
@@ -1469,7 +1542,7 @@ async fn shows_what_syncing_would_change_and_writes_the_working_copy_to_the_sour
         LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
 
     assert_eq!(
-        code(library.get_sync_diff(GetSyncDiffRequest {}).await),
+        code(library.get_sync_diff(GetSyncDiffRequest::default()).await),
         Code::FailedPrecondition
     );
     assert_eq!(
@@ -1485,7 +1558,7 @@ async fn shows_what_syncing_would_change_and_writes_the_working_copy_to_the_sour
         .unwrap()
         .into_inner();
     let diff = library
-        .get_sync_diff(GetSyncDiffRequest {})
+        .get_sync_diff(GetSyncDiffRequest::default())
         .await
         .unwrap()
         .into_inner();
@@ -1505,7 +1578,7 @@ async fn shows_what_syncing_would_change_and_writes_the_working_copy_to_the_sour
         .unwrap();
 
     let diff = library
-        .get_sync_diff(GetSyncDiffRequest {})
+        .get_sync_diff(GetSyncDiffRequest::default())
         .await
         .unwrap()
         .into_inner();
@@ -1539,7 +1612,7 @@ async fn shows_what_syncing_would_change_and_writes_the_working_copy_to_the_sour
     );
 
     let after = library
-        .get_sync_diff(GetSyncDiffRequest {})
+        .get_sync_diff(GetSyncDiffRequest::default())
         .await
         .unwrap()
         .into_inner();
@@ -1551,7 +1624,7 @@ async fn shows_what_syncing_would_change_and_writes_the_working_copy_to_the_sour
         .execute_batch("UPDATE Track SET title = 'Theirs' WHERE id = 2;")
         .unwrap();
     let outside = library
-        .get_sync_diff(GetSyncDiffRequest {})
+        .get_sync_diff(GetSyncDiffRequest::default())
         .await
         .unwrap()
         .into_inner();
@@ -1600,7 +1673,7 @@ async fn diffs_a_real_library() {
 
     let started = Instant::now();
     let same = library
-        .get_sync_diff(GetSyncDiffRequest {})
+        .get_sync_diff(GetSyncDiffRequest::default())
         .await
         .unwrap()
         .into_inner();
@@ -1628,7 +1701,7 @@ async fn diffs_a_real_library() {
 
     let started = Instant::now();
     let diff = library
-        .get_sync_diff(GetSyncDiffRequest {})
+        .get_sync_diff(GetSyncDiffRequest::default())
         .await
         .unwrap()
         .into_inner();
@@ -1909,7 +1982,7 @@ async fn sets_a_rating_in_the_working_copy_and_syncs_it_to_the_source() {
     };
     assert_eq!(source_rating(1), Some(60));
     let diff = library
-        .get_sync_diff(GetSyncDiffRequest {})
+        .get_sync_diff(GetSyncDiffRequest::default())
         .await
         .unwrap()
         .into_inner();

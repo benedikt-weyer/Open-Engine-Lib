@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use iced::widget::{
-    Space, button, center, checkbox, column, container, opaque, row, scrollable, text,
+    Space, button, center, checkbox, column, container, opaque, radio, row, scrollable, text,
 };
 use iced::{Color, Element, Fill, Theme};
 use open_engine_api::v1::{GetLibrarySyncDiffResponse, OperationProgress, SyncToLibraryResponse};
@@ -34,6 +34,9 @@ pub struct Options {
     /// The audio files are copied to `Engine-Tracks` beside the other library (in an
     /// `Artist/Album` structure) and the tracks lead there; missing tracks are added.
     pub copy_tracks: bool,
+    /// The other way round: the other library is the master and the open library's
+    /// working copy is changed.
+    pub reverse: bool,
 }
 
 impl Default for Options {
@@ -44,6 +47,7 @@ impl Default for Options {
             stars: true,
             locations: false,
             copy_tracks: false,
+            reverse: false,
         }
     }
 }
@@ -55,6 +59,7 @@ pub enum Setting {
     Stars,
     Locations,
     CopyTracks,
+    Reverse,
 }
 
 impl Options {
@@ -64,6 +69,7 @@ impl Options {
             Setting::Stars => self.stars = on,
             Setting::Locations => self.locations = on,
             Setting::CopyTracks => self.copy_tracks = on,
+            Setting::Reverse => self.reverse = on,
         }
         self
     }
@@ -84,15 +90,9 @@ pub enum Stage {
     /// Choosing the library to sync to.
     Pick,
     /// Comparing with `target`.
-    Loading {
-        target: PathBuf,
-        options: Options,
-    },
+    Loading { target: PathBuf, options: Options },
     /// The comparison failed.
-    Failed {
-        target: PathBuf,
-        error: String,
-    },
+    Failed { target: PathBuf, error: String },
     /// The differences are shown. `error` is why the last attempt to sync failed.
     Ready {
         target: PathBuf,
@@ -106,7 +106,8 @@ pub enum Stage {
         options: Options,
         diff: Arc<GetLibrarySyncDiffResponse>,
     },
-    Done(SyncToLibraryResponse),
+    /// Done; whether it was the other way round.
+    Done(SyncToLibraryResponse, bool),
 }
 
 impl Stage {
@@ -189,12 +190,16 @@ pub fn modal<'a>(
         ]
         .spacing(12)
         .into(),
-        Stage::Done(done) => {
+        Stage::Done(done, reverse) => {
             let message = if done.backup_path.is_empty() && done.files_copied == 0 {
                 strings.libsync_none_written.clone()
             } else {
                 fill(
-                    &strings.libsync_done,
+                    if *reverse {
+                        &strings.libsync_done_reverse
+                    } else {
+                        &strings.libsync_done
+                    },
                     &[
                         ("count", &done.playlists_changed),
                         ("tracks", &(done.tracks_added + done.tracks_changed)),
@@ -312,28 +317,46 @@ fn ready<'a>(
         )
     };
 
+    let reverse = options.reverse;
+    let pick = |label: &'a String, value: bool| {
+        radio(label, value, Some(reverse), move |value| {
+            Message::LibrarySyncOption(Setting::Reverse, value)
+        })
+    };
+    let words =
+        |forward: &'a String, backward: &'a String| if reverse { backward } else { forward };
     let mut content = column![
+        pick(&strings.libsync_direction_forward, false),
+        pick(&strings.libsync_direction_reverse, true),
         secondary(fill(
-            &strings.libsync_target,
+            words(&strings.libsync_target, &strings.libsync_from),
             &[("path", &diff.target_path)]
         )),
-        secondary(strings.libsync_hint.clone()),
+        secondary(words(&strings.libsync_hint, &strings.libsync_hint_reverse).clone()),
         tick(
-            &strings.libsync_remove,
+            words(&strings.libsync_remove, &strings.libsync_remove_reverse),
             options.remove_missing,
             Setting::RemoveMissing,
             true
         ),
-        tick(&strings.libsync_stars, options.stars, Setting::Stars, true),
+        tick(
+            words(&strings.libsync_stars, &strings.libsync_stars_reverse),
+            options.stars,
+            Setting::Stars,
+            true
+        ),
         // The copied files' places are the locations, so there is nothing to overwrite with.
         tick(
-            &strings.libsync_locations,
+            words(
+                &strings.libsync_locations,
+                &strings.libsync_locations_reverse
+            ),
             options.locations && !options.copy_tracks,
             Setting::Locations,
             !options.copy_tracks,
         ),
         tick(
-            &strings.libsync_copy,
+            words(&strings.libsync_copy, &strings.libsync_copy_reverse),
             options.copy_tracks,
             Setting::CopyTracks,
             true
@@ -400,9 +423,12 @@ fn ready<'a>(
     }
 
     let buttons = row![
-        button(text(&strings.libsync_run))
-            .style(button::primary)
-            .on_press_maybe((active && has_changes(diff)).then_some(Message::LibrarySyncStart)),
+        button(text(words(
+            &strings.libsync_run,
+            &strings.libsync_run_reverse
+        )))
+        .style(button::primary)
+        .on_press_maybe((active && has_changes(diff)).then_some(Message::LibrarySyncStart)),
         button(text(&strings.libsync_back))
             .style(button::secondary)
             .on_press_maybe(active.then_some(Message::LibrarySyncBack)),

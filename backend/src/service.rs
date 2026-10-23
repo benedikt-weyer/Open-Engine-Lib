@@ -77,6 +77,18 @@ impl Service {
         }))
     }
 
+    /// Replaces the library that is open by one read again from the same working copy
+    /// (which changed). Playback is not stopped.
+    async fn reopen(&self, dir: PathBuf) -> Result<(), Status> {
+        let cache_root = self.0.cache_root.clone();
+        let library = tokio::task::spawn_blocking(move || Library::open(&dir, &cache_root))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(|error| Status::internal(error.to_string()))?;
+        *self.0.library.write().expect("library lock") = Some(Arc::new(library));
+        Ok(())
+    }
+
     fn library(&self) -> Result<Arc<Library>, Status> {
         self.0
             .library
@@ -174,11 +186,12 @@ impl LibraryService for Service {
 
     async fn get_sync_diff(
         &self,
-        _: Request<api::GetSyncDiffRequest>,
+        request: Request<api::GetSyncDiffRequest>,
     ) -> Result<Response<api::GetSyncDiffResponse>, Status> {
         let library = self.library()?;
+        let reverse = request.into_inner().reverse;
         // Compares files, possibly on a slow drive: not on the async threads.
-        let diff = tokio::task::spawn_blocking(move || sync::diff(&library))
+        let diff = tokio::task::spawn_blocking(move || sync::diff(&library, reverse))
             .await
             .map_err(|error| Status::internal(error.to_string()))?
             .map_err(sync_status)?;
@@ -199,6 +212,25 @@ impl LibraryService for Service {
         .await
         .map_err(|error| Status::internal(error.to_string()))?
         .map_err(sync_status)?;
+        Ok(Response::new(done))
+    }
+
+    async fn pull_from_source(
+        &self,
+        _: Request<api::PullFromSourceRequest>,
+    ) -> Result<Response<api::PullFromSourceResponse>, Status> {
+        let library = self.library()?;
+        let dir = library.dir.clone();
+        let progress = self.0.progress.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            let _running = progress.begin();
+            sync::pull(&library, &progress)
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map_err(sync_status)?;
+        // The library that is open reads files that are gone.
+        self.reopen(dir).await?;
         Ok(Response::new(done))
     }
 
@@ -354,6 +386,7 @@ impl LibraryService for Service {
                     request.sync_stars,
                     request.sync_locations,
                     request.copy_tracks,
+                    request.reverse,
                 ),
             )
         })
@@ -371,7 +404,9 @@ impl LibraryService for Service {
         let request = request.into_inner();
         let scratch = self.0.cache_root.clone();
         let progress = self.0.progress.clone();
-        tokio::task::spawn_blocking(move || {
+        let reverse = request.reverse;
+        let dir = library.dir.clone();
+        let done = tokio::task::spawn_blocking(move || {
             let _running = progress.begin();
             mirror::push(
                 &library,
@@ -382,14 +417,20 @@ impl LibraryService for Service {
                     request.sync_stars,
                     request.sync_locations,
                     request.copy_tracks,
+                    request.reverse,
                 ),
                 &progress,
             )
         })
         .await
         .map_err(|error| Status::internal(error.to_string()))?
-        .map(Response::new)
-        .map_err(mirror_status)
+        .map_err(mirror_status)?;
+        // The other way round the working copy was changed, and the library that is open
+        // still reads the one that was replaced.
+        if reverse && !done.backup_path.is_empty() {
+            self.reopen(dir).await?;
+        }
+        Ok(Response::new(done))
     }
 
     async fn get_progress(
@@ -405,6 +446,7 @@ impl LibraryService for Service {
                 Phase::CopyingTracks => api::ProgressPhase::CopyingTracks,
                 Phase::Updating => api::ProgressPhase::Updating,
                 Phase::Writing => api::ProgressPhase::Writing,
+                Phase::Pulling => api::ProgressPhase::Pulling,
             }
             .into(),
             done_bytes: snapshot.done_bytes,
@@ -661,9 +703,11 @@ fn mirror_options(
     stars: bool,
     locations: bool,
     copy_tracks: bool,
+    reverse: bool,
 ) -> mirror::Options {
     mirror::Options {
         remove_missing,
+        reverse,
         tracks: crate::track_sync::Options {
             stars,
             locations,

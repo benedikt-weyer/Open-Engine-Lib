@@ -19,9 +19,9 @@ pub const DATABASE_DIR: &str = "Database2";
 /// short is never mistaken for a complete one.
 const MANIFEST: &str = "manifest";
 /// Present while the working copy holds edits that were not written to the source yet.
-const EDITED: &str = "edited";
+pub const EDITED: &str = "edited";
 /// Where a working copy with such edits goes when the source changed and it is replaced.
-const UNSYNCED: &str = "unsynced-edits";
+pub const UNSYNCED: &str = "unsynced-edits";
 
 /// Where cached libraries live: `$OPEN_ENGINE_LIB_CACHE`, else the user cache dir.
 pub fn default_root() -> PathBuf {
@@ -77,7 +77,7 @@ pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
 
 /// Moves the working copy's databases, which hold edits that never reached the source, to
 /// `unsynced-edits` in the cache before they are replaced. (Only the latest is kept.)
-fn keep_unsynced_edits(cache: &Path) -> io::Result<()> {
+pub fn keep_unsynced_edits(cache: &Path) -> io::Result<()> {
     let kept = cache.join(UNSYNCED);
     match fs::remove_dir_all(&kept) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
