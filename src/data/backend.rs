@@ -685,6 +685,7 @@ pub async fn library_sync_diff(
             sync_stars: options.stars,
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,
+            copy_stems: options.copy_stems,
             reverse: options.reverse,
             create_if_missing: true,
         })
@@ -707,6 +708,7 @@ pub async fn sync_to_library(
             sync_stars: options.stars,
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,
+            copy_stems: options.copy_stems,
             reverse: options.reverse,
             create_if_missing: true,
         })

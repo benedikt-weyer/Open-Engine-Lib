@@ -80,6 +80,14 @@ impl Progress {
         });
     }
 
+    /// More to do in the current phase than was said at its start (a file found on the way).
+    pub fn grow(&self, bytes: u64, files: u32) {
+        self.update(|state| {
+            state.total_bytes += bytes;
+            state.total_files += files;
+        });
+    }
+
     fn bytes(&self, copied: u64) {
         self.update(|state| state.done_bytes += copied);
     }

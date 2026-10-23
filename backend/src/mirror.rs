@@ -1631,6 +1631,78 @@ mod tests {
     }
 
     #[test]
+    fn covers_that_are_files_and_stems_go_with_the_added_tracks() {
+        let temp = TempDir::new("extras");
+        let hash = [7u8; 20];
+        let cover = format!("{}.jpg", crate::library::base64_url(&hash));
+        let pc = make(
+            &temp.0,
+            "pc",
+            &[("a.flac", 5)],
+            &format!(
+                "UPDATE Track SET albumArtId = 1 WHERE id = 1;
+                 INSERT INTO AlbumArt (id, hash, albumArt) VALUES (1, X'{}', NULL);",
+                "07".repeat(20)
+            ),
+        );
+        fs::create_dir_all(temp.0.join("pc/Music")).unwrap();
+        fs::write(temp.0.join("pc/Music/a.flac"), b"aaaa").unwrap();
+        fs::create_dir_all(pc.join("Artwork")).unwrap();
+        fs::write(pc.join("Artwork").join(&cover), b"jpeg").unwrap();
+        fs::create_dir_all(pc.join("Stems")).unwrap();
+        fs::write(pc.join("Stems/5 db.stems"), b"stems!!").unwrap();
+        let source = open_source(&pc, &temp.0.join("source"));
+
+        // Without the stems option only the (small) cover is copied.
+        let plain = make(&temp.0, "plain", &[], "");
+        let options = tracks(track_sync::Options {
+            copy_tracks: true,
+            ..Default::default()
+        });
+        let found = diff(&source, &plain, &temp.0.join("scratch"), options).unwrap();
+        assert_eq!((found.files_to_copy, found.bytes_to_copy), (2, 8));
+        assert!(!plain.join("Artwork").exists(), "a diff copies nothing");
+        let done = push(
+            &source,
+            &plain,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(done.files_copied, 2);
+        assert_eq!(
+            fs::read(plain.join("Artwork").join(&cover)).unwrap(),
+            b"jpeg"
+        );
+        assert!(!plain.join("Stems").exists());
+
+        // With it the stems file follows, under the same name since the track keeps its origin.
+        let full = make(&temp.0, "full", &[], "");
+        let options = tracks(track_sync::Options {
+            copy_tracks: true,
+            copy_stems: true,
+            ..Default::default()
+        });
+        let found = diff(&source, &full, &temp.0.join("scratch"), options).unwrap();
+        assert_eq!((found.files_to_copy, found.bytes_to_copy), (3, 15));
+        let progress = Progress::default();
+        let done = push(&source, &full, &temp.0.join("scratch"), options, &progress).unwrap();
+        assert_eq!(done.files_copied, 3);
+        assert_eq!(
+            fs::read(full.join("Artwork").join(&cover)).unwrap(),
+            b"jpeg"
+        );
+        assert_eq!(fs::read(full.join("Stems/5 db.stems")).unwrap(), b"stems!!");
+
+        // A second time there is nothing left to copy, and a file that is there is kept.
+        fs::write(full.join("Stems/5 db.stems"), b"mine").unwrap();
+        let again = push(&source, &full, &temp.0.join("scratch"), options, &progress).unwrap();
+        assert_eq!(again.files_copied, 0);
+        assert_eq!(fs::read(full.join("Stems/5 db.stems")).unwrap(), b"mine");
+    }
+
+    #[test]
     fn files_that_would_share_a_name_get_a_number_and_missing_files_are_skipped() {
         let temp = TempDir::new("names");
         let pc = make(

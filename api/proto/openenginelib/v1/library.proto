@@ -289,6 +289,11 @@ message GetLibrarySyncDiffRequest {
   // databases and no rows, and then syncs as usual. Not for `reverse`, which needs a
   // library to copy from (NOT_FOUND). Without this, no library there is NOT_FOUND.
   bool create_if_missing = 7;
+  // With `copy_tracks`: the `.stems` file of each copied track that has one (in `Stems`
+  // of the library the files come from, named after the track's origin) is copied to the
+  // `Stems` folder of the library that changes. They are big, so this is asked for apart.
+  // The covers that are files in `Artwork` are always copied for the tracks that are added.
+  bool copy_stems = 8;
 }
 // Lists are cut at 200 entries, the counts are complete.
 message GetLibrarySyncDiffResponse {
@@ -328,6 +333,7 @@ message SyncToLibraryRequest {
   // As for `GetLibrarySyncDiffRequest`.
   bool reverse = 6;
   bool create_if_missing = 7;
+  bool copy_stems = 8;
 }
 message SyncToLibraryResponse {
   string target_path = 1;

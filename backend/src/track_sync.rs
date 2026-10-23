@@ -14,12 +14,14 @@ use std::path::{Path, PathBuf};
 use open_engine_api::v1 as api;
 use rusqlite::{Connection, OpenFlags};
 
-use crate::library::Library;
+use crate::library::{ARTWORK_DIR, Library, base64_url};
 use crate::mirror::MirrorError;
 use crate::progress::{Phase, Progress};
 
 /// The folder the tracks are copied to, next to the `Engine Library` folder.
 pub const TRACKS_DIR: &str = "Engine-Tracks";
+/// The folder of an Engine library with the stems of its tracks.
+const STEMS_DIR: &str = "Stems";
 /// What a track without an artist or an album is filed under.
 const UNKNOWN_ARTIST: &str = "Unknown Artist";
 const UNKNOWN_ALBUM: &str = "Unknown Album";
@@ -36,6 +38,9 @@ pub struct Options {
     /// The audio files are copied into `Engine-Tracks` and the paths lead there (instead of
     /// `locations`). Tracks the other library lacks are added to it.
     pub copy_tracks: bool,
+    /// The `.stems` file of each copied track, if it has one, is copied to the `Stems`
+    /// folder of the other library. Only together with `copy_tracks`.
+    pub copy_stems: bool,
 }
 
 impl Options {
@@ -245,6 +250,45 @@ fn copy_file(from: &Path, to: &Path, progress: &Progress) -> std::io::Result<()>
     result
 }
 
+/// Copies the file `from` to `to` unless something is at `to` already (a cover is named
+/// after its hash and stems after their track, so what is there is the same file, and
+/// another one is not ours to replace). With `copy_files` false it is only counted.
+fn place_extra(
+    from: &Path,
+    to: &Path,
+    copy_files: bool,
+    progress: &Progress,
+    report: &mut Report,
+) -> Result<(), MirrorError> {
+    let Ok(size) = fs::metadata(from).and_then(|m| {
+        if m.is_file() {
+            Ok(m.len())
+        } else {
+            Err(std::io::ErrorKind::NotFound.into())
+        }
+    }) else {
+        return Ok(());
+    };
+    if fs::symlink_metadata(to).is_ok() {
+        return Ok(());
+    }
+    report.files_to_copy += 1;
+    report.bytes_to_copy += size;
+    if copy_files {
+        progress.grow(size, 1);
+        copy_file(from, to, progress)?;
+        report.copied.push(to.to_path_buf());
+    }
+    Ok(())
+}
+
+/// The name of the `Stems` file of `track`: its origin, which every library the track was
+/// copied to has the same, so the file is found under the same name there.
+fn stems_name(track: &crate::library::Track) -> Option<String> {
+    let (uuid, id) = track.origin_key.as_ref()?;
+    Some(format!("{id} {uuid}.stems"))
+}
+
 fn columns(connection: &Connection, table: &str, schema: &str) -> rusqlite::Result<Vec<String>> {
     let mut statement = connection.prepare(&format!(
         "SELECT name FROM pragma_table_info('{table}', '{schema}')"
@@ -398,6 +442,9 @@ pub fn sync(
                 }
                 if let (true, Some(destination)) = (copy_it, destination) {
                     place(destination, track, copy_files, progress, &mut report)?;
+                    if options.copy_stems {
+                        place_stems(source, probe, track, copy_files, progress, &mut report)?;
+                    }
                 }
             }
             None => {
@@ -414,6 +461,16 @@ pub fn sync(
                         Some(known) => *known,
                         None => {
                             let id = copy_cover(&transaction, art)?;
+                            // A cover that is a file comes along, small as it is.
+                            if let Some(name) = cover_file(&transaction, art)? {
+                                place_extra(
+                                    &source.dir.join(ARTWORK_DIR).join(&name),
+                                    &probe.dir.join(ARTWORK_DIR).join(&name),
+                                    copy_files,
+                                    progress,
+                                    &mut report,
+                                )?;
+                            }
                             covers.insert(art, id);
                             id
                         }
@@ -463,11 +520,35 @@ pub fn sync(
                 }
                 report.added.push(index);
                 place(destination, track, copy_files, progress, &mut report)?;
+                if options.copy_stems {
+                    place_stems(source, probe, track, copy_files, progress, &mut report)?;
+                }
             }
         }
     }
     transaction.commit()?;
     Ok(report)
+}
+
+/// Notes that the stems of `track` are to go to the other library, and copies them.
+fn place_stems(
+    source: &Library,
+    probe: &Library,
+    track: &crate::library::Track,
+    copy_files: bool,
+    progress: &Progress,
+    report: &mut Report,
+) -> Result<(), MirrorError> {
+    let Some(name) = stems_name(track) else {
+        return Ok(());
+    };
+    place_extra(
+        &source.dir.join(STEMS_DIR).join(&name),
+        &probe.dir.join(STEMS_DIR).join(&name),
+        copy_files,
+        progress,
+        report,
+    )
 }
 
 /// Notes that the file of `track` is to go to `destination`, and copies it if it is not
@@ -489,6 +570,27 @@ fn place(
         report.copied.push(destination.absolute.clone());
     }
     Ok(())
+}
+
+/// The name of the file in `Artwork` that the cover `art` of the open library is, if it is
+/// kept there (a hash and no image in the row) and not in the database.
+fn cover_file(
+    transaction: &rusqlite::Transaction<'_>,
+    art: u32,
+) -> rusqlite::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    use rusqlite::types::Value;
+    let row: Option<(Value, Value)> = transaction
+        .query_row(
+            "SELECT hash, albumArt FROM src.AlbumArt WHERE id = ?1",
+            [art],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((Value::Blob(hash), Value::Null)) => Some(format!("{}.jpg", base64_url(&hash))),
+        _ => None,
+    })
 }
 
 /// Gives the other library the cover `art` of the open library has, unless it has the

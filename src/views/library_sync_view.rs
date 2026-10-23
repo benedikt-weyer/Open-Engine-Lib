@@ -34,6 +34,8 @@ pub struct Options {
     /// The audio files are copied to `Engine-Tracks` beside the other library (in an
     /// `Artist/Album` structure) and the tracks lead there; missing tracks are added.
     pub copy_tracks: bool,
+    /// The copied tracks' `.stems` files are copied too (they are big).
+    pub copy_stems: bool,
     /// The other way round: the other library is the master and the open library's
     /// working copy is changed.
     pub reverse: bool,
@@ -47,6 +49,7 @@ impl Default for Options {
             stars: true,
             locations: false,
             copy_tracks: false,
+            copy_stems: false,
             reverse: false,
         }
     }
@@ -59,6 +62,7 @@ pub enum Setting {
     Stars,
     Locations,
     CopyTracks,
+    CopyStems,
     Reverse,
 }
 
@@ -69,6 +73,7 @@ impl Options {
             Setting::Stars => self.stars = on,
             Setting::Locations => self.locations = on,
             Setting::CopyTracks => self.copy_tracks = on,
+            Setting::CopyStems => self.copy_stems = on,
             Setting::Reverse => self.reverse = on,
         }
         self
@@ -377,6 +382,12 @@ fn ready<'a>(
             Setting::CopyTracks,
             true
         ),
+        tick(
+            &strings.libsync_stems,
+            options.copy_tracks && options.copy_stems,
+            Setting::CopyStems,
+            options.copy_tracks,
+        ),
     ]
     .spacing(6);
 
@@ -519,6 +530,7 @@ mod tests {
         let options = Options::default();
         assert!(options.stars);
         assert!(!options.remove_missing && !options.locations && !options.copy_tracks);
+        assert!(!options.copy_stems);
 
         let options = options
             .with(Setting::CopyTracks, true)
