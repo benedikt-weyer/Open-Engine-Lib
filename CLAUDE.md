@@ -18,7 +18,7 @@ Development uses a Nix flake (`flake.nix`) activated by direnv (`.envrc`: `use f
 
 ## Commands
 
-- `run [library path]` (`scripts/run`): `cargo build --release` (the UI, the library process and the audio process), then runs the UI, forwarding args to it. The UI finds the backend next to its own executable, so a plain `cargo run` needs `cargo build -p open-engine-backend` first (that builds the audio process too, which the library process finds next to itself).
+- `run [library path]` (`scripts/run`): `cargo build` (the UI, the library process and the audio process; our own code is not optimised, the dependencies are, so it builds quickly), then runs `target/debug/open-engine-lib`, forwarding args to it. `run-optimized [library path]` (`scripts/run-optimized`) does the same with `cargo build --release` and runs `target/release/open-engine-lib`, for judging how smooth the waveform and the track list are. The UI finds the backend next to its own executable, so a plain `cargo run` needs `cargo build -p open-engine-backend` first (that builds the audio process too, which the library process finds next to itself).
 - `help` (`scripts/help`): lists developer commands. Keep it in sync when adding scripts or commands. In bash, `help` is a builtin, so run `scripts/help` there.
 - `cargo check` / `cargo clippy` / `cargo fmt` (add `--workspace` to cover the backend and API crates too)
 - `cargo test --workspace` (single test: `cargo test <name>`): config and i18n in the UI, the queue/cache/library code in the backend, and `backend/tests/grpc.rs`, which starts the real backend and drives it over gRPC. `plays_from_a_real_library` there is `#[ignore]`d: it plays real audio from a real library, see `docs/architecture.md`.

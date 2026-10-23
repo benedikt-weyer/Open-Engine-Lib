@@ -3,8 +3,10 @@
 cat <<'TXT'
 Developer commands (scripts/ is on PATH via .envrc):
 
-  run [path]            Build the UI, backend and audio process and run the app (release);
-                        an optional path opens that Engine library
+  run [path]            Build the UI, backend and audio process without optimising our own
+                        code (quick to build) and run the app; an optional path opens that
+                        Engine library
+  run-optimized [path]  The same as a release build (slow to build, smooth to run)
   help                  Show this list
 
 Cargo shortcuts:

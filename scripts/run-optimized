@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Build and run the app optimised (release), as it is shipped: slower to build, smoother to run.
+# Extra arguments are passed to the app (e.g. a library to open).
+# The UI starts the backend executable that sits next to it, which starts the audio one, so all are built.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+echo "Build: release profile, opt-level 3 for dependencies and our own code (use run for a quicker, unoptimised build)"
+cargo build --release
+exec ./target/release/open-engine-lib "$@"

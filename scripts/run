@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Build and run the app. Extra arguments are passed to the app (e.g. a library to open).
+# Build and run the app without optimising our own code, which builds much faster than
+# `run-optimized` (the dependencies are still optimised, see Cargo.toml). Extra arguments are
+# passed to the app (e.g. a library to open).
 # The UI starts the backend executable that sits next to it, which starts the audio one, so all are built.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-cargo build --release
-exec ./target/release/open-engine-lib "$@"
+# (Read from Cargo.toml, so this can't say something else than the build does.)
+dependencies=$(sed -n '/^\[profile\.dev\.package\."\*"\]/,/^\[/{s/^opt-level *= *//p}' Cargo.toml)
+echo "Build: dev profile, opt-level ${dependencies:-0} for dependencies, 0 for our own code (use run-optimized for 3 everywhere)"
+cargo build
+exec ./target/debug/open-engine-lib "$@"
