@@ -162,7 +162,11 @@ Decoded layouts below are from the library inspected. Field names are mine.
 Nine trailing bytes after the adjusted markers were not identified. Open Engine Lib uses the adjusted list (falling back to the analysed one) and draws beats evenly spaced between markers; beat numbers divisible by 4 start a bar, which matches the first marker's number in the tracks I looked at (-4) but is otherwise an assumption. Sanity check: BPM computed from the first and last marker (`60 × sampleRate × Δbeats / Δsamples`) matched `bpmAnalyzed` within 0.6 BPM for 3,265 of 3,284 tracks. The rest are likely variable-tempo grids or grids edited after analysis, which I did not investigate.
 
 ### `quickCues` (big-endian)
-`i64 count` (8 in the tracks I decoded), then per cue: `u8 label length`, label bytes, `f64 sample position` (-1.0 means unset), `4 bytes ARGB colour`. Then a 17-byte tail: `f64`, `u8`, `f64`. These look like the main cue point (adjusted and default) with an override flag.
+`i64 count` (8 in every track of a library of 3,294), then per cue: `u8 label length`, label bytes, `f64 sample position`, `4 bytes ARGB colour`. Then a 17-byte tail: `f64`, `u8`, `f64`. These look like the main cue point (adjusted and default) with an override flag.
+
+The eight entries are the eight pads, in order, so an unset pad is still there: an empty label, position `-1.0` and colour `00000000` (26,248 of them in that library, every one exactly like that). The position is in samples of the track's sample rate (`trackData`'s first field); the largest was 0.6 of the track's sample count. A set pad's label is `Cue N` (N is the pad, from 1) until the user renames it, and its colour is one per pad: `fff4d338` (1), `ffef8130` (2), `ffaa55c4` (3), `ffce3239` (4), `ff86c64b` (5), `ff20c670` (6), `ff1571e2` (8). No track had pad 7 set, so its colour is not known. 11 of 3,294 tracks had no `quickCues` at all (NULL), and only 10 had any cue set.
+
+The tail was `bff0000000000000 00 bff0000000000000` (`-1.0`, 0, `-1.0`) for 2,352 tracks, all zeros for 228, and other positions for the rest; Open Engine Lib keeps it as it finds it when it writes the cues, and writes the first form for a track that had no blob.
 
 ### `loops` (raw, **little-endian**)
 `i64 count` (8), then per loop: `u8 label length`, label bytes, `f64 start`, `f64 end` (both -1.0 when unset), `u8 start-set`, `u8 end-set`, `4 bytes ARGB colour`. The parse consumed every byte of the BLOB exactly.

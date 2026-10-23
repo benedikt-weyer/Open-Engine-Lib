@@ -16,6 +16,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::beatgrid::{self, Marker};
 use crate::cache::{self, DATABASE_DIR};
+use crate::cues::{self, Cue, QuickCues};
 use crate::origins::{self, Origins, TrackKey};
 use crate::smartlist::Rules;
 use crate::soundswitch::{Lighting, SoundSwitch};
@@ -68,6 +69,12 @@ pub enum EditError {
     TitleTaken,
     /// The library has no table for smart playlists (it is from an older version).
     NoSmartlists,
+    /// The track has no analysis to keep cues in.
+    NoAnalysis,
+    /// The track has cues stored in a way that isn't understood, which are left alone.
+    UnreadableCues,
+    /// The cues are not valid; says what is wrong.
+    BadCue(String),
     /// The edit could not be noted in the cache.
     Cache(std::io::Error),
     Database(rusqlite::Error),
@@ -85,6 +92,14 @@ impl fmt::Display for EditError {
             EditError::NoSmartlists => {
                 write!(f, "this library has no smart playlists (it is too old)")
             }
+            EditError::NoAnalysis => {
+                write!(f, "the track has not been analysed, so it has no cues")
+            }
+            EditError::UnreadableCues => write!(
+                f,
+                "the cues of the track are in a format that is not understood"
+            ),
+            EditError::BadCue(reason) => write!(f, "{reason}"),
             EditError::Cache(error) => write!(f, "could not note the edit in the cache: {error}"),
             EditError::Database(error) => write!(f, "could not write the database: {error}"),
         }
@@ -171,6 +186,8 @@ pub struct Library {
     legacy_origins: PathBuf,
     /// Ratings set since the library was opened, by index in `tracks`.
     ratings: Mutex<HashMap<usize, u32>>,
+    /// How many cues each track has (by index in `tracks`), as of now.
+    cue_counts: Mutex<Vec<u32>>,
     /// Kept open to read what is not loaded with the tracks (covers, beatgrids) on demand,
     /// and to write the edits.
     connection: Mutex<Connection>,
@@ -223,6 +240,7 @@ impl Library {
     ) -> Result<Self, OpenError> {
         let (tracks, by_id, by_origin) = load_tracks(&connection, &dir, lighting)?;
         let playlists = load_playlists(&connection, &tracks, &by_id, &by_origin)?;
+        let cue_counts = load_cue_counts(&connection, &by_id, tracks.len());
         Ok(Self {
             dir,
             cache,
@@ -232,6 +250,7 @@ impl Library {
             by_origin,
             legacy_origins: origins::legacy_path(),
             ratings: Mutex::default(),
+            cue_counts: Mutex::new(cue_counts),
             connection: Mutex::new(connection),
         })
     }
@@ -750,6 +769,73 @@ impl Library {
         Ok(())
     }
 
+    /// How many cues the track at `index` in `tracks` has set, as it is now.
+    pub fn cue_count(&self, index: usize) -> u32 {
+        let counts = self.cue_counts.lock().expect("cue counts lock");
+        counts.get(index).copied().unwrap_or(0)
+    }
+
+    /// The cues of the track at `index` in `tracks`, in slot order. None if the track has
+    /// none, has not been analysed, or has them stored in a way that isn't understood.
+    pub fn cues(&self, index: usize) -> rusqlite::Result<Vec<Cue>> {
+        let Some(track) = self.tracks.get(index) else {
+            return Ok(Vec::new());
+        };
+        let connection = self.connection.lock().expect("database lock");
+        let Some(blobs) = read_cue_blobs(&connection, track.db_id)? else {
+            return Ok(Vec::new());
+        };
+        let rate = blobs.sample_rate();
+        let quick = blobs.quick_cues.as_deref().and_then(QuickCues::parse);
+        Ok(match (rate, quick) {
+            (Some(rate), Some(quick)) => quick.cues(rate),
+            _ => Vec::new(),
+        })
+    }
+
+    /// Makes `cues` the cues of the track at `index` in `tracks` in the working copy (the
+    /// slots that are not in it are emptied), and returns the cues as they are now. The
+    /// source only gets them when the working copy is written to it (`sync::push`). The
+    /// main cue point and what else is stored with the cues is left as it was.
+    pub fn set_cues(&self, index: usize, cues: &[Cue]) -> Result<Vec<Cue>, EditError> {
+        let track = self.tracks.get(index).ok_or(EditError::NoSuchTrack)?;
+        let connection = self.connection.lock().expect("database lock");
+        let blobs = read_cue_blobs(&connection, track.db_id)?.ok_or(EditError::NoAnalysis)?;
+        let rate = blobs.sample_rate().ok_or(EditError::NoAnalysis)?;
+        let duration = blobs
+            .track_data
+            .as_deref()
+            .and_then(cues::sample_count)
+            .map(|samples| samples / rate);
+        cues::validate(cues, duration).map_err(EditError::BadCue)?;
+
+        let mut quick = match blobs.quick_cues.as_deref() {
+            None | Some([]) => QuickCues::empty(),
+            // Better to refuse than to replace what we can't read.
+            Some(blob) => QuickCues::parse(blob).ok_or(EditError::UnreadableCues)?,
+        };
+        quick.replace(cues, rate);
+
+        // Noted first, like a rating: see `set_rating`.
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let changed = connection.execute(
+            "UPDATE PerformanceData SET quickCues = ?1 WHERE trackId = ?2",
+            (quick.encode(), track.db_id),
+        )?;
+        if changed == 0 {
+            return Err(EditError::NoAnalysis);
+        }
+        if let Some(count) = self
+            .cue_counts
+            .lock()
+            .expect("cue counts lock")
+            .get_mut(index)
+        {
+            *count = quick.count() as u32;
+        }
+        Ok(quick.cues(rate))
+    }
+
     /// The beatgrid of the track at `index` in `tracks`, if the library has analysed one.
     pub fn beat_grid(&self, index: usize) -> rusqlite::Result<Option<Vec<Marker>>> {
         let Some(track) = self.tracks.get(index) else {
@@ -951,6 +1037,60 @@ fn load_tracks(
     }
 
     Ok((tracks, by_id, by_origin))
+}
+
+/// How many cues each track has set, by index in the tracks. A library with no analysis
+/// table, or a blob that can't be read, counts as no cues.
+fn load_cue_counts(connection: &Connection, by_id: &TrackIds, tracks: usize) -> Vec<u32> {
+    let mut counts = vec![0; tracks];
+    let Ok(mut statement) = connection
+        .prepare("SELECT trackId, quickCues FROM PerformanceData WHERE quickCues IS NOT NULL")
+    else {
+        return counts;
+    };
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    });
+    for (id, blob) in rows.into_iter().flatten().flatten() {
+        if let (Some(index), Some(quick)) = (by_id.get(&id), QuickCues::parse(&blob)) {
+            counts[*index] = quick.count() as u32;
+        }
+    }
+    counts
+}
+
+/// What a track's analysis holds that the cues need.
+struct CueBlobs {
+    track_data: Option<Vec<u8>>,
+    beat_data: Option<Vec<u8>>,
+    quick_cues: Option<Vec<u8>>,
+}
+
+impl CueBlobs {
+    /// The sample rate the cues' positions are in samples of.
+    fn sample_rate(&self) -> Option<f64> {
+        [&self.track_data, &self.beat_data]
+            .into_iter()
+            .flatten()
+            .find_map(|blob| cues::sample_rate(blob))
+    }
+}
+
+/// `None` if the track has no row of analysis.
+fn read_cue_blobs(connection: &Connection, track: i64) -> rusqlite::Result<Option<CueBlobs>> {
+    connection
+        .query_row(
+            "SELECT trackData, beatData, quickCues FROM PerformanceData WHERE trackId = ?1",
+            [track],
+            |row| {
+                Ok(CueBlobs {
+                    track_data: row.get(0)?,
+                    beat_data: row.get(1)?,
+                    quick_cues: row.get(2)?,
+                })
+            },
+        )
+        .optional()
 }
 
 fn load_playlists(
@@ -2053,6 +2193,127 @@ mod tests {
             1
         );
         assert_eq!(library.origins()[&key(1)], "/pc/one.flac");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// A `trackData` blob that starts the way Engine's does: the sample rate and the
+    /// number of samples.
+    fn track_data(rate: f64, samples: i64) -> Vec<u8> {
+        use std::io::Write;
+        let mut data = rate.to_be_bytes().to_vec();
+        data.extend(samples.to_be_bytes());
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&data).unwrap();
+        let mut blob = (data.len() as u32).to_be_bytes().to_vec();
+        blob.extend(encoder.finish().unwrap());
+        blob
+    }
+
+    fn cue(slot: usize, label: &str, position_seconds: f64) -> Cue {
+        Cue {
+            slot,
+            label: label.to_string(),
+            position_seconds,
+            color: 0xfff4_d338,
+        }
+    }
+
+    #[test]
+    fn cues_are_counted_read_and_written_in_the_working_copy() {
+        let cache =
+            std::env::temp_dir().join(format!("open-engine-lib-cues-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).unwrap();
+
+        // Track 1 has a cue, track 2 has analysis but no cue blob, track 3 has none at all.
+        let connection = database();
+        connection
+            .execute_batch(
+                "CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB,
+                    overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB);",
+            )
+            .unwrap();
+        let mut with_cue = QuickCues::empty();
+        with_cue.replace(&[cue(2, "Drop", 10.0)], 44_100.0);
+        connection
+            .execute(
+                "INSERT INTO PerformanceData (trackId, trackData, quickCues) VALUES
+                    (1, ?1, ?2), (2, ?1, NULL)",
+                (track_data(44_100.0, 44_100 * 200), with_cue.encode()),
+            )
+            .unwrap();
+        let library = Library::load(connection, PathBuf::from("/lib"), cache.clone()).unwrap();
+
+        assert_eq!(
+            (0..3)
+                .map(|index| library.cue_count(index))
+                .collect::<Vec<_>>(),
+            [1, 0, 0]
+        );
+        let cues = library.cues(0).unwrap();
+        assert_eq!(
+            (cues.len(), cues[0].slot, cues[0].label.as_str()),
+            (1, 2, "Drop")
+        );
+        assert_eq!(cues[0].position_seconds, 10.0);
+        assert!(library.cues(1).unwrap().is_empty());
+        assert!(library.cues(2).unwrap().is_empty());
+
+        // Changing the cue of track 1 and adding two to track 2, which had no blob.
+        let after = library
+            .set_cues(0, &[cue(0, "In", 1.5), cue(2, "Drop", 12.0)])
+            .unwrap();
+        assert_eq!(after.iter().map(|cue| cue.slot).collect::<Vec<_>>(), [0, 2]);
+        assert_eq!(library.cues(0).unwrap(), after);
+        library
+            .set_cues(1, &[cue(7, "", 0.0), cue(6, "Out", 200.0)])
+            .unwrap();
+        assert_eq!(library.cue_count(0), 2);
+        assert_eq!(library.cue_count(1), 2);
+        assert!(
+            cache.join("edited").exists(),
+            "the edit is noted for the cache"
+        );
+
+        // The slots that are not sent are emptied.
+        assert!(library.set_cues(0, &[]).unwrap().is_empty());
+        assert_eq!(library.cue_count(0), 0);
+        assert!(library.cues(0).unwrap().is_empty());
+
+        // What is not valid, or can't hold cues, changes nothing.
+        assert!(matches!(
+            library.set_cues(1, &[cue(8, "", 1.0)]),
+            Err(EditError::BadCue(_))
+        ));
+        assert!(matches!(
+            library.set_cues(1, &[cue(0, "", 200.5)]),
+            Err(EditError::BadCue(_)),
+        ));
+        assert!(matches!(
+            library.set_cues(2, &[cue(0, "", 1.0)]),
+            Err(EditError::NoAnalysis)
+        ));
+        assert!(matches!(
+            library.set_cues(5, &[]),
+            Err(EditError::NoSuchTrack)
+        ));
+        assert_eq!(library.cue_count(1), 2);
+
+        // A blob that isn't understood is not written over.
+        library
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE PerformanceData SET quickCues = x'0000000401' WHERE trackId = 2",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            library.set_cues(1, &[cue(0, "", 1.0)]),
+            Err(EditError::UnreadableCues)
+        ));
         let _ = std::fs::remove_dir_all(&cache);
     }
 

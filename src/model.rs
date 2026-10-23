@@ -32,6 +32,9 @@ pub struct Track {
     pub lighting: Lighting,
     /// The SoundSwitch projects that have lighting for the track.
     pub lighting_projects: Vec<String>,
+    /// How many cues the track had set when the library was fetched (the browser knows
+    /// what it is now).
+    pub cue_count: u32,
     /// Where the file was when its origin was saved, in Open Engine Lib's own database.
     pub origin: Option<String>,
 }
@@ -319,6 +322,7 @@ mod tests {
             rating: None,
             lighting: Lighting::None,
             lighting_projects: Vec::new(),
+            cue_count: 0,
             origin: None,
         }
     }
@@ -362,6 +366,7 @@ mod tests {
             rating: None,
             lighting: Lighting::None,
             lighting_projects: Vec::new(),
+            cue_count: 0,
             origin: None,
         };
         let library = Library::new(

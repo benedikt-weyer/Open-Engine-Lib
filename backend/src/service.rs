@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+use crate::cues::Cue;
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, EditError, Library, OpenError};
 use crate::mirror::{self, MirrorError};
@@ -496,7 +497,13 @@ impl LibraryService for Service {
                             .as_ref()
                             .and_then(|key| origins.get(key))
                             .cloned();
-                        track_message(id as u32, track, library.rating(id), origin)
+                        track_message(
+                            id as u32,
+                            track,
+                            library.rating(id),
+                            library.cue_count(id),
+                            origin,
+                        )
                     })
                     .collect();
                 if sender.send(Ok(api::TrackBatch { tracks })).await.is_err() {
@@ -621,6 +628,60 @@ impl LibraryService for Service {
             }),
         }))
     }
+
+    async fn get_cues(
+        &self,
+        request: Request<api::GetCuesRequest>,
+    ) -> Result<Response<api::CuesResponse>, Status> {
+        let library = self.library()?;
+        let id = request.into_inner().track_id;
+        if library.tracks.get(id as usize).is_none() {
+            return Err(Status::not_found(format!("unknown track id {id}")));
+        }
+        let cues = tokio::task::spawn_blocking(move || library.cues(id as usize))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(|error| Status::internal(error.to_string()))?;
+        Ok(Response::new(cues_message(cues)))
+    }
+
+    async fn set_cues(
+        &self,
+        request: Request<api::SetCuesRequest>,
+    ) -> Result<Response<api::CuesResponse>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        let id = request.track_id;
+        let mut cues = Vec::with_capacity(request.cues.len());
+        for cue in request.cues {
+            cues.push(Cue {
+                slot: cue.slot as usize,
+                label: cue.label,
+                position_seconds: cue.position_seconds,
+                color: cue.color_argb,
+            });
+        }
+        // Reads and writes the database: not on the async threads.
+        let cues = tokio::task::spawn_blocking(move || library.set_cues(id as usize, &cues))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(edit_status)?;
+        Ok(Response::new(cues_message(cues)))
+    }
+}
+
+fn cues_message(cues: Vec<Cue>) -> api::CuesResponse {
+    api::CuesResponse {
+        cues: cues
+            .into_iter()
+            .map(|cue| api::Cue {
+                slot: cue.slot as u32,
+                label: cue.label,
+                position_seconds: cue.position_seconds,
+                color_argb: cue.color,
+            })
+            .collect(),
+    }
 }
 
 fn playlist_messages(library: &Library) -> Vec<api::Playlist> {
@@ -735,11 +796,13 @@ fn mirror_status(error: MirrorError) -> Status {
 fn edit_status(error: EditError) -> Status {
     match error {
         EditError::NoSuchTrack | EditError::NoSuchPlaylist => Status::not_found(error.to_string()),
-        EditError::NotSmart | EditError::IsSmart | EditError::EmptyTitle => {
+        EditError::NotSmart | EditError::IsSmart | EditError::EmptyTitle | EditError::BadCue(_) => {
             Status::invalid_argument(error.to_string())
         }
         EditError::TitleTaken => Status::already_exists(error.to_string()),
-        EditError::NoSmartlists => Status::failed_precondition(error.to_string()),
+        EditError::NoSmartlists | EditError::NoAnalysis | EditError::UnreadableCues => {
+            Status::failed_precondition(error.to_string())
+        }
         EditError::Cache(_) | EditError::Database(_) => Status::internal(error.to_string()),
     }
 }
@@ -748,6 +811,7 @@ fn track_message(
     id: u32,
     track: &library::Track,
     rating: Option<u32>,
+    cue_count: u32,
     origin: Option<String>,
 ) -> api::Track {
     api::Track {
@@ -765,6 +829,7 @@ fn track_message(
         soundswitch_projects: track.lighting.projects.clone(),
         path: track.relative_path.clone(),
         origin,
+        cue_count,
     }
 }
 

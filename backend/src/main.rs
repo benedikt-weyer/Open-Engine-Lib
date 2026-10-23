@@ -10,6 +10,7 @@
 
 mod beatgrid;
 mod cache;
+mod cues;
 mod engine;
 mod library;
 mod mirror;

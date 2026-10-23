@@ -122,6 +122,22 @@ service LibraryService {
   // track, INVALID_ARGUMENT for an unknown track id, NOT_FOUND if the audio file does
   // not exist, INTERNAL if it can't be decoded.
   rpc GetWaveform(GetWaveformRequest) returns (GetWaveformResponse);
+  // The cues (hot cues) of a track, in slot order. A track without any, or that has not
+  // been analysed, has an empty list.
+  // Errors: FAILED_PRECONDITION if no library is open, NOT_FOUND for an unknown track
+  // id, INTERNAL if the database can't be read.
+  rpc GetCues(GetCuesRequest) returns (CuesResponse);
+  // Replaces the cues of a track in the working copy: the slots in the request are the
+  // ones the track has afterwards, all other slots are emptied. (To add, change or remove
+  // a cue, send the list from `GetCues` with that change.) The source is not touched until
+  // `SyncToSource`, and `ListTracks` answers with the new `cue_count` from now on. The
+  // answer is the cues as they are now.
+  // Errors: FAILED_PRECONDITION if no library is open or the track has no analysis to keep
+  // cues in (it has not been analysed), NOT_FOUND for an unknown track id,
+  // INVALID_ARGUMENT for a slot that is 8 or more or is given twice, a position that is
+  // negative, not a number or after the end of the track, or a label of more than 255
+  // bytes, INTERNAL if the database can't be written.
+  rpc SetCues(SetCuesRequest) returns (CuesResponse);
 }
 
 message OpenLibraryRequest {
@@ -375,6 +391,8 @@ message Track {
   // Open Engine Lib's own database and shared by all libraries the track is in. Not set
   // if none was saved.
   optional string origin = 14;
+  // How many cue slots the track has set, as of now (`SetCues` changes it).
+  uint32 cue_count = 15;
 }
 
 enum SoundSwitchState {
@@ -483,6 +501,31 @@ message BeatMarker {
   double position_seconds = 1;
   // Counts beats, and can be negative. A beat whose number is a multiple of 4 starts a bar.
   int64 beat_number = 2;
+}
+
+message GetCuesRequest {
+  uint32 track_id = 1;
+}
+
+message SetCuesRequest {
+  uint32 track_id = 1;
+  repeated Cue cues = 2;
+}
+
+message CuesResponse {
+  // In slot order.
+  repeated Cue cues = 1;
+}
+
+// A cue point of a track: one of the eight pads of Engine's hot cues.
+message Cue {
+  // The pad, from 0 to 7 (Engine shows them as 1 to 8).
+  uint32 slot = 1;
+  string label = 2;
+  // Where the cue is, in seconds from the start of the track.
+  double position_seconds = 3;
+  // The color as 0xAARRGGBB.
+  uint32 color_argb = 4;
 }
 
 message GetSyncDiffRequest {

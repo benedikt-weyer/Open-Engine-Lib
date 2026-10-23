@@ -38,7 +38,7 @@ If the backend is missing or fails to start, the library page says so and offers
 The protocol lives in `api/proto/openenginelib/v1/`:
 
 - `backend.proto`: `BackendService.GetInfo`, the version handshake.
-- `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `SetRating`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`, `GetWaveform`.
+- `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `SetRating`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`, `GetWaveform`, `GetCues`, `SetCues`.
 - `playback.proto`: `PlaybackService`: `Play`, `TogglePause`, `Stop`, `Next`, `Previous`, `Seek`, `GetStatus`. The backend owns the queue and moves on to the next track by itself; the UI polls `GetStatus` while playing.
 
 Versioning rules:
@@ -82,7 +82,7 @@ Lists are cut at 200 entries (the counts are complete). Matching is by Engine's 
 - Each file is written next to its place and moved over it in one step, so a file is never half written, and if a later file fails the earlier ones are put back from the backup.
 - Afterwards the working copy and the source count as the same, so nothing shows as changed from outside.
 
-**Edits:** the app changes the working copy (today only star ratings, see below) and never the source: an edit reaches the source only through this window. Opening a library re-copies the working copy when the source has changed since. So that this can't throw edits away, the backend leaves an `edited` mark in the cache folder when it changes the working copy, which writing to the source clears. A working copy that has the mark and is replaced because the source changed is first moved to `unsynced-edits/` in the cache folder (the latest only), so the edits can still be recovered from there. The app doesn't say so yet.
+**Edits:** the app changes the working copy (star ratings and cues, see below) and never the source: an edit reaches the source only through this window. Opening a library re-copies the working copy when the source has changed since. So that this can't throw edits away, the backend leaves an `edited` mark in the cache folder when it changes the working copy, which writing to the source clears. A working copy that has the mark and is replaced because the source changed is first moved to `unsynced-edits/` in the cache folder (the latest only), so the edits can still be recovered from there. The app doesn't say so yet.
 
 ## Ratings and SoundSwitch lighting
 
@@ -129,7 +129,19 @@ While a song is loaded in the player, the UI shows a DJ-style deck above the pla
 - **Smooth scrolling:** the backend's position arrives about four times a second, but each report is a little early or late. The UI keeps its own clock (`clock.rs`) that runs on by itself and only leans 15% towards each report, snapping to it only when it is more than 0.3 s away (a seek, another track, a pause). The backend reads the position fresh for every status request. The canvas asks for a redraw every frame while playing.
 - **Smooth drawing:** each band is drawn as one filled outline through the (lightly smoothed) columns, not a bar per column, and the window is anti-aliased, so the waveform doesn't shimmer as it scrolls.
 - **Checked on a real library:** for every track tried the grid's tempo equals the library's BPM, and the strongest kick onsets of four-on-the-floor tracks fall 10–30 ms after the grid line, which is the detection window's own lag, so the lines sit on the beats.
-- **Not done:** no scrubbing by dragging, no zoom control, no cue points or loops, and no waveform for streaming tracks (they have no file).
+- **Cues:** the cues (hot cues) of the track are drawn over both views, see [Cues](#cues).
+- **Not done:** no scrubbing by dragging, no zoom control, no loops, and no waveform for streaming tracks (they have no file).
+
+## Cues
+
+A track has eight cue pads (Engine's hot cues). Each can hold a cue: a position, a name and a color. They are stored in `PerformanceData.quickCues` (see `docs/engine-library-format.md`); `backend/src/cues.rs` reads and writes that blob, and keeps the part of it that is not about the pads (the main cue point) as it was. Loops and the main cue point itself are not handled.
+
+- **Reading:** `ListTracks` gives every track's `cue_count`, which the track list shows in its **Cues** column (a dash for none). `GetCues` gives a track's cues with their positions in seconds (the blob has samples; the sample rate comes from `trackData`, else `beatData`). The UI asks for the cues of the track in the player once, when it starts playing.
+- **Showing:** on the zoomed waveform a cue is a line in its color with a flag at the bottom with the pad's number and its name (the name is left out when it is Engine's default `Cue N`). The overview has a line with a small square on top. The cues are drawn anew every frame over the cached pieces of the waveform, so changing them doesn't redraw the waveform.
+- **Pads:** under the waveform there is a row of eight pads. A pad with a cue is shown in the cue's color, and clicking it jumps there; right-clicking it removes the cue. Clicking an empty pad sets a cue at the playhead, with Engine's name and color for that pad (`Cue 3`, and a color per pad). "Edit cues…" opens a window.
+- **Editing:** the window has a row per pad with the color to choose from, the name, the position as `m:ss.mmm` (or plain seconds), and buttons to take the position from the playhead, to jump there and to remove the cue; an empty pad has "Add at playhead". Nothing is written until **Save**, which sends all eight pads at once. The playhead used is the one drawn (the waveform delay is taken into account), so a cue lands where it was heard.
+- **Writing:** `SetCues` replaces the cues of a track in the working copy: the slots in the request are the ones the track has afterwards, and the others are emptied (so adding, changing and removing are all the same call, with the list from `GetCues` changed). It checks that the slots are 0 to 7 and not repeated, the positions are within the track and the names at most 255 bytes, and refuses (`FAILED_PRECONDITION`) a track that has no analysis to keep cues in (`PerformanceData` row or sample rate missing) and a `quickCues` blob it can't read, which it never writes over. A track with a row but no cue blob gets a new one (eight empty slots). The source only gets the change when you sync, where it shows as changed "cues". Cues can't be changed while the library is being saved elsewhere, nor while another change is being written.
+- **Not done:** only the track in the player can have its cues edited (that is where the waveform and the playhead are). A cue is not snapped to the beatgrid. Writing cues has not been tried on a real player, though a blob that is read and written again has the same content as it had, and the backend reads the cues of a real library correctly (`reads_the_cues_of_a_real_library`, ignored).
 
 ## Restoring the last session
 
@@ -151,7 +163,7 @@ The backend never works on a library in place: it may sit on a removable drive, 
 
 - The cache lives in `$OPEN_ENGINE_LIB_CACHE`, else `<user cache dir>/open-engine-lib/libraries/<folder name>-<hash of path>/`.
 - A `manifest` file lists the copied files with their size and modification time. If the source databases still match it, the copy is reused as it is; otherwise the databases are copied again from scratch (but a copy with edits that were never synced is kept in `unsynced-edits/` first, see "Syncing the working copy to the source").
-- The copy is opened read-write so that SQLite can roll back a copied hot journal. Edits (ratings) are written to the copy, and nothing is written to the source library except by syncing.
+- The copy is opened read-write so that SQLite can roll back a copied hot journal. Edits (ratings, cues) are written to the copy, and nothing is written to the source library except by syncing.
 - `OpenLibraryResponse.cache_path` tells the UI where the copy is.
 
 ## Tests

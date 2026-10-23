@@ -94,6 +94,9 @@ pub struct Browser {
     /// Ratings set since the library was fetched, by track id. (The library is shared
     /// and not changed; the backend has these too.)
     ratings: HashMap<u32, u32>,
+    /// How many cues tracks have now, by track id, for the ones that changed since the
+    /// library was fetched.
+    cue_counts: HashMap<u32, u32>,
     /// The origins saved since the library was fetched (boxed to keep `Browser` small).
     origins: Box<SavedOrigins>,
     /// Playlist folders that are opened up in the tree.
@@ -116,6 +119,19 @@ impl Browser {
             Some(rating) => self.ratings.insert(id, rating),
             None => self.ratings.remove(&id),
         };
+    }
+
+    /// How many cues the track with `id` has set, as it is now.
+    pub fn cue_count(&self, id: u32) -> u32 {
+        self.cue_counts.get(&id).copied().unwrap_or_else(|| {
+            self.library
+                .track_by_id(id)
+                .map_or(0, |track| track.cue_count)
+        })
+    }
+
+    pub fn set_cue_count(&mut self, id: u32, count: u32) {
+        self.cue_counts.insert(id, count);
     }
 
     /// Where the file of `track` was when its origin was saved.
@@ -149,6 +165,7 @@ impl Browser {
             selected: None,
             all,
             ratings: HashMap::new(),
+            cue_counts: HashMap::new(),
             origins: Box::default(),
             expanded: HashSet::new(),
             scroll: 0.0,
@@ -495,6 +512,7 @@ fn header<'a>(language: Language, widths: &ColumnWidths) -> Element<'a, Message>
             heading_cell(&strings.col_bpm),
             heading_cell(&strings.col_length),
             heading_cell(&strings.col_rating),
+            heading_cell(&strings.col_cues),
             heading_cell(&strings.col_lighting),
             heading_cell(&strings.col_origin),
         ],
@@ -556,6 +574,7 @@ pub fn tracks<'a>(
                     .and_then(|origin| reachable.get(origin)),
                 playing: playing == Some(row_index),
                 stars: stars_of(browser.rating(track.id)),
+                cues: browser.cue_count(track.id),
             },
             track.album_art.and_then(|id| covers.get(id)),
             widths,
@@ -613,6 +632,15 @@ fn stars_cell<'a>(track: &Track, stars: u8, dim: bool) -> Element<'a, Message> {
         );
     }
     stars_row.into()
+}
+
+/// How many cues the track has set, a dash for none.
+fn cues_cell<'a>(count: u32) -> Element<'a, Message> {
+    if count == 0 {
+        cell("–").style(text::secondary).into()
+    } else {
+        cell(count.to_string()).into()
+    }
 }
 
 /// Whether SoundSwitch has lighting for the track: a filled dot for rendered, a ring for
@@ -749,6 +777,8 @@ struct RowState<'a> {
     playing: bool,
     /// The track's rating as 0 to 5 stars.
     stars: u8,
+    /// How many cues the track has set.
+    cues: u32,
 }
 
 fn track_row<'a>(
@@ -766,6 +796,7 @@ fn track_row<'a>(
         origin_reachable,
         playing,
         stars,
+        cues,
     } = state;
     // Streaming tracks have no file here, so they can be seen but not played.
     let style = |content: text::Text<'a>| -> Element<'a, Message> {
@@ -810,6 +841,7 @@ fn track_row<'a>(
             style(cell(bpm)),
             style(cell(length)),
             stars_cell(track, stars, track.streaming),
+            cues_cell(cues),
             lighting_cell(track, language),
             origin_cell(origin, origin_reachable, language),
         ],

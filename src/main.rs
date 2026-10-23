@@ -7,6 +7,9 @@ mod colors;
 mod columns;
 mod config;
 mod covers;
+mod cue_bar;
+mod cue_editor;
+mod cues;
 mod deck;
 mod drives;
 mod i18n;
@@ -36,6 +39,7 @@ use clock::Clock;
 use columns::{Column, ColumnStore};
 use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, WaveformColors};
 use covers::Covers;
+use cues::{Cue, TrackCues};
 use drives::Drive;
 use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text, tooltip};
@@ -132,6 +136,11 @@ struct State {
     clock: Clock,
     /// The waveform and beatgrid of the playing track.
     waveforms: Waveforms,
+    /// The cues of the tracks played.
+    cues: TrackCues,
+    /// A change to cues is being written, so no other can be started: it would be made
+    /// from cues that are about to be out of date.
+    cues_busy: bool,
     /// The list the queue was made from, so its playing row can be marked.
     play_source: Option<Source>,
     /// A failed request to the backend.
@@ -152,6 +161,8 @@ struct State {
     smart: Option<smart_editor::Editor>,
     /// The window for adding, renaming or deleting a playlist, while it is open.
     playlist_dialog: Option<playlist_dialog::Dialog>,
+    /// The window for editing the cues of the playing track, while it is open.
+    cue_editor: Option<cue_editor::Editor>,
     /// Where the library is being saved to, and why the last save failed.
     saving: Option<PathBuf>,
     save_error: Option<String>,
@@ -292,6 +303,24 @@ pub enum Message {
     Tick,
     /// Jump to a point of the track, in seconds (from clicking the waveform overview).
     SeekTo(f32),
+    /// A pad of the playing track was clicked: jump to its cue.
+    CueJump(usize),
+    /// An empty pad of the playing track was clicked: set a cue at the playhead.
+    CueAdd(usize),
+    /// A pad of the playing track was right-clicked: remove its cue.
+    CueRemove(usize),
+    CueEditorOpen,
+    CueEditor(cue_editor::Event),
+    CueEditorSave,
+    CueEditorCancel,
+    /// A fetched list of cues: the cues' generation it was asked in, the track id and the cues.
+    CuesLoaded(u32, u32, Result<Vec<Cue>, String>),
+    /// The backend answered a change of a track's cues with the cues it has now.
+    CuesEdited {
+        generation: u32,
+        track: u32,
+        result: Result<Vec<Cue>, String>,
+    },
     Status(Result<PlaybackStatus, String>),
     /// A fetched cover: the covers' generation it was asked in, its id and its image.
     CoverLoaded(u32, u32, Result<Option<Vec<u8>>, String>),
@@ -340,6 +369,8 @@ impl State {
             status: PlaybackStatus::default(),
             clock: Clock::new(Instant::now()),
             waveforms: Waveforms::default(),
+            cues: TrackCues::default(),
+            cues_busy: false,
             play_source: None,
             backend_error: None,
             gain_draft: None,
@@ -350,6 +381,7 @@ impl State {
             library_sync: None,
             smart: None,
             playlist_dialog: None,
+            cue_editor: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::discover(),
@@ -454,6 +486,7 @@ impl State {
             || self.library_sync.is_some()
             || self.smart.is_some()
             || self.playlist_dialog.is_some()
+            || self.cue_editor.is_some()
     }
 
     /// Starts comparing the playlists of the open library with those of the library at
@@ -513,6 +546,7 @@ impl State {
         self.covers.clear();
         self.reachable.clear();
         self.waveforms.clear();
+        self.cues.clear();
         self.sync = None;
         self.library = LibraryState::Opening(path.clone());
         Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
@@ -723,6 +757,56 @@ impl State {
         })
     }
 
+    /// The id of the track in the player.
+    fn playing_id(&self) -> Option<u32> {
+        if self.is_stopped() {
+            return None;
+        }
+        self.status.track_id
+    }
+
+    /// Where the playhead of the waveform is, in seconds into the playing track: what is
+    /// heard now (the waveform trails the player by the set delay, to line up with it).
+    fn playhead(&self) -> f64 {
+        let duration = match self.playing_id().map(|id| self.waveforms.display(id)) {
+            Some(waveform::Display::Ready(waveform)) => waveform.duration,
+            _ => f64::INFINITY,
+        };
+        let delay = f64::from(self.config.effective().waveform_delay_ms) / 1000.0;
+        self.clock.delayed(delay).position(Instant::now(), duration)
+    }
+
+    /// Asks the backend for the cues of the track in the player, if it has not been asked
+    /// for yet.
+    fn fetch_cues(&mut self) -> Task<Message> {
+        let (Some(backend), Some(id)) = (self.backend(), self.playing_id()) else {
+            return Task::none();
+        };
+        if !matches!(self.library, LibraryState::Open(_)) || !self.cues.claim(id) {
+            return Task::none();
+        }
+        let generation = self.cues.generation();
+        Task::perform(backend::cues(backend, id), move |result| {
+            Message::CuesLoaded(generation, id, result)
+        })
+    }
+
+    /// Asks the backend to make `cues` the cues of `track`.
+    fn save_cues(&mut self, track: u32, cues: Vec<Cue>) -> Task<Message> {
+        let Some(backend) = self.backend() else {
+            return Task::none();
+        };
+        self.cues_busy = true;
+        let generation = self.cues.generation();
+        Task::perform(backend::set_cues(backend, track, cues), move |result| {
+            Message::CuesEdited {
+                generation,
+                track,
+                result,
+            }
+        })
+    }
+
     /// Remembers what was open, then quits.
     fn exit(&mut self) -> Task<Message> {
         self.save_session(true);
@@ -764,6 +848,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         task,
         state.fetch_covers(),
         state.fetch_waveform(),
+        state.fetch_cues(),
         state.check_paths(),
     ])
 }
@@ -888,7 +973,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 || matches!(state.sync, Some(SyncStage::Syncing { .. }))
                 || state.library_sync.is_some()
                 || state.smart.is_some()
-                || state.playlist_dialog.is_some();
+                || state.playlist_dialog.is_some()
+                || state.cue_editor.is_some();
             // (The button starts in the usual direction; "compare again" keeps it.)
             if !busy && state.sync.is_none() {
                 state.sync_reverse = false;
@@ -991,6 +1077,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 });
                 state.covers.clear();
                 state.reachable.clear();
+                // Pulling from the source can have replaced the cues.
+                state.cues.clear();
                 state.library = LibraryState::Open(Browser::new(library));
                 if let Some(session) = session {
                     return state.restore_session(session);
@@ -1497,6 +1585,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.covers.clear();
             state.reachable.clear();
             state.waveforms.clear();
+            state.cues.clear();
             state.sync = None;
             state.library_sync = None;
             // Closing a library on purpose means the next start doesn't reopen it.
@@ -1622,6 +1711,129 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 position_ms: (seconds.max(0.0) * 1000.0) as u64,
             });
         }
+        Message::CueJump(slot) => {
+            let position = state
+                .playing_id()
+                .and_then(|id| state.cues.get(id))
+                .and_then(|cues| cues.iter().find(|cue| cue.slot == slot))
+                .map(|cue| cue.position);
+            if let Some(position) = position {
+                return handle(state, Message::SeekTo(position as f32));
+            }
+        }
+        // The databases are being cloned: a cue set now might miss the clone. And one
+        // change is written at a time.
+        Message::CueAdd(_) | Message::CueRemove(_) | Message::CueEditorSave
+            if state.saving.is_some() || state.cues_busy => {}
+        Message::CueEditorOpen if state.saving.is_some() || state.window_open() => {}
+        Message::CueAdd(slot) => {
+            if let Some(id) = state.playing_id()
+                && let Some(cues) = state.cues.get(id)
+                && slot < cues::SLOTS
+                && cues.iter().all(|cue| cue.slot != slot)
+            {
+                let cues = cues::with(cues, Cue::new(slot, state.playhead()));
+                return state.save_cues(id, cues);
+            }
+        }
+        Message::CueRemove(slot) => {
+            if let Some(id) = state.playing_id()
+                && let Some(cues) = state.cues.get(id)
+                && cues.iter().any(|cue| cue.slot == slot)
+            {
+                let cues = cues::without(cues, slot);
+                return state.save_cues(id, cues);
+            }
+        }
+        Message::CueEditorOpen => {
+            if let Some(id) = state.playing_id()
+                && let Some(cues) = state.cues.get(id)
+                && let LibraryState::Open(browser) = &state.library
+                && let Some(track) = browser.library.track_by_id(id)
+            {
+                state.cue_editor = Some(cue_editor::Editor::new(id, &track.title, cues));
+            }
+        }
+        Message::CueEditor(event) => {
+            let playhead = state.playhead();
+            if let cue_editor::Event::Go(slot) = &event {
+                let position = state
+                    .cue_editor
+                    .as_ref()
+                    .and_then(|editor| editor.position_of(*slot));
+                if let Some(position) = position {
+                    return handle(state, Message::SeekTo(position as f32));
+                }
+            } else if let Some(editor) = state.cue_editor.as_mut().filter(|editor| !editor.busy) {
+                editor.update(event, playhead);
+            }
+        }
+        Message::CueEditorSave => {
+            let strings = state.config.effective().language.strings();
+            let Some(editor) = state.cue_editor.as_mut().filter(|editor| !editor.busy) else {
+                return Task::none();
+            };
+            match editor.cues() {
+                Err(bad) => {
+                    editor.error = Some(fill(
+                        &strings.cue_bad_position,
+                        &[("number", &(bad.slot + 1)), ("text", &bad.text)],
+                    ));
+                }
+                Ok(cues) => {
+                    let track = editor.track;
+                    editor.busy = true;
+                    return state.save_cues(track, cues);
+                }
+            }
+        }
+        Message::CueEditorCancel => {
+            if state.cue_editor.as_ref().is_some_and(|editor| !editor.busy) {
+                state.cue_editor = None;
+            }
+        }
+        Message::CuesLoaded(generation, id, result) => match result {
+            Ok(cues) => state.cues.set(generation, id, cues),
+            Err(error) => {
+                // Not asked again (that would be a request after every message), so there
+                // are no pads for this track.
+                state.backend_error = Some(error);
+            }
+        },
+        Message::CuesEdited {
+            generation,
+            track,
+            result,
+        } => {
+            state.cues_busy = false;
+            match result {
+                Ok(cues) => {
+                    state.backend_error = None;
+                    // (An answer about another library's track means nothing here.)
+                    if generation == state.cues.generation() {
+                        if let LibraryState::Open(browser) = &mut state.library {
+                            browser.set_cue_count(track, cues.len() as u32);
+                        }
+                        state.cues.set(generation, track, cues);
+                    }
+                    if state
+                        .cue_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.track == track)
+                    {
+                        state.cue_editor = None;
+                    }
+                }
+                Err(error) => match &mut state.cue_editor {
+                    Some(editor) => {
+                        let strings = state.config.effective().language.strings();
+                        editor.busy = false;
+                        editor.error = Some(fill(&strings.cue_failed, &[("error", &error)]));
+                    }
+                    None => state.backend_error = Some(error),
+                },
+            }
+        }
         Message::Status(Ok(status)) => {
             state.status = status;
             state.clock.report(
@@ -1719,6 +1931,9 @@ fn view(state: &State) -> Element<'_, Message> {
     }
     if let Some(editor) = &state.smart {
         return iced::widget::stack![window, smart_editor::modal(editor, language)].into();
+    }
+    if let Some(editor) = &state.cue_editor {
+        return iced::widget::stack![window, cue_editor::modal(editor, language)].into();
     }
     match (&state.playlist_dialog, &state.library) {
         (Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
@@ -1859,9 +2074,13 @@ fn open_library<'a>(
         });
     // The waveform of the track in the player, with the playhead where the player is.
     let colors = state.config.effective().waveform_colors;
+    let known_cues = now.as_ref().and_then(|now| state.cues.get(now.track.id));
+    let cues_known = known_cues.is_some();
+    let track_cues = known_cues.unwrap_or_default();
     let deck = now.as_ref().map(|now| {
         deck::view(
             state.waveforms.display(now.track.id),
+            track_cues,
             // Trailing the player by the set delay, to line up with what is heard.
             state
                 .clock
@@ -1898,6 +2117,10 @@ fn open_library<'a>(
     .height(Fill);
     if let Some(deck) = deck {
         page = page.push(deck);
+        // (Once the backend has said what the track's cues are.)
+        if cues_known {
+            page = page.push(cue_bar::view(track_cues, state.cues_busy, language));
+        }
     }
     page = page.push(bar);
 
@@ -1966,6 +2189,7 @@ mod tests {
             rating: None,
             lighting: model::Lighting::None,
             lighting_projects: Vec::new(),
+            cue_count: 0,
             origin: None,
         }
     }
@@ -2022,6 +2246,8 @@ mod tests {
             status: PlaybackStatus::default(),
             clock: Clock::new(Instant::now()),
             waveforms: Waveforms::default(),
+            cues: TrackCues::default(),
+            cues_busy: false,
             play_source: None,
             backend_error: None,
             gain_draft: None,
@@ -2032,6 +2258,7 @@ mod tests {
             library_sync: None,
             smart: None,
             playlist_dialog: None,
+            cue_editor: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
@@ -3051,6 +3278,192 @@ mod tests {
             browser(&state).rating(0),
             None,
             "other tracks are as they were"
+        );
+    }
+
+    /// A state that is playing track 1, whose cues have been fetched.
+    fn state_playing_with_cues(cues: Vec<Cue>) -> State {
+        let mut state = state();
+        state.status = PlaybackStatus {
+            state: PlaybackState::Playing.into(),
+            queue_position: Some(0),
+            track_id: Some(1),
+            position_ms: 10_000,
+            error: None,
+        };
+        assert!(state.cues.claim(1));
+        let generation = state.cues.generation();
+        let _ = handle(&mut state, Message::CuesLoaded(generation, 1, Ok(cues)));
+        state
+    }
+
+    #[test]
+    fn the_cues_of_the_playing_track_are_kept_for_the_library_they_were_asked_in() {
+        let mut state = state_playing_with_cues(vec![Cue::new(2, 5.0)]);
+        assert_eq!(state.cues.get(1).map(<[Cue]>::len), Some(1));
+        assert_eq!(
+            browser(&state).cue_count(1),
+            0,
+            "the list has what the library said"
+        );
+
+        // An answer from before another library was opened is dropped.
+        let old = state.cues.generation();
+        state.cues.clear();
+        let _ = handle(
+            &mut state,
+            Message::CuesLoaded(old, 1, Ok(vec![Cue::new(0, 1.0)])),
+        );
+        assert_eq!(state.cues.get(1), None);
+
+        // A failure is shown, and the track gets no pads.
+        let generation = state.cues.generation();
+        let _ = handle(
+            &mut state,
+            Message::CuesLoaded(generation, 1, Err("no".into())),
+        );
+        assert_eq!(state.backend_error.as_deref(), Some("no"));
+        assert_eq!(state.cues.get(1), None);
+    }
+
+    #[test]
+    fn the_cue_editor_opens_for_the_playing_track_and_closes_without_changes() {
+        let mut state = state_playing_with_cues(vec![Cue::new(2, 5.0)]);
+        let _ = handle(&mut state, Message::CueEditorOpen);
+        let editor = state.cue_editor.as_ref().expect("the editor is open");
+        assert_eq!(editor.track, 1);
+        assert_eq!(editor.cues().unwrap(), [Cue::new(2, 5.0)]);
+
+        // Edits go to the window's copy, nothing is written until it is saved.
+        let _ = handle(
+            &mut state,
+            Message::CueEditor(cue_editor::Event::Label(2, "Drop".into())),
+        );
+        let _ = handle(&mut state, Message::CueEditorCancel);
+        assert!(state.cue_editor.is_none());
+        assert_eq!(state.cues.get(1).unwrap()[0].label, "Cue 3");
+
+        // Not while another window is open, nor for a track whose cues are not known.
+        state.smart = Some(smart_editor::Editor::new());
+        let _ = handle(&mut state, Message::CueEditorOpen);
+        assert!(state.cue_editor.is_none());
+        state.smart = None;
+        state.status.track_id = Some(2);
+        let _ = handle(&mut state, Message::CueEditorOpen);
+        assert!(state.cue_editor.is_none());
+    }
+
+    #[test]
+    fn a_position_that_is_not_one_is_said_so_and_nothing_is_sent() {
+        let mut state = state_playing_with_cues(vec![Cue::new(2, 5.0)]);
+        let _ = handle(&mut state, Message::CueEditorOpen);
+        let _ = handle(
+            &mut state,
+            Message::CueEditor(cue_editor::Event::Position(2, "soon".into())),
+        );
+        let _ = handle(&mut state, Message::CueEditorSave);
+        let editor = state.cue_editor.as_ref().unwrap();
+        assert!(!editor.busy && !state.cues_busy);
+        let error = editor.error.as_deref().unwrap();
+        assert!(error.contains('3') && error.contains("soon"), "{error}");
+    }
+
+    #[test]
+    fn saved_cues_replace_the_old_ones_and_update_the_count() {
+        let mut state = state_playing_with_cues(vec![Cue::new(2, 5.0)]);
+        let _ = handle(&mut state, Message::CueEditorOpen);
+        state.cues_busy = true;
+        state.cue_editor.as_mut().unwrap().busy = true;
+
+        let generation = state.cues.generation();
+        let saved = vec![Cue::new(0, 1.0), Cue::new(2, 6.5)];
+        let _ = handle(
+            &mut state,
+            Message::CuesEdited {
+                generation,
+                track: 1,
+                result: Ok(saved.clone()),
+            },
+        );
+        assert!(!state.cues_busy && state.cue_editor.is_none());
+        assert_eq!(state.cues.get(1), Some(saved.as_slice()));
+        assert_eq!(browser(&state).cue_count(1), 2);
+        assert_eq!(
+            browser(&state).cue_count(0),
+            0,
+            "other tracks are as they were"
+        );
+        assert_eq!(state.backend_error, None);
+
+        // An answer from before another library was opened is not for this one.
+        state.cues.clear();
+        let _ = handle(
+            &mut state,
+            Message::CuesEdited {
+                generation,
+                track: 1,
+                result: Ok(vec![]),
+            },
+        );
+        assert_eq!(state.cues.get(1), None);
+        assert_eq!(browser(&state).cue_count(1), 2);
+    }
+
+    #[test]
+    fn cues_the_backend_refused_leave_the_old_ones_and_say_why() {
+        let mut state = state_playing_with_cues(vec![Cue::new(2, 5.0)]);
+        let _ = handle(&mut state, Message::CueEditorOpen);
+        state.cues_busy = true;
+        state.cue_editor.as_mut().unwrap().busy = true;
+        let generation = state.cues.generation();
+
+        let _ = handle(
+            &mut state,
+            Message::CuesEdited {
+                generation,
+                track: 1,
+                result: Err("the track has not been analysed".into()),
+            },
+        );
+        // The window stays, so the edits are not lost, and can be tried again.
+        let editor = state.cue_editor.as_ref().unwrap();
+        assert!(!editor.busy && !state.cues_busy);
+        assert!(
+            editor
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("not been analysed")
+        );
+        assert_eq!(state.cues.get(1).unwrap().len(), 1);
+
+        // Without the window (a pad was clicked) it is shown on the page.
+        state.cue_editor = None;
+        state.cues_busy = true;
+        let _ = handle(
+            &mut state,
+            Message::CuesEdited {
+                generation,
+                track: 1,
+                result: Err("full".into()),
+            },
+        );
+        assert_eq!(state.backend_error.as_deref(), Some("full"));
+        assert!(!state.cues_busy);
+    }
+
+    #[test]
+    fn the_cue_editor_is_not_closed_while_it_is_saving() {
+        let mut state = state_playing_with_cues(vec![]);
+        let _ = handle(&mut state, Message::CueEditorOpen);
+        state.cue_editor.as_mut().unwrap().busy = true;
+        let _ = handle(&mut state, Message::CueEditorCancel);
+        assert!(state.cue_editor.is_some());
+        let _ = handle(&mut state, Message::CueEditor(cue_editor::Event::Add(0)));
+        assert_eq!(
+            state.cue_editor.as_ref().unwrap().cues().unwrap(),
+            [],
+            "no edits while it is being written"
         );
     }
 
