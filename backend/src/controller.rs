@@ -59,8 +59,12 @@ pub enum Action {
 /// How far above the control with the high bits of a 14-bit value the one with the low bits
 /// is (the MIDI convention: controllers 0 to 31 and their low halves 32 to 63).
 const JOG_LOW_OFFSET: u8 = 32;
-/// The positions a jog wheel reports for one turn of it: 14 bits.
-const JOG_STEPS_PER_TURN: i32 = 1 << 14;
+/// The positions a jog wheel reports run from 0 to this and wrap around: 14 bits.
+const JOG_RANGE: i32 = 1 << 14;
+/// How many steps of that position make a turn of the wheel. Not the whole range: the Mixxx
+/// mapping for the SC LIVE 4 (which was tried on the unit) hands the steps to its scratching
+/// as 1000 to a turn, and the whole range (16384 to a turn) was found far too slow here.
+const JOG_STEPS_PER_TURN: f64 = 1000.0;
 /// How much of the track a turn of the wheel scratches, in seconds: a record at 33⅓ turns
 /// a minute takes 1.8 seconds for a turn.
 pub const JOG_SECONDS_PER_TURN: f64 = 1.8;
@@ -70,9 +74,8 @@ pub const JOG_SECONDS_PER_TURN: f64 = 1.8;
 /// way.
 pub fn jog_seconds(from: u16, to: u16) -> f64 {
     let steps = i32::from(to) - i32::from(from);
-    let wrapped =
-        (steps + JOG_STEPS_PER_TURN / 2).rem_euclid(JOG_STEPS_PER_TURN) - JOG_STEPS_PER_TURN / 2;
-    f64::from(wrapped) / f64::from(JOG_STEPS_PER_TURN) * JOG_SECONDS_PER_TURN
+    let wrapped = (steps + JOG_RANGE / 2).rem_euclid(JOG_RANGE) - JOG_RANGE / 2;
+    f64::from(wrapped) / JOG_STEPS_PER_TURN * JOG_SECONDS_PER_TURN
 }
 
 /// What a message from the controller asks the player to do.
@@ -1442,12 +1445,13 @@ mod tests {
     fn the_wheel_moves_the_short_way_round() {
         let turn = JOG_SECONDS_PER_TURN;
         assert_eq!(jog_seconds(100, 100), 0.0);
-        assert!((jog_seconds(0, 4096) - turn / 4.0).abs() < 1e-9);
-        assert!((jog_seconds(4096, 0) + turn / 4.0).abs() < 1e-9);
+        // A thousand steps are a turn.
+        assert!((jog_seconds(0, 1000) - turn).abs() < 1e-9);
+        assert!((jog_seconds(1000, 250) + turn * 0.75).abs() < 1e-9);
         // Past the end of the scale, and back over it.
-        assert!((jog_seconds(16_380, 4) - 8.0 / 16_384.0 * turn).abs() < 1e-9);
-        assert!((jog_seconds(4, 16_380) + 8.0 / 16_384.0 * turn).abs() < 1e-9);
-        // Half a turn is as far as a move can be.
+        assert!((jog_seconds(16_380, 4) - 8.0 / 1000.0 * turn).abs() < 1e-9);
+        assert!((jog_seconds(4, 16_380) + 8.0 / 1000.0 * turn).abs() < 1e-9);
+        // Half the range is as far as a move can be.
         assert!(jog_seconds(0, 8_191) > 0.0);
         assert!(jog_seconds(0, 8_193) < 0.0);
     }

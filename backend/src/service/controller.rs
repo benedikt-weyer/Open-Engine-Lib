@@ -2,13 +2,15 @@
 //! the audio process's MIDI messages, and what a press on a bound control does to the player.
 //! (Which control does what is `crate::controller`; the hardware is the audio process's.)
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use open_engine_api::CONTROLLER_SEEK_SECONDS;
 use open_engine_api::v1 as api;
 use open_engine_api::v1::controller_service_server::ControllerService;
 use open_engine_api::v1::midi_event::Event as MidiEvent;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -26,8 +28,69 @@ struct Jog {
     /// The last position it reported, which the next one is measured from. (Kept while
     /// nothing is touching it too, so the first move after a touch is a move.)
     position: Option<u16>,
-    /// The track is held for scratching.
-    scratching: bool,
+    /// A hand is on it, so turning it moves the track.
+    touching: bool,
+}
+
+/// What is asked of the audio process for the jog wheel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum JogCall {
+    Begin,
+    /// Seconds of the track, negative for backwards.
+    Move(f64),
+    End,
+}
+
+/// The calls for the jog wheel, in order, waiting to be made. A wheel sends hundreds of
+/// messages a second, and a call for each (the listener waiting for every answer) would fall
+/// behind and make the track lag after the hand; moves that wait next to each other are made
+/// as one call.
+#[derive(Default)]
+struct JogCalls {
+    waiting: Mutex<VecDeque<JogCall>>,
+    wake: Notify,
+}
+
+impl JogCalls {
+    fn push(&self, call: JogCall) {
+        {
+            let mut waiting = self.waiting.lock().expect("jog calls lock");
+            match (call, waiting.back_mut()) {
+                (JogCall::Move(seconds), Some(JogCall::Move(last))) => *last += seconds,
+                _ => waiting.push_back(call),
+            }
+        }
+        self.wake.notify_one();
+    }
+
+    fn next(&self) -> Option<JogCall> {
+        self.waiting.lock().expect("jog calls lock").pop_front()
+    }
+}
+
+/// Makes the calls as they come, one at a time and in order. Stops with the task that owns it.
+struct JogSender(tokio::task::JoinHandle<()>);
+
+impl JogSender {
+    fn start(service: &Service, calls: Arc<JogCalls>) -> Self {
+        let service = service.clone();
+        Self(tokio::spawn(async move {
+            loop {
+                while let Some(call) = calls.next() {
+                    if let Err(status) = service.make(call).await {
+                        eprintln!("open-engine-backend: {call:?}: {}", status.message());
+                    }
+                }
+                calls.wake.notified().await;
+            }
+        }))
+    }
+}
+
+impl Drop for JogSender {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Service {
@@ -50,38 +113,41 @@ impl Service {
         }
     }
 
-    /// Does what a message from the controller asks for.
-    async fn handle(&self, event: Event, jog: &mut Jog) -> Result<(), Status> {
+    /// Does what a message from the controller asks for. The jog wheel's are only queued,
+    /// for `JogSender`: nothing waits for the audio process while the wheel is turned.
+    async fn handle(&self, event: Event, jog: &mut Jog, calls: &JogCalls) -> Result<(), Status> {
         match event {
-            Event::Press(action) => self.perform(action).await,
-            Event::JogTouch(true) => {
-                let status = self
-                    .audio()?
-                    .begin_scratch(api::BeginScratchRequest {})
-                    .await?
-                    .into_inner();
-                jog.scratching = status.scratching;
-                Ok(())
-            }
-            Event::JogTouch(false) => {
-                if std::mem::take(&mut jog.scratching) {
-                    self.audio()?.end_scratch(api::EndScratchRequest {}).await?;
-                }
-                Ok(())
+            Event::Press(action) => self.perform(action).await?,
+            Event::JogTouch(down) => {
+                jog.touching = down;
+                calls.push(if down { JogCall::Begin } else { JogCall::End });
             }
             Event::JogPosition(position) => {
                 let before = jog.position.replace(position);
-                if let (true, Some(before)) = (jog.scratching, before) {
-                    let delta_seconds = jog_seconds(before, position);
-                    if delta_seconds != 0.0 {
-                        self.audio()?
-                            .move_scratch(api::MoveScratchRequest { delta_seconds })
-                            .await?;
+                if let (true, Some(before)) = (jog.touching, before) {
+                    let seconds = jog_seconds(before, position);
+                    if seconds != 0.0 {
+                        calls.push(JogCall::Move(seconds));
                     }
                 }
-                Ok(())
             }
         }
+        Ok(())
+    }
+
+    /// Makes a call for the jog wheel.
+    async fn make(&self, call: JogCall) -> Result<(), Status> {
+        let mut audio = self.audio()?;
+        match call {
+            JogCall::Begin => audio.begin_scratch(api::BeginScratchRequest {}).await?,
+            JogCall::Move(delta_seconds) => {
+                audio
+                    .move_scratch(api::MoveScratchRequest { delta_seconds })
+                    .await?
+            }
+            JogCall::End => audio.end_scratch(api::EndScratchRequest {}).await?,
+        };
+        Ok(())
     }
 
     /// Does what a press on the control bound to `action` asks for.
@@ -174,6 +240,8 @@ async fn listen(service: Service) {
         Err(status) => return controller.unavailable(status.message().to_owned()),
     };
     let mut jog = Jog::default();
+    let calls = Arc::new(JogCalls::default());
+    let _sender = JogSender::start(&service, Arc::clone(&calls));
     loop {
         let event = match messages.message().await {
             Ok(Some(event)) => event,
@@ -184,7 +252,7 @@ async fn listen(service: Service) {
             Some(MidiEvent::Input(input)) => {
                 let event = Input::from_api(&input).and_then(|input| controller.input(input));
                 if let Some(event) = event
-                    && let Err(status) = service.handle(event, &mut jog).await
+                    && let Err(status) = service.handle(event, &mut jog, &calls).await
                 {
                     eprintln!("open-engine-backend: {event:?}: {}", status.message());
                 }
@@ -321,5 +389,48 @@ fn profile_status(error: ProfileError) -> Status {
         ProfileError::NameTaken => Status::already_exists(message),
         ProfileError::Unknown => Status::not_found(message),
         ProfileError::BuiltIn => Status::failed_precondition(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drain(calls: &JogCalls) -> Vec<JogCall> {
+        std::iter::from_fn(|| calls.next()).collect()
+    }
+
+    #[test]
+    fn moves_that_wait_next_to_each_other_are_made_as_one() {
+        let calls = JogCalls::default();
+        calls.push(JogCall::Begin);
+        for _ in 0..100 {
+            calls.push(JogCall::Move(0.01));
+        }
+        calls.push(JogCall::Move(-0.25));
+        let [JogCall::Begin, JogCall::Move(seconds)] = drain(&calls)[..] else {
+            panic!("not one begin and one move");
+        };
+        assert!((seconds - 0.75).abs() < 1e-9, "{seconds}");
+    }
+
+    #[test]
+    fn begin_and_end_keep_their_place_between_moves() {
+        let calls = JogCalls::default();
+        calls.push(JogCall::Move(1.0));
+        calls.push(JogCall::End);
+        calls.push(JogCall::Begin);
+        calls.push(JogCall::Move(2.0));
+        calls.push(JogCall::Move(3.0));
+        assert_eq!(
+            drain(&calls),
+            [
+                JogCall::Move(1.0),
+                JogCall::End,
+                JogCall::Begin,
+                JogCall::Move(5.0)
+            ]
+        );
+        assert_eq!(calls.next(), None);
     }
 }

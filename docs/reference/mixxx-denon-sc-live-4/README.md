@@ -63,9 +63,10 @@ the decks, `0xB0` and up for the mixer channels) and are not used.
 The jog wheel reports its *absolute* position as a 14-bit number: the high 7 bits as control
 change `0x11` and then the low 7 bits as `0x31` (the MIDI convention, 32 above), wrapping around.
 The script turns the difference to the previous position into a relative move (the short way
-round). Whether a turn of the wheel is the whole 2^14 steps is not stated: the script hands the
-moves to Mixxx's scratching with a `wheelResolution` of 1000, which is not the same, so
-Open Engine Lib's `JOG_STEPS_PER_TURN` (16384) is a guess to check on the hardware. In Mixxx the
+round). How many steps make a turn of the wheel is not stated: the script hands the moves to
+Mixxx's scratching with a `wheelResolution` of 1000, and Open Engine Lib's
+`JOG_STEPS_PER_TURN` is 1000 too. (It started as the whole 2^14 range for a turn, which was far
+too slow on the unit.) If scratching is still off by some factor, that is the number to change. In Mixxx the
 wheel pitch-bends when it is not touched (the side of the wheel is the same control change);
 Open Engine Lib only scratches while the surface is touched.
 

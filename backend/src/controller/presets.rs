@@ -11,7 +11,7 @@
 //! pad mode the unit is in. The top of the jog wheel scratches: touching it is note 0x21 and
 //! its position is a 14-bit number on controllers 0x11 (high bits) and 0x31 (low bits), again
 //! from the Mixxx mapping. That only reads the position, so how many steps make a turn of the
-//! wheel (`JOG_STEPS_PER_TURN`) is a guess. The side of the wheel, which bends the pitch in
+//! wheel (`JOG_STEPS_PER_TURN`) is taken from how that mapping scratches. The side of the wheel, which bends the pitch in
 //! Mixxx, is not used.
 
 use super::{Action, Control, Kind, Mapping, PADS};
