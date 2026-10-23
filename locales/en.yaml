@@ -266,6 +266,9 @@ libsync_copy_reverse: "Copy the tracks into an Engine-Tracks folder (Artist/Albu
 libsync_run_reverse: Copy into the open library
 libsync_done_reverse: "Done: {count} playlists, {tracks} tracks and {origins} origins changed in the working copy, {files} files copied. Use “Sync with the source” to write them to the library. The working copy before is kept in {backup}"
 progress_pulling: Getting the databases of the source…
+progress_scanning: Looking for music…
+progress_found: "{done} files found"
+progress_reading_tags: Reading the tags
 libsync_drive_new: "No Engine library: a new one is made here"
 libsync_new_notice: "There is no library there yet. A new, empty one is made at {path} when you sync; it gets the playlists and the tracks you choose below."
 libsync_done_new: "Done: the new library was made at {path}: {count} playlists, {tracks} tracks, {files} files copied."

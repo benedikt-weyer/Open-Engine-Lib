@@ -113,15 +113,15 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
         },
         Message::ProgressTick => {
-            if state.syncing()
+            if state.reporting_progress()
                 && let Some(backend) = state.backend()
             {
                 return Task::perform(backend::progress(backend), Message::ProgressUpdated);
             }
         }
         Message::ProgressUpdated(result) => {
-            // (An answer that comes after the sync ended is not wanted.)
-            if state.syncing() {
+            // (An answer that comes after the sync or the opening ended is not wanted.)
+            if state.reporting_progress() {
                 state.progress = result.ok();
             }
         }

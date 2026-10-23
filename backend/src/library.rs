@@ -20,6 +20,7 @@ use crate::cues::{self, Cue, QuickCues};
 use crate::folder;
 use crate::loops::{self, Loop, QuickLoops};
 use crate::origins::{self, Origins, TrackKey};
+use crate::progress::Progress;
 use crate::smartlist::Rules;
 use crate::soundswitch::{Lighting, SoundSwitch};
 
@@ -251,10 +252,15 @@ impl Library {
 
     /// Opens the plain folder of music at `path` as a library: its audio files are the
     /// tracks and its folders the playlists. Nothing is copied or written; `scratch` is
-    /// only where an edit would be noted, and nothing here can be edited.
-    pub fn open_folder(path: &Path, scratch: PathBuf) -> Result<Self, OpenError> {
-        let scanned =
-            folder::scan(path).map_err(|error| OpenError::NotAFolder(path.to_path_buf(), error))?;
+    /// only where an edit would be noted, and nothing here can be edited. How far the scan
+    /// has got is told to `progress`.
+    pub fn open_folder(
+        path: &Path,
+        scratch: PathBuf,
+        progress: &Progress,
+    ) -> Result<Self, OpenError> {
+        let scanned = folder::scan(path, progress)
+            .map_err(|error| OpenError::NotAFolder(path.to_path_buf(), error))?;
         let by_id = scanned
             .tracks
             .iter()

@@ -219,6 +219,8 @@ It has one table so far, `Origin(databaseUuid, trackId, origin, savedAt)`, with 
 
 A sync can take minutes when audio files are copied. `SyncToSource` and `SyncToLibrary` stay ordinary calls that return when they are done; while one runs, the UI asks `GetProgress` (every 250 ms, from a subscription that exists only while a sync window is writing). The backend keeps one `Progress` (`backend/src/progress.rs`) that the running sync updates: a phase (preparing a copy of the other library's database, copying the tracks, changing the copy, writing the databases), the bytes and files done and to do in that phase, and the file being copied. Every copy that matters goes through `Progress::copy`, which copies in 1 MiB chunks, so the bar moves smoothly even for one big file. The bar shows the current phase, not the whole sync: a phase without bytes (changing the copy) only has its name. A diff is not reported on. There is no way to cancel a sync.
 
+`OpenLocalFolder` reports to the same `Progress`, and the UI polls `GetProgress` while a library is opening (the window shows the bar in place of the plain "Opening…" text). The scan has two phases: *scanning* (walking the folders, `done_files` counts the audio files found, no total) and *reading tags* (`done_files` of `total_files`, which is what the bar fills by). Opening an Engine library reports nothing, so its window stays as it was.
+
 ## The other way round (back-sync)
 
 Both sync windows can also work in the other direction, chosen with a radio button in the window (each window starts in the usual direction):

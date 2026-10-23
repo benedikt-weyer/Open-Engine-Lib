@@ -171,16 +171,21 @@ impl LibraryService for Service {
         let scratch = self.0.cache_root.join("local-folder");
         self.close().await;
 
-        // Looking at every file takes a moment and must not block the async threads.
-        let library = tokio::task::spawn_blocking(move || Library::open_folder(&path, scratch))
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?
-            .map_err(|error| match error {
-                OpenError::NotAFolder(..) | OpenError::NotALibrary(_) => {
-                    Status::not_found(error.to_string())
-                }
-                OpenError::Cache(_) | OpenError::Database(_) => Status::internal(error.to_string()),
-            })?;
+        // Looking at every file takes a moment and must not block the async threads. The UI
+        // asks `GetProgress` meanwhile.
+        let progress = self.0.progress.clone();
+        let library = tokio::task::spawn_blocking(move || {
+            let _running = progress.begin();
+            Library::open_folder(&path, scratch, &progress)
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map_err(|error| match error {
+            OpenError::NotAFolder(..) | OpenError::NotALibrary(_) => {
+                Status::not_found(error.to_string())
+            }
+            OpenError::Cache(_) | OpenError::Database(_) => Status::internal(error.to_string()),
+        })?;
 
         let response = api::OpenLibraryResponse {
             path: library.dir.display().to_string(),
@@ -495,6 +500,8 @@ impl LibraryService for Service {
                 Phase::Updating => api::ProgressPhase::Updating,
                 Phase::Writing => api::ProgressPhase::Writing,
                 Phase::Pulling => api::ProgressPhase::Pulling,
+                Phase::Scanning => api::ProgressPhase::Scanning,
+                Phase::ReadingTags => api::ProgressPhase::ReadingTags,
             }
             .into(),
             done_bytes: snapshot.done_bytes,

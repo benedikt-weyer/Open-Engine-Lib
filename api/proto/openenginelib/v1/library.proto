@@ -112,7 +112,8 @@ service LibraryService {
   // with the changes, after the old one was kept in `open-engine-lib-backup` next to it.
   // Errors as for `GetLibrarySyncDiff`.
   rpc SyncToLibrary(SyncToLibraryRequest) returns (SyncToLibraryResponse);
-  // How far the sync that is running (`SyncToSource`, `SyncToLibrary`) has got, to be
+  // How far the sync (`SyncToSource`, `SyncToLibrary`) or the opening of a folder
+  // (`OpenLocalFolder`) that is running has got, to be
   // asked again and again while it runs. Not running: `running` is false and the rest is
   // empty. Does not need a library to be open.
   rpc GetProgress(GetProgressRequest) returns (OperationProgress);
@@ -375,6 +376,12 @@ enum ProgressPhase {
   PROGRESS_PHASE_WRITING = 4;
   // Copying the source's databases into the working copy (`PullFromSource`).
   PROGRESS_PHASE_PULLING = 5;
+  // Looking for the audio files of a folder (`OpenLocalFolder`). `done_files` counts the
+  // ones found so far; there is no total yet.
+  PROGRESS_PHASE_SCANNING = 6;
+  // Reading the tags and length of the files found (`OpenLocalFolder`), counted in
+  // `done_files` of `total_files`. No bytes.
+  PROGRESS_PHASE_READING_TAGS = 7;
 }
 
 message CloseLibraryRequest {}

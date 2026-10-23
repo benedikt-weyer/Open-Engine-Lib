@@ -163,6 +163,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::LibraryChosen(None) => {}
         Message::LibraryOpened(result) => {
             if matches!(state.library, LibraryState::Opening(_)) {
+                state.progress = None;
                 state.library = match result {
                     Ok(library) => {
                         // A folder of music is kept in the "Local music" section, not among

@@ -1,4 +1,4 @@
-//! What a long operation (a sync) has done so far, for the UI to ask about while it runs.
+//! What a long operation (a sync, the scan of a folder of music) has done so far, for the UI to ask about while it runs.
 //!
 //! The operation updates a `Progress` as it goes, in steps small enough to look smooth
 //! (files are copied in chunks, not in one call), and `GetProgress` hands out a snapshot.
@@ -26,6 +26,10 @@ pub enum Phase {
     Writing,
     /// Copying the source's databases into the working copy.
     Pulling,
+    /// Looking for the audio files of a folder (counted in `done_files`, no total).
+    Scanning,
+    /// Reading the tags and length of the files found.
+    ReadingTags,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -84,7 +88,7 @@ impl Progress {
         self.update(|state| state.current = name.to_owned());
     }
 
-    fn file_done(&self) {
+    pub fn file_done(&self) {
         self.update(|state| state.done_files += 1);
     }
 

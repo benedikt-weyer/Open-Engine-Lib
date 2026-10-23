@@ -16,6 +16,7 @@ use lofty::prelude::*;
 use lofty::probe::Probe;
 
 use crate::library::{Playlist, Track};
+use crate::progress::{Phase, Progress};
 use crate::soundswitch::Lighting;
 
 /// What the player can decode (see the `rodio` features in `Cargo.toml`), by file extension.
@@ -50,13 +51,16 @@ pub fn is_audio(path: &Path) -> bool {
         })
 }
 
-/// Finds the music below `dir`. Fails only if `dir` itself can't be read.
-pub fn scan(dir: &Path) -> io::Result<Scanned> {
-    let mut root = walk(dir, String::new(), 0)?;
+/// Finds the music below `dir`. Fails only if `dir` itself can't be read. `progress` is
+/// told how many files are found, then how many of them have been read.
+pub fn scan(dir: &Path, progress: &Progress) -> io::Result<Scanned> {
+    progress.phase(Phase::Scanning, 0, 0);
+    let mut root = walk(dir, String::new(), 0, progress)?;
     let mut files = Vec::new();
     number(&mut root, &mut files);
 
-    let metadata = read_all(&files);
+    progress.phase(Phase::ReadingTags, 0, files.len() as u32);
+    let metadata = read_all(&files, progress);
     let tracks = files
         .into_iter()
         .zip(metadata)
@@ -69,7 +73,7 @@ pub fn scan(dir: &Path) -> io::Result<Scanned> {
     Ok(Scanned { tracks, playlists })
 }
 
-fn walk(dir: &Path, name: String, depth: usize) -> io::Result<Node> {
+fn walk(dir: &Path, name: String, depth: usize, progress: &Progress) -> io::Result<Node> {
     let mut entries = fs::read_dir(dir)?
         .filter_map(Result::ok)
         .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
@@ -95,12 +99,14 @@ fn walk(dir: &Path, name: String, depth: usize) -> io::Result<Node> {
                     &path,
                     entry.file_name().to_string_lossy().into_owned(),
                     depth + 1,
+                    progress,
                 ) {
                     node.folders.push(child);
                 }
             }
         } else if is_audio(&path) && (kind.is_file() || path.is_file()) {
             node.files.push(path);
+            progress.file_done();
         }
     }
     Ok(node)
@@ -152,14 +158,25 @@ struct Meta {
 }
 
 /// The tags and length of every file, read on as many threads as there are cores: the
-/// files are many, and each is a read from the disk.
-fn read_all(files: &[PathBuf]) -> Vec<Meta> {
+/// files are many, and each is a read from the disk. Each one read is told to `progress`.
+fn read_all(files: &[PathBuf], progress: &Progress) -> Vec<Meta> {
     let threads = std::thread::available_parallelism().map_or(1, |threads| threads.get());
     let chunk = files.len().div_ceil(threads).max(1);
     std::thread::scope(|scope| {
         let workers: Vec<_> = files
             .chunks(chunk)
-            .map(|files| scope.spawn(|| files.iter().map(|file| read(file)).collect::<Vec<_>>()))
+            .map(|files| {
+                scope.spawn(|| {
+                    files
+                        .iter()
+                        .map(|file| {
+                            let meta = read(file);
+                            progress.file_done();
+                            meta
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
             .collect();
         workers
             .into_iter()
@@ -302,7 +319,7 @@ mod tests {
             wav(&temp.file(relative), 1);
         }
 
-        let scanned = scan(&temp.0).unwrap();
+        let scanned = scan(&temp.0, &Progress::default()).unwrap();
         // A folder's own files come first, then the folders in it, all by name.
         assert_eq!(
             scanned
@@ -368,7 +385,7 @@ mod tests {
         tag.insert_text(ItemKey::IntegerBpm, "126".into());
         tag.save_to_path(&path, WriteOptions::default()).unwrap();
 
-        let scanned = scan(&temp.0).unwrap();
+        let scanned = scan(&temp.0, &Progress::default()).unwrap();
         let track = &scanned.tracks[0];
         assert_eq!(
             (
@@ -387,7 +404,7 @@ mod tests {
     fn a_file_that_can_not_be_read_is_still_a_track() {
         let temp = TempDir::new("broken");
         fs::write(temp.file("broken.mp3"), b"not audio").unwrap();
-        let scanned = scan(&temp.0).unwrap();
+        let scanned = scan(&temp.0, &Progress::default()).unwrap();
         assert_eq!(scanned.tracks.len(), 1);
         assert_eq!(scanned.tracks[0].title, "broken");
         assert_eq!(scanned.tracks[0].length, None);
@@ -396,9 +413,27 @@ mod tests {
     #[test]
     fn a_folder_without_music_has_no_tracks_and_a_missing_one_is_an_error() {
         let temp = TempDir::new("none");
-        let scanned = scan(&temp.0).unwrap();
+        let scanned = scan(&temp.0, &Progress::default()).unwrap();
         assert!(scanned.tracks.is_empty() && scanned.playlists.is_empty());
-        assert!(scan(&temp.0.join("missing")).is_err());
+        assert!(scan(&temp.0.join("missing"), &Progress::default()).is_err());
+    }
+
+    #[test]
+    fn the_scan_tells_how_many_files_it_found_and_read() {
+        let temp = TempDir::new("progress");
+        for relative in ["a.wav", "House/b.wav", "House/Deep/c.wav", "notes.txt"] {
+            wav(&temp.file(relative), 1);
+        }
+        let progress = Progress::default();
+        let running = progress.begin();
+        scan(&temp.0, &progress).unwrap();
+        let seen = progress.snapshot();
+        assert_eq!(
+            (seen.running, seen.phase, seen.done_files, seen.total_files),
+            (true, Phase::ReadingTags, 3, 3),
+            "every file found was read, and the text file is not one"
+        );
+        drop(running);
     }
 
     #[test]

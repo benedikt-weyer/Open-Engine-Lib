@@ -266,6 +266,9 @@ libsync_copy_reverse: "Die Titel in einen Ordner Engine-Tracks (Interpret/Album)
 libsync_run_reverse: In die geöffnete Bibliothek kopieren
 libsync_done_reverse: "Fertig: {count} Playlists, {tracks} Titel und {origins} Herkünfte in der Arbeitskopie geändert, {files} Dateien kopiert. Mit „Mit der Quelle abgleichen“ schreibst du sie in die Bibliothek. Die Arbeitskopie davor liegt in {backup}"
 progress_pulling: Die Datenbanken der Quelle werden geholt…
+progress_scanning: Musik wird gesucht…
+progress_found: "{done} Dateien gefunden"
+progress_reading_tags: Tags werden gelesen
 libsync_drive_new: "Keine Engine-Bibliothek: hier wird eine neue angelegt"
 libsync_new_notice: "Dort gibt es noch keine Bibliothek. Beim Abgleich wird unter {path} eine neue, leere angelegt; sie bekommt die Playlists und die Titel, die du unten wählst."
 libsync_done_new: "Fertig: Die neue Bibliothek wurde unter {path} angelegt: {count} Playlists, {tracks} Titel, {files} Dateien kopiert."

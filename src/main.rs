@@ -448,8 +448,8 @@ impl State {
         } else {
             Subscription::none()
         };
-        // While a sync is writing, ask how far it is.
-        let progress = if self.syncing() {
+        // While a sync is writing or a library is opening, ask how far it is.
+        let progress = if self.reporting_progress() {
             iced::time::every(progress_view::POLL_INTERVAL).map(|_| Message::ProgressTick)
         } else {
             Subscription::none()
@@ -543,6 +543,12 @@ impl State {
             || matches!(self.library_sync, Some(LibrarySyncStage::Syncing { .. }))
     }
 
+    /// Whether the backend is doing something it reports progress on: a sync writing, or a
+    /// library being opened.
+    fn reporting_progress(&self) -> bool {
+        self.syncing() || matches!(self.library, LibraryState::Opening(_))
+    }
+
     /// Whether one of the windows that lie over the app is open. Only one is at a time.
     fn window_open(&self) -> bool {
         self.sync.is_some()
@@ -633,6 +639,7 @@ impl State {
         self.loops.clear();
         self.sync = None;
         self.reload_result = None;
+        self.progress = None;
         self.library = LibraryState::Opening(path.clone());
         match kind {
             model::Kind::Engine => {
@@ -1245,9 +1252,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
     let (browser, content) = match &state.library {
         LibraryState::Opening(path) => (
             None,
-            centered(vec![
-                text(fill(&strings.opening_library, &[("path", &path.display())])).into(),
-            ]),
+            progress_view::opening(path, state.progress.as_ref(), language),
         ),
         LibraryState::Closed { error } => {
             let mut lines: Vec<Element<'_, Message>> = vec![
@@ -2418,6 +2423,35 @@ mod tests {
             acknowledged: false,
         });
         assert!(state.syncing());
+    }
+
+    #[test]
+    fn how_far_a_folder_is_gets_asked_only_while_it_opens_and_is_forgotten_after() {
+        let mut state = state();
+        let progress = open_engine_api::v1::OperationProgress {
+            running: true,
+            phase: open_engine_api::v1::ProgressPhase::ReadingTags.into(),
+            total_files: 10,
+            done_files: 4,
+            ..Default::default()
+        };
+
+        assert!(!state.reporting_progress());
+        let _ = handle(&mut state, Message::ProgressUpdated(Ok(progress.clone())));
+        assert!(state.progress.is_none());
+
+        state.library = LibraryState::Opening("/home/me/Music".into());
+        assert!(state.reporting_progress());
+        let _ = handle(&mut state, Message::ProgressUpdated(Ok(progress)));
+        assert_eq!(state.progress.as_ref().map(|p| p.done_files), Some(4));
+
+        let folder = Arc::new(library_at("/home/me/Music").of_kind(model::Kind::Folder));
+        let _ = handle(&mut state, Message::LibraryOpened(Ok(folder)));
+        assert!(
+            state.progress.is_none(),
+            "the bar of the next sync starts empty"
+        );
+        assert!(!state.reporting_progress());
     }
 
     #[test]
