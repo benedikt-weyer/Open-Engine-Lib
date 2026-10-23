@@ -19,6 +19,7 @@ use crate::covers::Covers;
 use crate::i18n::fill;
 use crate::model::{Kind, Library, Lighting, Playlist, Track, stars_of};
 use crate::reachable::Reachability;
+use crate::right_click::right_click;
 
 /// Height of one track row. Fixed, so only the rows in view have to be built.
 const ROW_HEIGHT: f32 = 32.0;
@@ -919,7 +920,7 @@ fn track_row<'a>(
         plain_gap,
     );
 
-    mouse_area(
+    let row = mouse_area(
         container(cells)
             .height(ROW_HEIGHT)
             .width(Fill)
@@ -941,8 +942,14 @@ fn track_row<'a>(
             }),
     )
     .on_press(Message::SelectTrack(row_index))
-    .on_double_click(Message::PlayTrack(row_index))
-    .into()
+    .on_double_click(Message::PlayTrack(row_index));
+    // What an Engine library's tracks can be taken out of is in the context menu; a folder
+    // of music has nothing to change.
+    if kind == Kind::Folder {
+        row.into()
+    } else {
+        right_click(row, move |at| Message::TrackMenuOpen { row: row_index, at }).into()
+    }
 }
 
 #[cfg(test)]

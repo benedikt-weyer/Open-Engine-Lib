@@ -28,12 +28,13 @@ use open_engine_api::v1::{
     ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
     MoveScratchRequest, NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress,
     PlayRequest, PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
-    RemoveStreamingTracksRequest, RemoveStreamingTracksResponse, RenamePlaylistRequest,
-    RenameProfileRequest, ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse,
-    SaveLibraryAsRequest, SeekRequest, SelectProfileRequest, SetControllerEnabledRequest,
-    SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
-    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
-    TogglePauseRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
+    RemoveStreamingTracksRequest, RemoveStreamingTracksResponse, RemoveTrackFromPlaylistRequest,
+    RemoveTracksRequest, RemoveTracksResponse, RenamePlaylistRequest, RenameProfileRequest,
+    ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse, SaveLibraryAsRequest, SeekRequest,
+    SelectProfileRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest,
+    SetRatingRequest, SmartRules, SoundSwitchState, StopRequest, SyncToLibraryRequest,
+    SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest,
+    UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -689,6 +690,39 @@ pub async fn remove_streaming_tracks(
         .await
         .map(|response| response.into_inner())
         .map_err(describe)
+}
+
+/// Takes the tracks with these ids out of the working copy of the open library.
+pub async fn remove_tracks(
+    mut backend: Backend,
+    track_ids: Vec<u32>,
+) -> Result<RemoveTracksResponse, String> {
+    backend
+        .library
+        .remove_tracks(RemoveTracksRequest { track_ids })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Takes a track (an index into the library's tracks) out of one playlist (an index into
+/// its playlists), and gives the playlists as they are then.
+pub async fn remove_track_from_playlist(
+    mut backend: Backend,
+    library: Arc<Library>,
+    playlist: usize,
+    track: u32,
+) -> Result<PlaylistsEdited, String> {
+    let edited = backend
+        .library
+        .remove_track_from_playlist(RemoveTrackFromPlaylistRequest {
+            playlist_id: playlist as u32,
+            track_id: track,
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    Ok(playlists_edited_from(edited, &library))
 }
 
 /// The folder all saved origins are in, and how many there are.

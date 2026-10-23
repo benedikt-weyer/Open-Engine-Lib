@@ -68,6 +68,8 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             return state.play_row(row);
         }
         Message::TrackListScrolled(viewport) => {
+            // (The menu opened where a row was.)
+            state.track_menu = None;
             if let LibraryState::Open(browser) = &mut state.library {
                 browser.scrolled(viewport);
             }

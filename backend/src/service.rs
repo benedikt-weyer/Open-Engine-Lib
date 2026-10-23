@@ -98,6 +98,31 @@ impl Service {
         Ok(library)
     }
 
+    /// Takes tracks out of the working copy of the open Engine library (`remove`), and if any
+    /// went, reads the working copy again and stops what plays: the tracks after the first one
+    /// removed have other ids now, and the player's queue has the old ones.
+    async fn remove_from_library(
+        &self,
+        remove: impl FnOnce(&Library) -> Result<library::TracksRemoved, library::EditError>
+        + Send
+        + 'static,
+    ) -> Result<library::TracksRemoved, Status> {
+        let library = self.engine_library()?;
+        let dir = library.dir.clone();
+        // Writes the database: not on the async threads.
+        let removed = tokio::task::spawn_blocking(move || remove(&library))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(edit_status)?;
+        if removed.tracks > 0 {
+            self.reopen(dir).await?;
+            if let Ok(mut audio) = self.audio() {
+                let _ = audio.stop(api::StopRequest {}).await;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Stops playback, releases the audio device and forgets the library.
     async fn close(&self) {
         if let Ok(audio) = &self.0.audio {
@@ -398,28 +423,46 @@ impl LibraryService for Service {
         &self,
         _: Request<api::RemoveStreamingTracksRequest>,
     ) -> Result<Response<api::RemoveStreamingTracksResponse>, Status> {
-        let library = self.engine_library()?;
-        let dir = library.dir.clone();
-        // Writes the database: not on the async threads.
-        let removed = {
-            let library = Arc::clone(&library);
-            tokio::task::spawn_blocking(move || library.remove_streaming_tracks())
-                .await
-                .map_err(|error| Status::internal(error.to_string()))?
-                .map_err(edit_status)?
-        };
-        if removed.tracks > 0 {
-            // The tracks after the first one removed have other ids now: read the working
-            // copy again, and stop what plays (its queue has the old ids).
-            self.reopen(dir).await?;
-            if let Ok(mut audio) = self.audio() {
-                let _ = audio.stop(api::StopRequest {}).await;
-            }
-        }
+        let removed = self
+            .remove_from_library(|library| library.remove_streaming_tracks())
+            .await?;
         Ok(Response::new(api::RemoveStreamingTracksResponse {
             removed: removed.tracks as u32,
             playlist_entries: removed.playlist_entries as u32,
         }))
+    }
+
+    async fn remove_tracks(
+        &self,
+        request: Request<api::RemoveTracksRequest>,
+    ) -> Result<Response<api::RemoveTracksResponse>, Status> {
+        let indices: Vec<usize> = request
+            .into_inner()
+            .track_ids
+            .into_iter()
+            .map(|id| id as usize)
+            .collect();
+        let removed = self
+            .remove_from_library(move |library| library.remove_tracks(&indices))
+            .await?;
+        Ok(Response::new(api::RemoveTracksResponse {
+            removed: removed.tracks as u32,
+            playlist_entries: removed.playlist_entries as u32,
+        }))
+    }
+
+    async fn remove_track_from_playlist(
+        &self,
+        request: Request<api::RemoveTrackFromPlaylistRequest>,
+    ) -> Result<Response<api::PlaylistsEdited>, Status> {
+        let library = self.engine_library()?;
+        let request = request.into_inner();
+        playlists_edited(library, move |library| {
+            library
+                .remove_track_from_playlist(request.playlist_id as usize, request.track_id as usize)
+                .map(|_| None)
+        })
+        .await
     }
 
     async fn get_origin_prefix(

@@ -19,8 +19,9 @@ service LibraryService {
   // has (ratings, cues, loops, SoundSwitch lighting, origins, covers, beatgrids) are empty,
   // and the calls that change or sync a library (`SaveLibraryAs`, `GetSyncDiff`,
   // `SyncToSource`, `PullFromSource`, `SetRating`, the playlist and smart playlist edits,
-  // `MigrateOrigins`, `RemoveStreamingTracks`, `GetLibrarySyncDiff`, `SyncToLibrary`) are
-  // FAILED_PRECONDITION, and `SetCues` and `SetLoops` too. Nothing is written to the folder or copied. The answer
+  // `MigrateOrigins`, `RemoveStreamingTracks`, `RemoveTracks`, `RemoveTrackFromPlaylist`,
+  // `GetLibrarySyncDiff`, `SyncToLibrary`) are FAILED_PRECONDITION, and `SetCues` and
+  // `SetLoops` too. Nothing is written to the folder or copied. The answer
   // has no `cache_path`.
   // Errors: NOT_FOUND if `path` is not a folder that can be read.
   rpc OpenLocalFolder(OpenLocalFolderRequest) returns (OpenLibraryResponse);
@@ -110,6 +111,24 @@ service LibraryService {
   // Errors: FAILED_PRECONDITION if no library is open or it is a folder of music, INTERNAL
   // if the database can't be written.
   rpc RemoveStreamingTracks(RemoveStreamingTracksRequest) returns (RemoveStreamingTracksResponse);
+  // Removes the given tracks from the working copy of the library, the way
+  // `RemoveStreamingTracks` does it for the streaming ones: the track, its analysis (cues,
+  // loops, beatgrid) and its entries in every playlist. The audio file is not touched, and
+  // nor is the source until the working copy is written to it. As there, the library is read
+  // again afterwards (the ids of the tracks after the first removed one change, so fetch the
+  // tracks and playlists again) and playback is stopped. No ids: nothing happens.
+  // Errors: NOT_FOUND for an id that is not a track (nothing is removed), FAILED_PRECONDITION
+  // if no library is open or it is a folder of music, INTERNAL if the database can't be
+  // written.
+  rpc RemoveTracks(RemoveTracksRequest) returns (RemoveTracksResponse);
+  // Takes a track out of one playlist: its entry goes and the entries after it move up. The
+  // track stays in the library and in the other playlists. A track that is not in the
+  // playlist changes nothing. The answer is as for the other playlist edits (`playlist_id`
+  // unset); playlist ids don't change.
+  // Errors: NOT_FOUND for a playlist or track that is not there, INVALID_ARGUMENT for a
+  // smart playlist (its tracks come from its rules), FAILED_PRECONDITION if no library is
+  // open or it is a folder of music.
+  rpc RemoveTrackFromPlaylist(RemoveTrackFromPlaylistRequest) returns (PlaylistsEdited);
   // The folder that all saved origins are in (whole folders in common, so `/a/b` and
   // `/a/c` give `/a`; `/` if they only share the root) and how many origins there are.
   // Empty and 0 if none is saved. Nothing changes.
@@ -262,6 +281,21 @@ message PlaylistsEdited {
   optional uint32 playlist_id = 1;
   // All playlists as `ListPlaylists` answers now.
   repeated Playlist playlists = 2;
+}
+
+message RemoveTracksRequest {
+  repeated uint32 track_ids = 1;
+}
+message RemoveTracksResponse {
+  // Tracks that were removed.
+  uint32 removed = 1;
+  // Playlist entries that were removed with them.
+  uint32 playlist_entries = 2;
+}
+message RemoveTrackFromPlaylistRequest {
+  // As in `DeletePlaylist`: an index into the playlists `ListPlaylists` gives.
+  uint32 playlist_id = 1;
+  uint32 track_id = 2;
 }
 
 message RemoveStreamingTracksRequest {}

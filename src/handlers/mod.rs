@@ -11,3 +11,4 @@ pub(super) mod playback;
 pub(super) mod playlists;
 pub(super) mod settings;
 pub(super) mod sync;
+pub(super) mod track_menu;

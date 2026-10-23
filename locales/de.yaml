@@ -218,6 +218,10 @@ streaming_remove_confirm: "Zum Entfernen von {count} Streaming-Titeln erneut kli
 streaming_remove_cancel: Abbrechen
 streaming_remove_tip: "Entfernt alle Streaming-Titel (TIDAL usw.) aus der Bibliothek und ihren Playlists; sie haben hier keine Datei. Die Änderung wird in der Arbeitskopie gemacht und die Wiedergabe gestoppt; „Mit dem Original abgleichen“ schreibt sie in die Bibliothek."
 streaming_removed: "{tracks} Streaming-Titel und {entries} Playlist-Einträge entfernt."
+track_menu_playlist: Titel aus der Playlist löschen
+track_menu_library: Titel aus der Bibliothek löschen
+track_menu_library_confirm: Zum Löschen erneut klicken (die Datei bleibt)
+track_deleted: "Titel aus der Bibliothek gelöscht, dazu {entries} Playlist-Einträge."
 origin_migrate_tip: "Speichert den aktuellen Ort der Datei jedes Titels als Herkunft, wenn noch keine gespeichert ist. Die Herkunft liegt in der eigenen Datenbank von Open Engine Lib, nicht in der Engine-Bibliothek."
 origin_migrated: "Herkunft gespeichert: {saved} neu, {kept} schon bekannt, {skipped} ohne Datei hier."
 origin_prefix_button: Herkunftsordner ändern…

@@ -18,10 +18,10 @@ use open_engine_api::v1::{
     GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest, LearnRequest, ListPlaylistsRequest,
     ListTracksRequest, Loop, MigrateOriginsRequest, OpenLibraryRequest, OpenLocalFolderRequest,
     PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest,
-    RemoveStreamingTracksRequest, RenameProfileRequest, ReplaceOriginPrefixRequest,
-    SaveLibraryAsRequest, SelectProfileRequest, SetControllerEnabledRequest, SetCuesRequest,
-    SetLoopsRequest, SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest,
-    UpdateSmartPlaylistRequest, WatchControllerRequest,
+    RemoveStreamingTracksRequest, RemoveTrackFromPlaylistRequest, RemoveTracksRequest,
+    RenameProfileRequest, ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
+    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule,
+    SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -437,6 +437,119 @@ async fn removes_the_streaming_tracks_from_the_working_copy_only() {
         .unwrap()
         .into_inner();
     assert_eq!((again.removed, again.playlist_entries), (0, 0));
+    assert_eq!(std::fs::read(&source).unwrap(), source_before);
+}
+
+#[tokio::test]
+async fn removes_a_track_from_a_playlist_or_from_the_library() {
+    let temp = TempDir::new("remove-track");
+    let library_dir = fixture_library(&temp.0);
+    let source = library_dir.join("Database2/m.db");
+    rusqlite::Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, beatData BLOB);
+             INSERT INTO PerformanceData (trackId) VALUES (1), (2), (3);
+             ALTER TABLE Playlist ADD COLUMN lastEditTime DATETIME;",
+        )
+        .unwrap();
+    let source_before = std::fs::read(&source).unwrap();
+    let running = start(&temp.0.join("cache"));
+    let mut library = LibraryServiceClient::new(InterceptedService::new(
+        channel(&running).await,
+        with_token as fn(_) -> _,
+    ));
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+    let titles = |tracks: &[open_engine_api::v1::Track]| {
+        tracks.iter().map(|t| t.title.clone()).collect::<Vec<_>>()
+    };
+    let list_tracks = |mut library: LibraryServiceClient<_>| async move {
+        let mut stream = library
+            .list_tracks(ListTracksRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        let mut tracks = Vec::new();
+        while let Some(batch) = stream.message().await.unwrap() {
+            tracks.extend(batch.tracks);
+        }
+        tracks
+    };
+
+    // Beta holds Three (the TIDAL one, track id 2) and One (track id 0).
+    let playlists = library
+        .list_playlists(ListPlaylistsRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .playlists;
+    let beta = playlists
+        .iter()
+        .position(|list| list.title == "Beta")
+        .unwrap() as u32;
+    assert_eq!(playlists[beta as usize].track_ids, [2, 0]);
+
+    // Out of the playlist: the track stays in the library, and ids don't change.
+    let edited = library
+        .remove_track_from_playlist(RemoveTrackFromPlaylistRequest {
+            playlist_id: beta,
+            track_id: 0,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(edited.playlists[beta as usize].track_ids, [2]);
+    assert_eq!(list_tracks(library.clone()).await.len(), 3);
+    for (playlist_id, track_id, code_wanted) in
+        [(99, 0, Code::NotFound), (beta, 99, Code::NotFound)]
+    {
+        assert_eq!(
+            code(
+                library
+                    .remove_track_from_playlist(RemoveTrackFromPlaylistRequest {
+                        playlist_id,
+                        track_id,
+                    })
+                    .await
+            ),
+            code_wanted
+        );
+    }
+
+    // Out of the library: a track that is not there removes nothing.
+    assert_eq!(
+        code(
+            library
+                .remove_tracks(RemoveTracksRequest {
+                    track_ids: vec![0, 99],
+                })
+                .await
+        ),
+        Code::NotFound
+    );
+    assert_eq!(list_tracks(library.clone()).await.len(), 3);
+    let done = library
+        .remove_tracks(RemoveTracksRequest { track_ids: vec![0] })
+        .await
+        .unwrap()
+        .into_inner();
+    // (It had no entry left in Beta; the fixture has no other playlist with it.)
+    assert_eq!((done.removed, done.playlist_entries), (1, 0));
+    assert_eq!(
+        titles(&list_tracks(library.clone()).await),
+        ["Two", "Three"]
+    );
+    let none = library
+        .remove_tracks(RemoveTracksRequest { track_ids: vec![] })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((none.removed, none.playlist_entries), (0, 0));
     assert_eq!(std::fs::read(&source).unwrap(), source_before);
 }
 

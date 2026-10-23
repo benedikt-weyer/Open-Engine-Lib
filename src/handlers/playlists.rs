@@ -138,30 +138,13 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             );
         }
         Message::RemoveStreamingCancel => state.streaming_confirm = false,
-        Message::StreamingRemoved(result) => match result {
-            Ok(done) if done.removed > 0 => {
-                state.backend_error = None;
-                let strings = state.config.effective().language.strings();
-                state.reload_result = Some((
-                    fill(
-                        &strings.streaming_removed,
-                        &[
-                            ("tracks", &done.removed),
-                            ("entries", &done.playlist_entries),
-                        ],
-                    ),
-                    false,
-                ));
-                // The tracks after the first one removed have other ids now, and the backend
-                // stopped the player.
-                return Task::batch([state.reload_library(), state.control(Control::Poll)]);
-            }
-            Ok(_) => state.reloading = false,
-            Err(error) => {
-                state.reloading = false;
-                state.backend_error = Some(error);
-            }
-        },
+        Message::StreamingRemoved(result) => {
+            return handlers::track_menu::removal_finished(
+                state,
+                result.map(|done| (done.removed, done.playlist_entries)),
+                |strings| &strings.streaming_removed,
+            );
+        }
 
         Message::PlaylistNew => {
             if matches!(state.library, LibraryState::Open(_)) {

@@ -39,8 +39,8 @@ use session::{Session, SessionStore};
 use sync_view::Stage as SyncStage;
 use views::{
     browser, cue_bar, cue_editor, deck, error_text, library_sync_view, loop_bar, loop_editor,
-    menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog, progress_view, settings,
-    sidebar, smart_editor, sync_view,
+    menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog, progress_view, right_click,
+    settings, sidebar, smart_editor, sync_view, track_menu,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -175,6 +175,8 @@ struct State {
     reloading: bool,
     /// The button that removes the streaming songs was pressed once and waits for a second.
     streaming_confirm: bool,
+    /// The context menu of a track of the list, while it is open.
+    track_menu: Option<track_menu::Menu>,
     reload_result: Option<(String, bool)>,
     /// How wide the user made the track list's columns.
     columns: ColumnStore,
@@ -276,6 +278,17 @@ pub enum Message {
     /// The button that saves the location of every track as its origin.
     MigrateOrigins,
     OriginsMigrated(Result<open_engine_api::v1::MigrateOriginsResponse, String>),
+    /// The track list's context menu (right click): opened on a row at a place in the window,
+    /// closed, and what it offers. Deleting from the library takes a second click.
+    TrackMenuOpen {
+        row: usize,
+        at: iced::Point,
+    },
+    TrackMenuClose,
+    TrackMenuRemoveFromPlaylist,
+    TrackMenuRemoveFromLibrary,
+    TrackRemovedFromPlaylist(Result<backend::PlaylistsEdited, String>),
+    TracksRemoved(Result<open_engine_api::v1::RemoveTracksResponse, String>),
     /// The button that removes the streaming songs: the first press asks to be pressed again.
     RemoveStreaming,
     RemoveStreamingCancel,
@@ -473,6 +486,7 @@ impl State {
             save_error: None,
             reloading: false,
             streaming_confirm: false,
+            track_menu: None,
             reload_result: None,
             columns: ColumnStore::discover(),
             resize: None,
@@ -715,6 +729,7 @@ impl State {
         self.sync = None;
         self.reload_result = None;
         self.streaming_confirm = false;
+        self.track_menu = None;
         self.progress = None;
         self.library = LibraryState::Opening(path.clone());
         match kind {
@@ -1170,6 +1185,12 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::OriginPrefixLoaded(..)
         | Message::OriginPrefixOpen
         | Message::OriginPrefixPicked(..) => handlers::origin_prefix::handle(state, message),
+        Message::TrackMenuClose
+        | Message::TrackMenuOpen { .. }
+        | Message::TrackMenuRemoveFromLibrary
+        | Message::TrackMenuRemoveFromPlaylist
+        | Message::TrackRemovedFromPlaylist(..)
+        | Message::TracksRemoved(..) => handlers::track_menu::handle(state, message),
         Message::MigrateOrigins
         | Message::OriginsMigrated(..)
         | Message::RemoveStreaming
@@ -1330,6 +1351,9 @@ fn view(state: &State) -> Element<'_, Message> {
     }
     if let Some(dialog) = &state.origin_prefix {
         return iced::widget::stack![window, origin_prefix_dialog::modal(dialog, language)].into();
+    }
+    if let (Some(menu), LibraryState::Open(_)) = (&state.track_menu, &state.library) {
+        return iced::widget::stack![window, track_menu::layer(menu, language)].into();
     }
     match (&state.playlist_dialog, &state.library) {
         (Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
@@ -1759,6 +1783,7 @@ mod tests {
             save_error: None,
             reloading: false,
             streaming_confirm: false,
+            track_menu: None,
             reload_result: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
             resize: None,
@@ -2501,6 +2526,132 @@ mod tests {
         );
         let _ = handle(&mut folder, Message::RemoveStreaming);
         assert!(!folder.streaming_confirm);
+    }
+
+    fn menu(state: &State) -> &track_menu::Menu {
+        state.track_menu.as_ref().expect("the menu is open")
+    }
+
+    #[test]
+    fn right_clicking_a_row_opens_a_menu_for_its_track_with_what_the_list_allows() {
+        let mut state = state();
+        let at = iced::Point::new(120.0, 80.0);
+
+        // In "All tracks" a track can only be deleted from the library.
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert_eq!(
+            menu(&state),
+            &track_menu::Menu {
+                row: 1,
+                track: 1,
+                title: "Track 1".into(),
+                playlist: None,
+                at,
+                confirm_library: false,
+            }
+        );
+        assert_eq!(browser(&state).selected, Some(1), "the row is selected");
+
+        // In a playlist, also from that playlist. (Deep, the second playlist, has tracks 1, 2.)
+        let _ = handle(&mut state, Message::TrackMenuClose);
+        assert!(state.track_menu.is_none());
+        let _ = handle(&mut state, Message::ShowPlaylist(1));
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert_eq!((menu(&state).playlist, menu(&state).track), (Some(1), 2));
+
+        // A row that is not there, and a library that is being read again, open nothing.
+        let _ = handle(&mut state, Message::TrackMenuClose);
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 9, at });
+        assert!(state.track_menu.is_none());
+        state.reloading = true;
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
+        assert!(state.track_menu.is_none());
+    }
+
+    #[test]
+    fn a_smart_playlist_and_a_folder_of_music_have_nothing_to_take_a_track_out_of() {
+        let at = iced::Point::ORIGIN;
+        let mut state = state();
+        let mut smart = playlist("Smart", 0, false, &[0, 1]);
+        smart.is_smart = true;
+        if let LibraryState::Open(browser) = &mut state.library {
+            let library = browser.library.with_playlists(vec![smart]);
+            *browser = Browser::new(Arc::new(library));
+            browser.show(Source::Playlist(0));
+        }
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
+        assert_eq!(menu(&state).playlist, None);
+
+        let mut folder = state_in_folder();
+        let _ = handle(&mut folder, Message::TrackMenuOpen { row: 0, at });
+        assert!(folder.track_menu.is_none(), "nothing to change in a folder");
+    }
+
+    #[test]
+    fn deleting_from_the_library_takes_a_second_click_and_a_new_menu_starts_unasked() {
+        let mut state = state();
+        let at = iced::Point::ORIGIN;
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
+        let _ = handle(&mut state, Message::TrackMenuRemoveFromLibrary);
+        assert!(menu(&state).confirm_library, "the first click only asks");
+        assert!(!state.reloading);
+
+        // (There is no backend here to do the second one.) A new menu starts out unasked.
+        let _ = handle(&mut state, Message::TrackMenuClose);
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
+        assert!(!menu(&state).confirm_library);
+    }
+
+    #[test]
+    fn a_track_taken_out_of_the_playlist_shown_is_gone_from_it_and_a_deleted_one_is_told() {
+        use open_engine_api::v1::RemoveTracksResponse;
+        let mut state = state();
+        let _ = handle(&mut state, Message::ShowPlaylist(1));
+        let _ = handle(&mut state, Message::SelectTrack(0));
+        assert_eq!(browser(&state).tracks(), [1, 2]);
+
+        let _ = handle(
+            &mut state,
+            Message::TrackRemovedFromPlaylist(Ok(backend::PlaylistsEdited {
+                playlists: vec![
+                    playlist("House", 0, true, &[]),
+                    playlist("Deep", 1, false, &[2]),
+                    playlist("Pop", 0, false, &[0]),
+                ],
+                playlist: None,
+            })),
+        );
+        assert_eq!(browser(&state).source, Source::Playlist(1));
+        assert_eq!(browser(&state).tracks(), [2]);
+        assert_eq!(browser(&state).selected, None);
+        assert_eq!(
+            browser(&state).library.tracks.len(),
+            3,
+            "still in the library"
+        );
+
+        let _ = handle(
+            &mut state,
+            Message::TrackRemovedFromPlaylist(Err("not there".into())),
+        );
+        assert_eq!(state.backend_error.as_deref(), Some("not there"));
+
+        // A deletion from the library is told, and the library is fetched again.
+        state.reloading = true;
+        let _ = handle(
+            &mut state,
+            Message::TracksRemoved(Ok(RemoveTracksResponse {
+                removed: 1,
+                playlist_entries: 3,
+            })),
+        );
+        assert_eq!(
+            state.reload_result,
+            Some((
+                "Deleted the track from the library, and 3 playlist entries.".to_owned(),
+                false
+            ))
+        );
     }
 
     #[test]
