@@ -23,7 +23,7 @@ use crate::library::{self, EditError, Library, OpenError, Playlist};
 use crate::new_library;
 use crate::origins;
 use crate::progress::{Phase, Progress};
-use crate::sync::{BACKUP_DIR, is_busy};
+use crate::sync::is_busy;
 use crate::track_sync;
 
 const MAIN_DATABASE: &str = "m.db";
@@ -31,6 +31,9 @@ const SCRATCH_DIR: &str = "library-sync";
 /// Where the working copy it replaces is kept, in the cache folder, by a sync the other
 /// way round.
 const BACK_SYNC_BACKUP: &str = "before-back-sync";
+/// Where the other library's databases that a sync replaces are kept, in the open library's
+/// cache folder (the other library, which may be a player's stick, gets no backup folder).
+const LIBRARY_SYNC_BACKUP: &str = "before-library-sync";
 /// Lists are cut at this many entries; the counts are complete.
 const MAX_LISTED: usize = 200;
 
@@ -148,6 +151,12 @@ struct Work {
 struct Place {
     /// The `Database2` folder the changed databases are put in.
     databases: PathBuf,
+    /// Where the origins go, if not with the other databases: a library keeps them in the
+    /// `open-engine` folder beside its `Engine Library` folder.
+    origins: Option<PathBuf>,
+    /// The library the databases are put in, if it is one (and not a working copy): the
+    /// origins that earlier versions left in its `Database2` are taken away.
+    library: Option<PathBuf>,
     /// Where the ones they replace are kept.
     backup: PathBuf,
     /// Whether another program writing there is a reason to refuse (it is for a library,
@@ -183,23 +192,54 @@ impl Prepared {
     }
 }
 
-/// Copies the main database and the origins of the `Database2` folder `from` to the same
-/// place in `to`, which is made.
-fn copy_databases(from: &Path, to: &Path, progress: &Progress) -> Result<(), MirrorError> {
+/// Where the main database and the origins are in a library: a working copy's `Database2`
+/// folder has both, a library at `dir` keeps the origins beside its `Engine Library` folder.
+#[derive(Clone)]
+struct Databases {
+    main: PathBuf,
+    origins: PathBuf,
+}
+
+impl Databases {
+    fn of_library(dir: &Path) -> Self {
+        Self {
+            main: dir.join(DATABASE_DIR).join(MAIN_DATABASE),
+            origins: cache::source_file(dir, origins::FILE),
+        }
+    }
+
+    fn of_working_copy(databases: &Path) -> Self {
+        Self {
+            main: databases.join(MAIN_DATABASE),
+            origins: databases.join(origins::FILE),
+        }
+    }
+
+    fn files(&self) -> [(&str, &Path); 2] {
+        [
+            (MAIN_DATABASE, self.main.as_path()),
+            (origins::FILE, self.origins.as_path()),
+        ]
+    }
+}
+
+/// Copies the main database and the origins to the same place in `to`, which is made.
+fn copy_databases(from: &Databases, to: &Path, progress: &Progress) -> Result<(), MirrorError> {
     fs::create_dir_all(to.join(DATABASE_DIR))?;
-    for name in [MAIN_DATABASE, origins::FILE] {
-        if from.join(name).is_file() {
-            progress.copy(&from.join(name), &to.join(DATABASE_DIR).join(name), false)?;
+    for (name, path) in from.files() {
+        if path.is_file() {
+            progress.copy(path, &to.join(DATABASE_DIR).join(name), false)?;
         }
     }
     Ok(())
 }
 
 /// What the files to be copied add up to.
-fn databases_size(databases: &Path) -> u64 {
-    [MAIN_DATABASE, origins::FILE]
+fn databases_size(databases: &Databases) -> u64 {
+    databases
+        .files()
         .iter()
-        .map(|name| fs::metadata(databases.join(name)).map_or(0, |metadata| metadata.len()))
+        .map(|(_, path)| fs::metadata(path).map_or(0, |metadata| metadata.len()))
         .sum()
 }
 
@@ -238,31 +278,36 @@ fn prepare(
 
     // What is changed is a copy of the other library's databases; the other way round it is
     // a copy of the working copy of the open one, and the other library is only read.
+    let other_files = Databases::of_library(&dir);
     let (changed, place) = if reverse {
         let working = open.cache.join(DATABASE_DIR);
         let place = Place {
             databases: working.clone(),
+            origins: None,
+            library: None,
             backup: open.cache.join(BACK_SYNC_BACKUP),
             check_busy: false,
             create: false,
             undo: None,
         };
-        (working, place)
+        (Databases::of_working_copy(&working), place)
     } else {
         let place = Place {
             databases: other_databases.clone(),
-            backup: other_databases.join(BACKUP_DIR),
+            origins: Some(origins::source_file(&dir)),
+            library: Some(dir.clone()),
+            backup: open.cache.join(LIBRARY_SYNC_BACKUP),
             check_busy: !new,
             create: new,
             undo: (new && !dir.exists()).then(|| dir.clone()),
         };
-        (other_databases.clone(), place)
+        (other_files.clone(), place)
     };
     progress.phase(
         Phase::Preparing,
         databases_size(&changed)
             + if reverse {
-                databases_size(&other_databases)
+                databases_size(&other_files)
             } else {
                 0
             },
@@ -276,7 +321,7 @@ fn prepare(
         copy_databases(&changed, &target_scratch, progress)?;
     }
     let master = if reverse {
-        copy_databases(&other_databases, &master_scratch, progress)?;
+        copy_databases(&other_files, &master_scratch, progress)?;
         Some(Library::open_copy(
             &master_scratch.join(DATABASE_DIR).join(MAIN_DATABASE),
             dir.clone(),
@@ -507,7 +552,8 @@ pub fn push(
 }
 
 /// Puts the changed databases from the copy in `scratch` into the library's `databases`
-/// folder, after keeping the ones they replace in a backup folder, which is returned.
+/// folder (the origins to theirs), after keeping the ones they replace in a backup folder,
+/// which is returned.
 fn install(
     place: &Place,
     scratch: &Path,
@@ -515,6 +561,16 @@ fn install(
     progress: &Progress,
 ) -> Result<PathBuf, MirrorError> {
     let databases = place.databases.as_path();
+    // Where each database is put: the origins have a place of their own in a library.
+    let destination = |name: &str| match (&place.origins, name == origins::FILE) {
+        (Some(origins), true) => origins.clone(),
+        _ => databases.join(name),
+    };
+    // Where each is now: a library's origins may still be where earlier versions kept them.
+    let current = |name: &str| match &place.library {
+        Some(library) => cache::source_file(library, name),
+        None => databases.join(name),
+    };
     // Another program may have started writing since the copy was made.
     if place.check_busy && is_busy(databases) {
         return Err(MirrorError::Busy);
@@ -530,7 +586,7 @@ fn install(
         Phase::Writing,
         changed
             .iter()
-            .map(|name| size(databases.join(name)) + size(scratch.join(DATABASE_DIR).join(name)))
+            .map(|name| size(current(name)) + size(scratch.join(DATABASE_DIR).join(name)))
             .sum(),
         0,
     );
@@ -538,8 +594,8 @@ fn install(
         let _ = fs::remove_dir_all(&backup);
         fs::create_dir_all(&backup)?;
         for name in changed {
-            if databases.join(name).is_file() {
-                progress.copy(&databases.join(name), &backup.join(name), false)?;
+            if current(name).is_file() {
+                progress.copy(&current(name), &backup.join(name), false)?;
             }
         }
     }
@@ -548,23 +604,31 @@ fn install(
     // written. (If one fails, the ones before it are put back.)
     let mut replaced: Vec<&str> = Vec::new();
     for name in changed {
-        let temporary = databases.join(format!(".{name}.syncing"));
-        let result = progress
-            .copy(&scratch.join(DATABASE_DIR).join(name), &temporary, false)
-            .and_then(|_| fs::rename(&temporary, databases.join(name)));
+        let target = destination(name);
+        let temporary = target.with_file_name(format!(".{name}.syncing"));
+        let result = target
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| progress.copy(&scratch.join(DATABASE_DIR).join(name), &temporary, false))
+            .and_then(|_| fs::rename(&temporary, &target));
         if let Err(error) = result {
             let _ = fs::remove_file(&temporary);
             for done in replaced {
                 let kept = backup.join(done);
                 if kept.is_file() {
-                    let _ = fs::copy(kept, databases.join(done));
+                    let _ = fs::copy(kept, destination(done));
                 } else {
-                    let _ = fs::remove_file(databases.join(done));
+                    let _ = fs::remove_file(destination(done));
                 }
             }
             return Err(error.into());
         }
         replaced.push(name);
+    }
+    if let Some(library) = &place.library
+        && changed.contains(&origins::FILE)
+    {
+        cache::remove_old_origins(library);
     }
     Ok(backup)
 }
@@ -1077,10 +1141,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!((done.playlists_changed, done.tracks_missing), (4, 1));
-        let backup = stick
-            .join(DATABASE_DIR)
-            .join(BACKUP_DIR)
+        // Kept beside the working copy of the open library, never on the other one.
+        let backup = temp
+            .0
+            .join("source-scratch")
+            .join(LIBRARY_SYNC_BACKUP)
             .join(MAIN_DATABASE);
+        assert!(
+            !stick
+                .join(DATABASE_DIR)
+                .join("open-engine-lib-backup")
+                .exists()
+        );
         assert_eq!(
             done.backup_path,
             backup.parent().unwrap().display().to_string()
@@ -1267,12 +1339,14 @@ mod tests {
             .save_origins(&[(key(2), "/old/b.flac".into())], false)
             .unwrap();
         drop(target);
+        let stick_origins = origins::source_file(&stick);
+        fs::create_dir_all(stick_origins.parent().unwrap()).unwrap();
         fs::copy(
             temp.0
                 .join("stick-scratch")
                 .join(DATABASE_DIR)
                 .join(origins::FILE),
-            stick.join(DATABASE_DIR).join(origins::FILE),
+            &stick_origins,
         )
         .unwrap();
 
@@ -1312,7 +1386,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(done.origins_changed, 2);
-        let written = origins::Origins::open(&stick.join(DATABASE_DIR).join(origins::FILE))
+        let written = origins::Origins::open(&origins::source_file(&stick))
             .unwrap()
             .all()
             .unwrap();
@@ -1323,7 +1397,7 @@ mod tests {
             "/pc/Music/b.flac",
             "the open library's replaces"
         );
-        let backup = stick.join(DATABASE_DIR).join(BACKUP_DIR);
+        let backup = temp.0.join("source-scratch").join(LIBRARY_SYNC_BACKUP);
         assert!(backup.join(origins::FILE).is_file());
         assert!(
             backup.join(MAIN_DATABASE).is_file(),
@@ -1367,7 +1441,11 @@ mod tests {
             fs::read(stick.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap(),
             before
         );
-        assert!(stick.join(DATABASE_DIR).join(origins::FILE).is_file());
+        assert!(origins::source_file(&stick).is_file());
+        assert!(
+            !stick.join(DATABASE_DIR).join(origins::FILE).exists(),
+            "not in the library itself"
+        );
     }
 
     /// Like `open`, for the library whose working copy is read: the copy of its database
@@ -2088,12 +2166,13 @@ mod tests {
         master
             .save_origins(&[(("db".to_string(), 1), "/pc/Music/a.flac".into())], false)
             .unwrap();
+        fs::create_dir_all(origins::source_file(&pc).parent().unwrap()).unwrap();
         fs::copy(
             temp.0
                 .join("pc-scratch")
                 .join(DATABASE_DIR)
                 .join(origins::FILE),
-            pc.join(DATABASE_DIR).join(origins::FILE),
+            origins::source_file(&pc),
         )
         .unwrap();
         let options = Options {
@@ -2185,7 +2264,12 @@ mod tests {
             fs::read(pc.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap(),
             pc_before
         );
-        assert!(!stick.join(DATABASE_DIR).join(BACKUP_DIR).exists());
+        assert!(
+            !stick
+                .join(DATABASE_DIR)
+                .join("open-engine-lib-backup")
+                .exists()
+        );
     }
 
     #[test]
@@ -2278,7 +2362,10 @@ mod tests {
         let library = drive.join("Engine Library");
         assert!(library.join(DATABASE_DIR).join(MAIN_DATABASE).is_file());
         assert!(
-            !library.join(DATABASE_DIR).join(BACKUP_DIR).exists(),
+            !library
+                .join(DATABASE_DIR)
+                .join("open-engine-lib-backup")
+                .exists(),
             "nothing was replaced"
         );
         let made = open(&library, &temp.0.join("check"));

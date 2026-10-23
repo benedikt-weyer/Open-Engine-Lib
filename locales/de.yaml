@@ -242,6 +242,19 @@ origin_prefix_load_failed: "Die Herkünfte konnten nicht gelesen werden: {error}
 origin_none: Nicht gespeichert
 sync_playlist_missing: "{count} nicht in der anderen Bibliothek"
 libsync_button: Abgleichen mit…
+repair_button: Bibliothek reparieren…
+repair_title: Bibliothek reparieren
+repair_hint: "Wähle eine Bibliothek zum Reparieren. Open Engine Lib legt nichts mehr im Ordner Database2 der Bibliothek ab: Der Ordner mit alten Sicherungen (open-engine-lib-backup) wird gelöscht und die gespeicherten Herkunftsorte werden in einen Ordner open-engine neben dem Ordner Engine Library verschoben. Die Engine-Datenbanken bleiben unberührt."
+repair_add: Ordner wählen…
+repair_add_title: Wähle die Bibliothek (oder den Ordner, der sie enthält)
+repair_target: "Bibliothek: {path}"
+repair_working: Wird repariert…
+repair_failed: "Die Bibliothek konnte nicht repariert werden: {error}"
+repair_back: Andere Bibliothek wählen
+repair_origins_moved: Die gespeicherten Herkunftsorte wurden in den Ordner open-engine neben dem Ordner Engine Library verschoben.
+repair_backup_removed: Der Ordner mit alten Sicherungen wurde gelöscht.
+repair_nothing: Die Bibliothek ist schon in Ordnung, es musste nichts geändert werden.
+repair_conflict: Der Ordner open-engine enthält andere Herkunftsorte als Database2, deshalb blieben die in Database2 dort, wo sie sind.
 libsync_title: Abgleichen mit…
 libsync_pick: "Wähle, womit abgeglichen wird: eine Bibliothek oder ein Laufwerk oder Ordner ohne eine (dort wird eine neue Bibliothek angelegt)."
 libsync_add: Ordner wählen…

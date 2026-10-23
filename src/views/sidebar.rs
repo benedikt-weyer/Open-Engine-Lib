@@ -107,6 +107,10 @@ pub fn view<'a>(
             button(text(&strings.libsync_button))
                 .width(Fill)
                 .on_press_maybe(can_sync.then_some(Message::LibrarySyncOpen)),
+            button(text(&strings.repair_button))
+                .width(Fill)
+                .style(button::secondary)
+                .on_press_maybe(can_sync.then_some(Message::RepairOpen)),
             container(local_section).max_height(LOCAL_MAX_HEIGHT),
             container(drive_section).max_height(DRIVES_MAX_HEIGHT),
             container(section).max_height(RECENT_MAX_HEIGHT)
@@ -115,7 +119,11 @@ pub fn view<'a>(
             container(local_section).max_height(LOCAL_MAX_HEIGHT),
             drive_section,
             section,
-            Space::new().height(Fill)
+            Space::new().height(Fill),
+            button(text(&strings.repair_button))
+                .width(Fill)
+                .style(button::secondary)
+                .on_press_maybe(can_sync.then_some(Message::RepairOpen)),
         ],
     };
     container(content.spacing(16).height(Fill))

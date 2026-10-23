@@ -16,6 +16,8 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use crate::origins;
+
 /// The folder inside an Engine library that holds the databases.
 pub const DATABASE_DIR: &str = "Database2";
 /// Lists the files the copy was made from; written last, so a copy that was cut
@@ -38,17 +40,72 @@ pub fn default_root() -> PathBuf {
         })
 }
 
+/// Where the file `name` of the working copy is in the library at `source` (its `Engine Library`
+/// folder): in `Database2`, except for the origins, which are in the `open-engine` folder
+/// beside it (or, where earlier versions left it and nothing is at the new place, in
+/// `Database2`).
+pub fn source_file(source: &Path, name: &str) -> PathBuf {
+    if name == origins::FILE {
+        let moved = origins::source_file(source);
+        let old = origins::old_source_file(source);
+        if !moved.is_file() && old.is_file() {
+            return old;
+        }
+        return moved;
+    }
+    source.join(DATABASE_DIR).join(name)
+}
+
+/// Where the file `name` of the working copy is written to in the library at `source`.
+pub fn destination_file(source: &Path, name: &str) -> PathBuf {
+    if name == origins::FILE {
+        origins::source_file(source)
+    } else {
+        source.join(DATABASE_DIR).join(name)
+    }
+}
+
+/// Takes away the origins that earlier versions left in `Database2`, once they are at the
+/// new place.
+pub fn remove_old_origins(source: &Path) {
+    if origins::source_file(source).is_file() {
+        let _ = fs::remove_file(origins::old_source_file(source));
+    }
+}
+
+/// The files of the library at `source` that a working copy is made of: `database_files` of
+/// its `Database2` folder, with the origins from wherever they are (see `source_file`).
+pub fn source_files(source: &Path) -> io::Result<Vec<SourceFile>> {
+    let mut files = database_files(&source.join(DATABASE_DIR))?;
+    files.retain(|file| file.name != origins::FILE);
+    if let Ok(metadata) = fs::metadata(source_file(source, origins::FILE))
+        && metadata.is_file()
+    {
+        files.push(SourceFile {
+            name: origins::FILE.to_owned(),
+            size: metadata.len(),
+            modified: metadata
+                .modified()?
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos()),
+            checksum: None,
+        });
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    Ok(files)
+}
+
 /// Makes sure the cache under `cache_root` holds an up to date copy of the databases
 /// of the library at `source`, and returns the cache's library folder (the one that
 /// contains `Database2`).
 pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
     let cache = cache_root.join(cache_name(source));
-    let mut files = database_files(&source.join(DATABASE_DIR))?;
+    let mut files = source_files(source)?;
 
     let up_to_date = files
         .iter()
         .all(|file| cache.join(DATABASE_DIR).join(&file.name).is_file())
-        && compare(&source.join(DATABASE_DIR), &cache, &files).is_ok_and(|found| found.unchanged());
+        && compare(source, &cache, &files).is_ok_and(|found| found.unchanged());
     if up_to_date {
         return Ok(cache);
     }
@@ -69,7 +126,7 @@ pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(cache.join(DATABASE_DIR))?;
     for file in &files {
         fs::copy(
-            source.join(DATABASE_DIR).join(&file.name),
+            source_file(source, &file.name),
             cache.join(DATABASE_DIR).join(&file.name),
         )?;
     }
@@ -106,21 +163,21 @@ pub fn mark_edited(cache: &Path) -> io::Result<()> {
 /// Whether the databases at `source` are no longer as they were when the working copy in
 /// `cache` (a folder `sync` returned) was made from them: something else changed them.
 pub fn source_changed(source: &Path, cache: &Path) -> io::Result<bool> {
-    let files = database_files(&source.join(DATABASE_DIR))?;
-    Ok(!compare(&source.join(DATABASE_DIR), cache, &files).is_ok_and(|found| found.unchanged()))
+    let files = source_files(source)?;
+    Ok(!compare(source, cache, &files).is_ok_and(|found| found.unchanged()))
 }
 
 /// Notes that the working copy in `cache` matches the databases at `source` as they are
 /// now, e.g. after the working copy was written to the source.
 pub fn record_source(source: &Path, cache: &Path) -> io::Result<()> {
-    let mut files = database_files(&source.join(DATABASE_DIR))?;
+    let mut files = source_files(source)?;
     for file in &mut files {
         // The working copy is the source's content now, and is read faster than the source.
         let copy = cache.join(DATABASE_DIR).join(&file.name);
         let path = if copy.is_file() {
             copy
         } else {
-            source.join(DATABASE_DIR).join(&file.name)
+            source_file(source, &file.name)
         };
         file.checksum = Some(checksum(&path)?);
     }
@@ -219,7 +276,7 @@ fn checksum(path: &Path) -> io::Result<u32> {
     }
 }
 
-/// How the databases at `dir` (listed as `files`) are compared with what the working copy
+/// How the databases of the library at `source` (listed as `files`) are compared with what the working copy
 /// in `cache` was made from.
 enum Comparison {
     /// The same files with the same sizes and times.
@@ -236,7 +293,7 @@ impl Comparison {
     }
 }
 
-fn compare(dir: &Path, cache: &Path, files: &[SourceFile]) -> io::Result<Comparison> {
+fn compare(source: &Path, cache: &Path, files: &[SourceFile]) -> io::Result<Comparison> {
     let Some(recorded) = parse_manifest(&fs::read_to_string(cache.join(MANIFEST))?) else {
         return Ok(Comparison::Different);
     };
@@ -255,7 +312,9 @@ fn compare(dir: &Path, cache: &Path, files: &[SourceFile]) -> io::Result<Compari
     for (before, now) in recorded.iter().zip(files) {
         if before.modified != now.modified {
             match before.checksum {
-                Some(known) if checksum(&dir.join(&now.name))? == known => touched = true,
+                Some(known) if checksum(&source_file(source, &now.name))? == known => {
+                    touched = true
+                }
                 _ => return Ok(Comparison::Different),
             }
         }

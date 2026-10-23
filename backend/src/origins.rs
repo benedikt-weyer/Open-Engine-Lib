@@ -1,7 +1,10 @@
 //! Open Engine Lib's own database of where tracks came from: the location of their file,
-//! as saved from a library that had it. Each library has one, `open-engine-lib.db` in
-//! its `Database2` folder next to Engine's databases. The working copy has its own like
-//! the others, so the origins are synced to the source with them (see `sync`), and to
+//! as saved from a library that had it. Each library has one, `open-engine-lib.db` in an
+//! `open-engine` folder beside its `Engine Library` folder (not in it: a player has no use
+//! for it). Earlier versions kept it in `Database2`; that is still read when the new place
+//! has none, and it is taken away when the file is written to the new place. The working
+//! copy has its own in its `Database2` folder, so the origins are synced to the source with
+//! the other databases (see `sync`), and to
 //! another library when its playlists are synced (see `mirror`). Tracks are identified
 //! the way Engine identifies where a track came from, by `(originDatabaseUuid,
 //! originTrackId)`, so a track that was copied to another library has the same origin
@@ -13,8 +16,25 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-/// The file name, in the `Database2` folder of a library.
+/// The file name, in the `open-engine` folder beside a library's `Engine Library` folder (and
+/// in the `Database2` folder of the working copy).
 pub const FILE: &str = "open-engine-lib.db";
+/// The folder beside the `Engine Library` folder that Open Engine Lib keeps its files in.
+pub const FOLDER: &str = "open-engine";
+
+/// Where the origins of the library at `library_dir` (its `Engine Library` folder) are kept.
+pub fn source_file(library_dir: &Path) -> PathBuf {
+    library_dir
+        .parent()
+        .unwrap_or(library_dir)
+        .join(FOLDER)
+        .join(FILE)
+}
+
+/// Where earlier versions kept them: in the library's `Database2` folder.
+pub fn old_source_file(library_dir: &Path) -> PathBuf {
+    library_dir.join(crate::cache::DATABASE_DIR).join(FILE)
+}
 
 /// Identifies a track across libraries: Engine's `(originDatabaseUuid, originTrackId)`.
 pub type TrackKey = (String, i64);

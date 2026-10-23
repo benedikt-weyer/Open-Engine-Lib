@@ -242,6 +242,19 @@ origin_prefix_load_failed: "Could not read the origins: {error}"
 origin_none: Not saved
 sync_playlist_missing: "{count} not in the other library"
 libsync_button: Sync to…
+repair_button: Repair library…
+repair_title: Repair library
+repair_hint: "Choose a library to repair. Open Engine Lib keeps nothing in the library's Database2 folder any more: the folder of old backups (open-engine-lib-backup) is deleted and the saved origins are moved to an open-engine folder beside the Engine Library folder. The Engine databases are not touched."
+repair_add: Choose a folder…
+repair_add_title: Choose the library (or the folder that contains it)
+repair_target: "Library: {path}"
+repair_working: Repairing…
+repair_failed: "Could not repair the library: {error}"
+repair_back: Choose another library
+repair_origins_moved: The saved origins were moved to the open-engine folder beside the Engine Library folder.
+repair_backup_removed: The folder of old backups was deleted.
+repair_nothing: The library is already in order, nothing needed to be changed.
+repair_conflict: The open-engine folder has other origins than the ones in Database2, so the ones in Database2 were left where they are.
 libsync_title: Sync to…
 libsync_pick: "Choose where to sync to: a library, or a drive or folder without one (a new library is made there)."
 libsync_add: Choose a folder…

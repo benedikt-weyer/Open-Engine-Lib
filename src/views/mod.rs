@@ -17,6 +17,7 @@ pub(crate) mod origin_prefix_dialog;
 pub(crate) mod player_bar;
 pub(crate) mod playlist_dialog;
 pub(crate) mod progress_view;
+pub(crate) mod repair_view;
 pub(crate) mod right_click;
 pub(crate) mod settings;
 pub(crate) mod sidebar;

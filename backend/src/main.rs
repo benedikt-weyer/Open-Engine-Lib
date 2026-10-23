@@ -22,6 +22,7 @@ mod mirror;
 mod new_library;
 mod origins;
 mod progress;
+mod repair;
 mod save;
 mod service;
 mod smartlist;

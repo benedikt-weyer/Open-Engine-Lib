@@ -35,12 +35,13 @@ use open_engine_api::v1::{
 };
 use reachable::Reachability;
 use recent::Recents;
+use repair_view::Stage as RepairStage;
 use session::{Session, SessionStore};
 use sync_view::Stage as SyncStage;
 use views::{
     browser, cue_bar, cue_editor, deck, error_text, library_sync_view, loop_bar, loop_editor,
-    menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog, progress_view, right_click,
-    settings, sidebar, smart_editor, sync_view, track_menu,
+    menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog, progress_view, repair_view,
+    right_click, settings, sidebar, smart_editor, sync_view, track_menu,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -157,6 +158,8 @@ struct State {
     progress: Option<open_engine_api::v1::OperationProgress>,
     /// The window for syncing the playlists to another library, while it is open.
     library_sync: Option<LibrarySyncStage>,
+    /// The window for repairing a library, while it is open.
+    repair: Option<RepairStage>,
     /// The window for adding or changing a smart playlist, while it is open.
     smart: Option<smart_editor::Editor>,
     /// The window for adding, renaming or deleting a playlist, while it is open.
@@ -269,6 +272,18 @@ pub enum Message {
     /// Back to choosing the library.
     LibrarySyncBack,
     LibrarySyncClose,
+
+    /// The button that opens the window for repairing a library, and what it does.
+    RepairOpen,
+    RepairAdd,
+    RepairAdded(Option<PathBuf>),
+    RepairTarget(PathBuf),
+    RepairFinished {
+        target: PathBuf,
+        result: Result<open_engine_api::v1::RepairLibraryResponse, String>,
+    },
+    RepairBack,
+    RepairClose,
 
     /// The button for a new smart playlist.
     SmartNew,
@@ -485,6 +500,7 @@ impl State {
             sync_reverse: false,
             progress: None,
             library_sync: None,
+            repair: None,
             smart: None,
             playlist_dialog: None,
             origin_prefix: None,
@@ -652,6 +668,7 @@ impl State {
     fn window_open(&self) -> bool {
         self.sync.is_some()
             || self.library_sync.is_some()
+            || self.repair.is_some()
             || self.smart.is_some()
             || self.playlist_dialog.is_some()
             || self.origin_prefix.is_some()
@@ -1247,6 +1264,13 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::LibrarySyncOption(..)
         | Message::LibrarySyncStart
         | Message::LibrarySyncTarget(..) => handlers::library_sync::handle(state, message),
+        Message::RepairAdd
+        | Message::RepairAdded(..)
+        | Message::RepairBack
+        | Message::RepairClose
+        | Message::RepairFinished { .. }
+        | Message::RepairOpen
+        | Message::RepairTarget(..) => handlers::repair::handle(state, message),
         Message::AddLocalFolder
         | Message::ChooseLibrary
         | Message::CloseLibrary
@@ -1369,6 +1393,13 @@ fn view(state: &State) -> Element<'_, Message> {
             library_sync_view::modal(stage, sources, state.progress.as_ref(), language)
         ]
         .into();
+    }
+    if let Some(stage) = &state.repair {
+        let sources = repair_view::Sources {
+            recents: &state.recents,
+            drives: &state.drives,
+        };
+        return iced::widget::stack![window, repair_view::modal(stage, sources, language)].into();
     }
     if let Some(editor) = &state.smart {
         return iced::widget::stack![window, smart_editor::modal(editor, language)].into();
@@ -1804,6 +1835,7 @@ mod tests {
             sync_reverse: false,
             progress: None,
             library_sync: None,
+            repair: None,
             smart: None,
             playlist_dialog: None,
             origin_prefix: None,
@@ -2861,6 +2893,77 @@ mod tests {
             playlists_changed: count,
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn a_library_is_repaired_in_steps() {
+        let mut state = state();
+        let target = PathBuf::from("/media/STICK/Engine Library");
+        let done = |moved| open_engine_api::v1::RepairLibraryResponse {
+            target_path: target.display().to_string(),
+            origins_moved: moved,
+            ..Default::default()
+        };
+
+        // The window opens on the choice, and no second window opens over it.
+        let _ = handle(&mut state, Message::RepairOpen);
+        assert!(matches!(state.repair, Some(RepairStage::Pick)));
+        let _ = handle(&mut state, Message::LibrarySyncOpen);
+        assert!(state.library_sync.is_none());
+
+        // An answer nobody waits for is not wanted.
+        let _ = handle(
+            &mut state,
+            Message::RepairFinished {
+                target: target.clone(),
+                result: Ok(done(true)),
+            },
+        );
+        assert!(matches!(state.repair, Some(RepairStage::Pick)));
+
+        // While it works the window can't be closed or sent back; the answer for another
+        // library is not its answer.
+        state.repair = Some(RepairStage::Working {
+            target: target.clone(),
+        });
+        let _ = handle(&mut state, Message::RepairClose);
+        let _ = handle(&mut state, Message::RepairBack);
+        assert!(matches!(state.repair, Some(RepairStage::Working { .. })));
+        let _ = handle(
+            &mut state,
+            Message::RepairFinished {
+                target: "/elsewhere".into(),
+                result: Ok(done(true)),
+            },
+        );
+        assert!(matches!(state.repair, Some(RepairStage::Working { .. })));
+
+        // Its answer is shown, a failure with the reason, and the window goes back or closes.
+        let _ = handle(
+            &mut state,
+            Message::RepairFinished {
+                target: target.clone(),
+                result: Ok(done(true)),
+            },
+        );
+        assert!(matches!(&state.repair, Some(RepairStage::Done(d)) if d.origins_moved));
+        let _ = handle(&mut state, Message::RepairBack);
+        assert!(matches!(state.repair, Some(RepairStage::Pick)));
+        state.repair = Some(RepairStage::Working {
+            target: target.clone(),
+        });
+        let _ = handle(
+            &mut state,
+            Message::RepairFinished {
+                target: target.clone(),
+                result: Err("denied".into()),
+            },
+        );
+        assert!(
+            matches!(&state.repair, Some(RepairStage::Failed { error, .. }) if error == "denied")
+        );
+        let _ = handle(&mut state, Message::RepairClose);
+        assert!(state.repair.is_none());
     }
 
     #[test]

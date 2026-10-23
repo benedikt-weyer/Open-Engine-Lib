@@ -15,6 +15,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::cache::{self, DATABASE_DIR};
 use crate::library::{ARTWORK_DIR, Library};
+use crate::origins;
 
 /// What an Engine library folder is called.
 const LIBRARY_DIR: &str = "Engine Library";
@@ -133,6 +134,13 @@ fn copy_library(library: &Library, target: &Path) -> Result<(), SaveError> {
     // The databases, from the working copy.
     let cached = library.cache.join(DATABASE_DIR);
     for file in cache::database_files(&cached)? {
+        if file.name == origins::FILE {
+            // Beside the library folder (`target` is beside the final folder), not in it.
+            let place = origins::source_file(target);
+            fs::create_dir_all(place.parent().unwrap_or(target))?;
+            fs::copy(cached.join(&file.name), place)?;
+            continue;
+        }
         fs::copy(cached.join(&file.name), databases.join(&file.name))?;
         if file.name.ends_with(".db") {
             repoint_tracks(&databases.join(&file.name), &library.dir, target)?;

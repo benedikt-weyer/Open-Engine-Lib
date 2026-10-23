@@ -19,6 +19,7 @@ use crate::library::{self, EditError, Library, OpenError};
 use crate::loops::Loop;
 use crate::mirror::{self, MirrorError};
 use crate::progress::{Phase, Progress};
+use crate::repair;
 use crate::save::{self, SaveError};
 use crate::smartlist::Rules;
 use crate::sync::{self, SyncError};
@@ -388,6 +389,28 @@ impl LibraryService for Service {
                 .map(|()| None)
         })
         .await
+    }
+
+    async fn repair_library(
+        &self,
+        request: Request<api::RepairLibraryRequest>,
+    ) -> Result<Response<api::RepairLibraryResponse>, Status> {
+        let target = request.into_inner().target_path;
+        // Moves and deletes files, maybe on a slow drive: not on the async threads.
+        let done =
+            tokio::task::spawn_blocking(move || repair::repair(std::path::Path::new(&target)))
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+                .map_err(|error| match error {
+                    repair::RepairError::NotALibrary(_) => Status::not_found(error.to_string()),
+                    repair::RepairError::Io(_) => Status::internal(error.to_string()),
+                })?;
+        Ok(Response::new(api::RepairLibraryResponse {
+            target_path: done.library.display().to_string(),
+            origins_moved: done.origins_moved,
+            origins_conflict: done.origins_conflict,
+            backup_removed: done.backup_removed,
+        }))
     }
 
     async fn migrate_origins(

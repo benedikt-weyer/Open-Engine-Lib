@@ -100,6 +100,16 @@ service LibraryService {
   // Errors: FAILED_PRECONDITION if no library is open, INTERNAL if the database can't
   // be opened or written.
   rpc MigrateOrigins(MigrateOriginsRequest) returns (MigrateOriginsResponse);
+  // Puts the library at `target_path` (its `Engine Library` folder, the folder that
+  // contains it, or its `Database2` folder; it does not have to be the open one) in the shape
+  // this version keeps libraries in. Earlier versions left two things in `Database2`, next to
+  // Engine's databases: a folder `open-engine-lib-backup` with the databases a sync had
+  // replaced, which is deleted (backups are kept on this computer now), and the origins file
+  // `open-engine-lib.db`, which is moved to the `open-engine` folder beside the `Engine
+  // Library` folder. No database is opened or changed, and nothing else is touched.
+  // Errors: NOT_FOUND if there is no library at the path, INTERNAL if a file can't be moved
+  // or deleted.
+  rpc RepairLibrary(RepairLibraryRequest) returns (RepairLibraryResponse);
   // Removes every streaming track (TIDAL and so on: the ones `ListTracks` marks as
   // streaming) from the working copy of the library: the track, its analysis and its entries
   // in playlists (the playlists stay, and the entries after a removed one move up). Nothing
@@ -304,6 +314,21 @@ message RemoveStreamingTracksResponse {
   uint32 removed = 1;
   // Playlist entries that were removed with them.
   uint32 playlist_entries = 2;
+}
+
+message RepairLibraryRequest {
+  string target_path = 1;
+}
+message RepairLibraryResponse {
+  // The library's `Engine Library` folder.
+  string target_path = 1;
+  // The origins file was moved out of `Database2` (or taken away, being a second copy).
+  bool origins_moved = 2;
+  // `Database2` has an origins file that differs from the one in the `open-engine` folder;
+  // it was left where it is.
+  bool origins_conflict = 3;
+  // The folder of old backups in `Database2` was deleted.
+  bool backup_removed = 4;
 }
 
 message MigrateOriginsRequest {}
