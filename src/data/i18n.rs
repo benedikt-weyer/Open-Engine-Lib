@@ -296,10 +296,10 @@ impl Language {
 
         match self {
             Language::English => {
-                ENGLISH.get_or_init(|| parse("en", include_str!("../locales/en.yaml")))
+                ENGLISH.get_or_init(|| parse("en", include_str!("../../locales/en.yaml")))
             }
             Language::German => {
-                GERMAN.get_or_init(|| parse("de", include_str!("../locales/de.yaml")))
+                GERMAN.get_or_init(|| parse("de", include_str!("../../locales/de.yaml")))
             }
         }
     }
@@ -381,8 +381,8 @@ mod tests {
         let load = |source: &str| -> std::collections::BTreeMap<String, String> {
             yaml_serde::from_str(source).unwrap()
         };
-        let english = load(include_str!("../locales/en.yaml"));
-        let german = load(include_str!("../locales/de.yaml"));
+        let english = load(include_str!("../../locales/en.yaml"));
+        let german = load(include_str!("../../locales/de.yaml"));
 
         assert_eq!(
             english.keys().collect::<Vec<_>>(),

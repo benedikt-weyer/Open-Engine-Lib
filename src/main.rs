@@ -1,38 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod backend;
-mod browser;
-mod clock;
-mod colors;
-mod columns;
-mod config;
-mod covers;
-mod cue_bar;
-mod cue_editor;
-mod cues;
-mod deck;
-mod drives;
+mod data;
 mod handlers;
-mod i18n;
-mod library_sync_view;
-mod local_folders;
-mod loop_bar;
-mod loop_editor;
-mod loops;
-mod menubar;
-mod model;
-mod navbar;
-mod player_bar;
-mod playlist_dialog;
-mod progress_view;
-mod reachable;
-mod recent;
-mod session;
-mod settings;
-mod sidebar;
-mod smart_editor;
-mod sync_view;
-mod waveform;
+mod views;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,6 +15,10 @@ use columns::{Column, ColumnStore};
 use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, WaveformColors};
 use covers::Covers;
 use cues::{Cue, TrackCues};
+use data::{
+    backend, clock, colors, columns, config, covers, cues, drives, i18n, local_folders, loops,
+    model, reachable, recent, session, waveform,
+};
 use drives::Drive;
 use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text, tooltip};
@@ -59,6 +33,10 @@ use reachable::Reachability;
 use recent::Recents;
 use session::{Session, SessionStore};
 use sync_view::Stage as SyncStage;
+use views::{
+    browser, cue_bar, cue_editor, deck, library_sync_view, loop_bar, loop_editor, menubar, navbar,
+    player_bar, playlist_dialog, progress_view, settings, sidebar, smart_editor, sync_view,
+};
 use waveform::{Waveform, Waveforms};
 
 /// How often the playback position is fetched from the backend while playing.
@@ -1550,9 +1528,23 @@ mod tests {
     }
 
     /// An app with a library open (see `library_at`).
+    /// A folder of its own for the files of the `State` of the running test (the tests run
+    /// side by side on threads of their own, and what one saves must not show up in
+    /// another).
+    fn temp_dir() -> PathBuf {
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        thread_local! {
+            static DIR: PathBuf = std::env::temp_dir().join(format!(
+                "open-engine-lib-main-test-{}-{}",
+                std::process::id(),
+                COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+        }
+        DIR.with(PathBuf::clone)
+    }
+
     fn state() -> State {
-        let temp =
-            std::env::temp_dir().join(format!("open-engine-lib-main-test-{}", std::process::id()));
+        let temp = temp_dir();
         let library = library_at("/media/DRIVE/Engine Library");
         State {
             page: Page::Library,
@@ -2014,8 +2006,7 @@ mod tests {
         // Letting go ends the drag and saves the width.
         let _ = handle(&mut state, Message::ResizeEnded);
         assert!(state.resize.is_none());
-        let temp =
-            std::env::temp_dir().join(format!("open-engine-lib-main-test-{}", std::process::id()));
+        let temp = temp_dir();
         let saved = ColumnStore::load(temp.join("track-columns.toml"));
         assert_eq!(saved.widths.get(Column::Artist), columns::MIN_WIDTH);
         let _ = std::fs::remove_dir_all(temp);
