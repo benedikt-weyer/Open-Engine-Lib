@@ -208,6 +208,7 @@ pub enum Message {
     LibrarySyncDiffLoaded {
         target: PathBuf,
         options: library_sync_view::Options,
+        initial: bool,
         result: Result<Arc<open_engine_api::v1::GetLibrarySyncDiffResponse>, String>,
     },
     /// A tick of what to sync (and so what the comparison is about) was set or cleared.
@@ -461,13 +462,18 @@ impl State {
         &mut self,
         target: PathBuf,
         options: library_sync_view::Options,
+        initial: bool,
     ) -> Task<Message> {
         let Some(backend) = self.backend() else {
             return Task::none();
         };
         if !matches!(
             self.library_sync,
-            Some(LibrarySyncStage::Pick | LibrarySyncStage::Ready { .. })
+            Some(
+                LibrarySyncStage::Pick
+                    | LibrarySyncStage::Ready { .. }
+                    | LibrarySyncStage::Loading { .. }
+            )
         ) {
             return Task::none();
         }
@@ -481,6 +487,7 @@ impl State {
             move |result| Message::LibrarySyncDiffLoaded {
                 target: answered.clone(),
                 options,
+                initial,
                 result,
             },
         )
@@ -1127,7 +1134,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::LibrarySyncAdded(None) => {}
         Message::LibrarySyncTarget(target) => {
-            return state.compare_libraries(target, library_sync_view::Options::default());
+            return state.compare_libraries(target, library_sync_view::Options::default(), true);
         }
         Message::LibrarySyncOption(setting, on) => {
             if let Some(LibrarySyncStage::Ready {
@@ -1135,27 +1142,43 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             }) = &state.library_sync
             {
                 let (target, options) = (target.clone(), options.with(setting, on));
-                return state.compare_libraries(target, options);
+                return state.compare_libraries(target, options, false);
             }
         }
         Message::LibrarySyncDiffLoaded {
             target: loaded,
             options: loaded_options,
+            initial,
             result,
         } => {
             // (An answer to a comparison that was given up on is not wanted.)
-            if let Some(LibrarySyncStage::Loading { target, options }) = &state.library_sync
+            if let Some(LibrarySyncStage::Loading {
+                target, options, ..
+            }) = &state.library_sync
                 && *target == loaded
                 && *options == loaded_options
             {
+                // Somewhere without a library: it gets one, with the tracks (what else
+                // would be in it?), unless that is taken back.
+                if let Ok(diff) = &result
+                    && initial
+                    && diff.target_is_new
+                    && !loaded_options.copy_tracks
+                {
+                    let options = loaded_options.with(library_sync_view::Setting::CopyTracks, true);
+                    return state.compare_libraries(loaded, options, false);
+                }
                 state.library_sync = Some(match result {
                     Ok(diff) => {
-                        // A library that could be compared is worth remembering.
-                        state.recents_error = state
-                            .recents
-                            .add(PathBuf::from(&diff.target_path))
-                            .err()
-                            .map(|error| error.to_string());
+                        // A library that could be compared is worth remembering (one that
+                        // is not there yet is once it is made).
+                        if !diff.target_is_new {
+                            state.recents_error = state
+                                .recents
+                                .add(PathBuf::from(&diff.target_path))
+                                .err()
+                                .map(|error| error.to_string());
+                        }
                         LibrarySyncStage::Ready {
                             target: loaded,
                             options: loaded_options,
@@ -1206,6 +1229,13 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                         // The other way round the working copy was changed, and the
                         // backend reads it again.
                         reload = options.reverse && !done.backup_path.is_empty();
+                        if done.created {
+                            state.recents_error = state
+                                .recents
+                                .add(PathBuf::from(&done.target_path))
+                                .err()
+                                .map(|error| error.to_string());
+                        }
                         LibrarySyncStage::Done(done, options.reverse)
                     }
                     Err(error) => LibrarySyncStage::Ready {
@@ -2611,6 +2641,7 @@ mod tests {
             Message::LibrarySyncDiffLoaded {
                 target: target.clone(),
                 options: library_sync_view::Options::default(),
+                initial: false,
                 result: Ok(library_diff(2)),
             },
         );
@@ -2625,6 +2656,7 @@ mod tests {
             &mut state,
             Message::LibrarySyncDiffLoaded {
                 target: target.clone(),
+                initial: false,
                 options: library_sync_view::Options {
                     remove_missing: true,
                     ..Default::default()
@@ -2641,6 +2673,7 @@ mod tests {
             Message::LibrarySyncDiffLoaded {
                 target: target.clone(),
                 options: library_sync_view::Options::default(),
+                initial: false,
                 result: Ok(library_diff(2)),
             },
         );
@@ -2684,6 +2717,7 @@ mod tests {
             &mut state,
             Message::LibrarySyncDiffLoaded {
                 target,
+                initial: false,
                 options: library_sync_view::Options::default(),
                 result: Err("not a library".into()),
             },
@@ -2868,6 +2902,72 @@ mod tests {
         let _ = handle(
             &mut state,
             Message::LibrarySyncFinished(Ok(open_engine_api::v1::SyncToLibraryResponse::default())),
+        );
+        assert!(matches!(
+            state.library_sync,
+            Some(LibrarySyncStage::Done(_, false))
+        ));
+    }
+
+    #[test]
+    fn a_library_that_is_not_there_yet_is_remembered_once_it_is_made() {
+        let mut state = state();
+        let target = PathBuf::from("/media/NEW");
+        let new_diff = Arc::new(open_engine_api::v1::GetLibrarySyncDiffResponse {
+            target_path: "/media/NEW/Engine Library".into(),
+            target_is_new: true,
+            tracks_added: 3,
+            ..Default::default()
+        });
+        state.library_sync = Some(LibrarySyncStage::Loading {
+            target: target.clone(),
+            options: library_sync_view::Options {
+                copy_tracks: true,
+                ..Default::default()
+            },
+        });
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncDiffLoaded {
+                target: target.clone(),
+                options: library_sync_view::Options {
+                    copy_tracks: true,
+                    ..Default::default()
+                },
+                initial: false,
+                result: Ok(Arc::clone(&new_diff)),
+            },
+        );
+        assert!(matches!(
+            &state.library_sync,
+            Some(LibrarySyncStage::Ready { diff, .. }) if diff.target_is_new
+        ));
+        assert!(
+            library_sync_view::has_changes(&new_diff),
+            "making it is a change"
+        );
+        assert!(
+            state.recents.paths().is_empty(),
+            "there is no library to remember yet"
+        );
+
+        // Made: now it is one.
+        state.library_sync = Some(LibrarySyncStage::Syncing {
+            target,
+            options: library_sync_view::Options::default(),
+            diff: new_diff,
+        });
+        let _ = handle(
+            &mut state,
+            Message::LibrarySyncFinished(Ok(open_engine_api::v1::SyncToLibraryResponse {
+                target_path: "/media/NEW/Engine Library".into(),
+                created: true,
+                ..Default::default()
+            })),
+        );
+        assert_eq!(
+            state.recents.paths(),
+            [PathBuf::from("/media/NEW/Engine Library")]
         );
         assert!(matches!(
             state.library_sync,

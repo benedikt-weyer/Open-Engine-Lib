@@ -13,6 +13,7 @@ mod cache;
 mod engine;
 mod library;
 mod mirror;
+mod new_library;
 mod origins;
 mod player;
 mod progress;

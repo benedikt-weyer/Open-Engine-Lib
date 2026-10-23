@@ -167,11 +167,11 @@ origin_migrate_tip: "Speichert den aktuellen Ort der Datei jedes Titels als Herk
 origin_migrated: "Herkunft gespeichert: {saved} neu, {kept} schon bekannt, {skipped} ohne Datei hier."
 origin_none: Nicht gespeichert
 sync_playlist_missing: "{count} nicht in der anderen Bibliothek"
-libsync_button: Mit anderer Bibliothek abgleichen…
-libsync_title: Playlists mit anderer Bibliothek abgleichen
-libsync_pick: "Wähle die Bibliothek, die die Playlists der geöffneten bekommt:"
-libsync_add: Bibliothek hinzufügen…
-libsync_add_title: Engine-Bibliothek zum Abgleichen wählen
+libsync_button: Abgleichen mit…
+libsync_title: Abgleichen mit…
+libsync_pick: "Wähle, womit abgeglichen wird: eine Bibliothek oder ein Laufwerk oder Ordner ohne eine (dort wird eine neue Bibliothek angelegt)."
+libsync_add: Ordner wählen…
+libsync_add_title: Eine Bibliothek wählen, oder einen Ordner, in dem eine angelegt wird
 libsync_target: "Abgleich mit: {path}"
 libsync_comparing: Playlists werden verglichen…
 libsync_failed: "Die Bibliotheken konnten nicht verglichen werden: {error}"
@@ -220,3 +220,6 @@ libsync_copy_reverse: "Die Titel in einen Ordner Engine-Tracks (Interpret/Album)
 libsync_run_reverse: In die geöffnete Bibliothek kopieren
 libsync_done_reverse: "Fertig: {count} Playlists, {tracks} Titel und {origins} Herkünfte in der Arbeitskopie geändert, {files} Dateien kopiert. Mit „Mit der Quelle abgleichen“ schreibst du sie in die Bibliothek. Die Arbeitskopie davor liegt in {backup}"
 progress_pulling: Die Datenbanken der Quelle werden geholt…
+libsync_drive_new: "Keine Engine-Bibliothek: hier wird eine neue angelegt"
+libsync_new_notice: "Dort gibt es noch keine Bibliothek. Beim Abgleich wird unter {path} eine neue, leere angelegt; sie bekommt die Playlists und die Titel, die du unten wählst."
+libsync_done_new: "Fertig: Die neue Bibliothek wurde unter {path} angelegt: {count} Playlists, {tracks} Titel, {files} Dateien kopiert."

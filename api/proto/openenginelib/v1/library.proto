@@ -237,6 +237,12 @@ message GetLibrarySyncDiffRequest {
   // open library is replaced by one read from the new working copy, as with
   // `PullFromSource`.
   bool reverse = 6;
+  // If there is no library at `target_path`, make one there (a new `Engine Library` folder
+  // in it, unless it is called that): the diff then says so (`target_is_new`) and
+  // changes nothing; `SyncToLibrary` makes it, with the schema of the open library's
+  // databases and no rows, and then syncs as usual. Not for `reverse`, which needs a
+  // library to copy from (NOT_FOUND). Without this, no library there is NOT_FOUND.
+  bool create_if_missing = 7;
 }
 // Lists are cut at 200 entries, the counts are complete.
 message GetLibrarySyncDiffResponse {
@@ -264,6 +270,8 @@ message GetLibrarySyncDiffResponse {
   uint32 files_missing = 13;
   // Tracks whose new path another track of the other library already has: left alone.
   uint32 location_conflicts = 14;
+  // There is no library at the path: a new one would be created at `target_path`.
+  bool target_is_new = 15;
 }
 message SyncToLibraryRequest {
   string target_path = 1;
@@ -273,6 +281,7 @@ message SyncToLibraryRequest {
   bool copy_tracks = 5;
   // As for `GetLibrarySyncDiffRequest`.
   bool reverse = 6;
+  bool create_if_missing = 7;
 }
 message SyncToLibraryResponse {
   string target_path = 1;
@@ -284,6 +293,8 @@ message SyncToLibraryResponse {
   uint32 tracks_added = 6;
   uint32 tracks_changed = 7;
   uint32 files_copied = 8;
+  // The library did not exist and was made.
+  bool created = 9;
 }
 
 message PullFromSourceRequest {}

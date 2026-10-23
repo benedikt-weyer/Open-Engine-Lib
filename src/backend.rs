@@ -558,6 +558,7 @@ pub async fn library_sync_diff(
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,
             reverse: options.reverse,
+            create_if_missing: true,
         })
         .await
         .map(|response| Arc::new(response.into_inner()))
@@ -579,6 +580,7 @@ pub async fn sync_to_library(
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,
             reverse: options.reverse,
+            create_if_missing: true,
         })
         .await
         .map(|response| response.into_inner())

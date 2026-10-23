@@ -167,11 +167,11 @@ origin_migrate_tip: "Saves where each track's file is now as its origin, for tra
 origin_migrated: "Origins saved: {saved} new, {kept} already known, {skipped} without a file here."
 origin_none: Not saved
 sync_playlist_missing: "{count} not in the other library"
-libsync_button: Sync to another library…
-libsync_title: Sync playlists to another library
-libsync_pick: "Choose the library that gets the playlists of the open one:"
-libsync_add: Add library…
-libsync_add_title: Choose the Engine library to sync to
+libsync_button: Sync to…
+libsync_title: Sync to…
+libsync_pick: "Choose where to sync to: a library, or a drive or folder without one (a new library is made there)."
+libsync_add: Choose a folder…
+libsync_add_title: Choose a library, or a folder to make one in
 libsync_target: "Syncing to: {path}"
 libsync_comparing: Comparing the playlists…
 libsync_failed: "Could not compare the libraries: {error}"
@@ -220,3 +220,6 @@ libsync_copy_reverse: "Copy the tracks into an Engine-Tracks folder (Artist/Albu
 libsync_run_reverse: Copy into the open library
 libsync_done_reverse: "Done: {count} playlists, {tracks} tracks and {origins} origins changed in the working copy, {files} files copied. Use “Sync with the source” to write them to the library. The working copy before is kept in {backup}"
 progress_pulling: Getting the databases of the source…
+libsync_drive_new: "No Engine library: a new one is made here"
+libsync_new_notice: "There is no library there yet. A new, empty one is made at {path} when you sync; it gets the playlists and the tracks you choose below."
+libsync_done_new: "Done: the new library was made at {path}: {count} playlists, {tracks} tracks, {files} files copied."

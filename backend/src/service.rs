@@ -387,6 +387,7 @@ impl LibraryService for Service {
                     request.sync_locations,
                     request.copy_tracks,
                     request.reverse,
+                    request.create_if_missing,
                 ),
             )
         })
@@ -418,6 +419,7 @@ impl LibraryService for Service {
                     request.sync_locations,
                     request.copy_tracks,
                     request.reverse,
+                    request.create_if_missing,
                 ),
                 &progress,
             )
@@ -704,10 +706,12 @@ fn mirror_options(
     locations: bool,
     copy_tracks: bool,
     reverse: bool,
+    create: bool,
 ) -> mirror::Options {
     mirror::Options {
         remove_missing,
         reverse,
+        create,
         tracks: crate::track_sync::Options {
             stars,
             locations,

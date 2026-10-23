@@ -20,6 +20,7 @@ use open_engine_api::v1 as api;
 use crate::cache;
 use crate::cache::DATABASE_DIR;
 use crate::library::{self, EditError, Library, OpenError, Playlist};
+use crate::new_library;
 use crate::origins;
 use crate::progress::{Phase, Progress};
 use crate::sync::{BACKUP_DIR, is_busy};
@@ -101,6 +102,8 @@ pub struct Options {
     /// The other way round: the other library is the master and the open library's
     /// working copy is changed.
     pub reverse: bool,
+    /// If there is no library at the path, make one there.
+    pub create: bool,
 }
 
 /// What the work on the copy found.
@@ -146,6 +149,11 @@ struct Place {
     /// Whether another program writing there is a reason to refuse (it is for a library,
     /// not for a working copy).
     check_busy: bool,
+    /// The databases are not replaced but made: there is no library there yet.
+    create: bool,
+    /// The library folder to take away again if making the library fails (when it was
+    /// made for this).
+    undo: Option<PathBuf>,
 }
 
 /// Everything a sync starts from.
@@ -157,6 +165,8 @@ struct Prepared {
     /// The library that is changed, as a copy to work on.
     copy: Copy,
     place: Place,
+    /// There is no library at the other path and a new one is made.
+    new: bool,
     /// The library whose state is wanted, if it is not the open one: the other library, as
     /// a copy, for a sync the other way round.
     master: Option<Library>,
@@ -193,10 +203,19 @@ fn prepare(
     open: &Library,
     other: &Path,
     scratch_root: &Path,
-    reverse: bool,
+    options: Options,
     progress: &Progress,
 ) -> Result<Prepared, MirrorError> {
-    let dir = library::locate(other).ok_or_else(|| MirrorError::NotALibrary(other.into()))?;
+    let reverse = options.reverse;
+    let (dir, new) = match library::locate(other) {
+        Some(dir) => (dir, false),
+        // Somewhere without a library: a library is made there, if that is wanted. (The
+        // other way round there would be nothing to copy from.)
+        None if options.create && !reverse && other.is_dir() => {
+            (new_library::library_dir_for(other), true)
+        }
+        None => return Err(MirrorError::NotALibrary(other.into())),
+    };
     let same = match (fs::canonicalize(&dir), fs::canonicalize(&open.dir)) {
         (Ok(a), Ok(b)) => a == b,
         _ => dir == open.dir,
@@ -205,7 +224,7 @@ fn prepare(
         return Err(MirrorError::SameLibrary);
     }
     let other_databases = dir.join(DATABASE_DIR);
-    if is_busy(&other_databases) {
+    if !new && is_busy(&other_databases) {
         return Err(MirrorError::Busy);
     }
 
@@ -221,13 +240,17 @@ fn prepare(
             databases: working.clone(),
             backup: open.cache.join(BACK_SYNC_BACKUP),
             check_busy: false,
+            create: false,
+            undo: None,
         };
         (working, place)
     } else {
         let place = Place {
             databases: other_databases.clone(),
             backup: other_databases.join(BACKUP_DIR),
-            check_busy: true,
+            check_busy: !new,
+            create: new,
+            undo: (new && !dir.exists()).then(|| dir.clone()),
         };
         (other_databases.clone(), place)
     };
@@ -241,7 +264,13 @@ fn prepare(
             },
         0,
     );
-    copy_databases(&changed, &target_scratch, progress)?;
+    if new {
+        // Nothing to copy: the schema of the open library's databases, without rows.
+        new_library::create_empty_databases(&open.cache.join(DATABASE_DIR), &target_scratch)
+            .map_err(|error| MirrorError::Io(io::Error::other(error)))?;
+    } else {
+        copy_databases(&changed, &target_scratch, progress)?;
+    }
     let master = if reverse {
         copy_databases(&other_databases, &master_scratch, progress)?;
         Some(Library::open_copy(
@@ -262,6 +291,7 @@ fn prepare(
             scratch: target_scratch,
         },
         place,
+        new,
         master,
     })
 }
@@ -325,7 +355,7 @@ pub fn diff(
 ) -> Result<api::GetLibrarySyncDiffResponse, MirrorError> {
     // (A diff is quick and nobody asks how far it is.)
     let progress = Progress::default();
-    let prepared = prepare(open, other, scratch_root, options.reverse, &progress)?;
+    let prepared = prepare(open, other, scratch_root, options, &progress)?;
     let master = prepared.master(open);
     let Work { outcome, tracks } = work(master, &prepared.copy, options, false, &progress)?;
     let dir = prepared.other.display().to_string();
@@ -367,6 +397,7 @@ pub fn diff(
         bytes_to_copy: tracks.bytes_to_copy,
         files_missing: tracks.files_missing,
         location_conflicts: tracks.location_conflicts,
+        target_is_new: prepared.new,
     };
     let base = prepared.base.clone();
     drop(prepared);
@@ -386,7 +417,7 @@ pub fn push(
     options: Options,
     progress: &Progress,
 ) -> Result<api::SyncToLibraryResponse, MirrorError> {
-    let prepared = prepare(open, other, scratch_root, options.reverse, progress)?;
+    let prepared = prepare(open, other, scratch_root, options, progress)?;
     let master = prepared.master(open);
     let Work { outcome, tracks } = work(master, &prepared.copy, options, true, progress)?;
     let Prepared {
@@ -394,6 +425,7 @@ pub fn push(
         other: other_dir,
         copy,
         place,
+        new,
         master,
     } = prepared;
     drop(master);
@@ -407,6 +439,7 @@ pub fn push(
         tracks_changed: tracks.changed.len() as u32,
         files_copied: tracks.copied.len() as u32,
         backup_path: String::new(),
+        created: new,
     };
     // The databases that differ now: the playlists and tracks are in `m.db`, the origins
     // in their own.
@@ -417,12 +450,27 @@ pub fn push(
     if outcome.origins_changed > 0 {
         changed.push(origins::FILE);
     }
+    // A library that is made gets all its databases, changed or not.
+    let made: Vec<String> = if new {
+        fs::read_dir(copy.scratch.join(DATABASE_DIR))?
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".db"))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if new {
+        changed = made.iter().map(String::as_str).collect();
+    }
     if !changed.is_empty() {
         let result = install(&place, &copy.scratch, &changed, progress);
         let _ = fs::remove_dir_all(&base);
         match result {
             Ok(backup) => {
-                response.backup_path = backup.display().to_string();
+                if !place.create {
+                    response.backup_path = backup.display().to_string();
+                }
                 if options.reverse {
                     // The working copy has changes the source does not have.
                     cache::mark_edited(&open.cache)?;
@@ -430,6 +478,9 @@ pub fn push(
             }
             Err(error) => {
                 remove_files(&tracks.copied);
+                if let Some(made) = &place.undo {
+                    let _ = fs::remove_dir_all(made);
+                }
                 return Err(error);
             }
         }
@@ -452,7 +503,11 @@ fn install(
     if place.check_busy && is_busy(databases) {
         return Err(MirrorError::Busy);
     }
-    // Keep what is about to be replaced. (One backup, the latest.)
+    if place.create {
+        fs::create_dir_all(databases)?;
+    }
+    // Keep what is about to be replaced. (One backup, the latest. A new library replaces
+    // nothing.)
     let backup = place.backup.clone();
     let size = |path: PathBuf| fs::metadata(path).map_or(0, |metadata| metadata.len());
     progress.phase(
@@ -463,11 +518,13 @@ fn install(
             .sum(),
         0,
     );
-    let _ = fs::remove_dir_all(&backup);
-    fs::create_dir_all(&backup)?;
-    for name in changed {
-        if databases.join(name).is_file() {
-            progress.copy(&databases.join(name), &backup.join(name), false)?;
+    if !place.create {
+        let _ = fs::remove_dir_all(&backup);
+        fs::create_dir_all(&backup)?;
+        for name in changed {
+            if databases.join(name).is_file() {
+                progress.copy(&databases.join(name), &backup.join(name), false)?;
+            }
         }
     }
 
@@ -1804,6 +1861,190 @@ mod tests {
             pc_before
         );
         assert!(!stick.join(DATABASE_DIR).join(BACKUP_DIR).exists());
+    }
+
+    #[test]
+    fn a_library_is_made_where_there_is_none() {
+        let temp = TempDir::new("create");
+        let (pc, _) = with_files(&temp.0);
+        let source = open_source(&pc, &temp.0.join("source"));
+        // A drive without a library.
+        let drive = temp.0.join("DRIVE");
+        fs::create_dir_all(&drive).unwrap();
+        let options = Options {
+            create: true,
+            tracks: track_sync::Options {
+                stars: true,
+                copy_tracks: true,
+                ..Default::default()
+            },
+            ..Options::default()
+        };
+        let scratch = temp.0.join("scratch");
+
+        // Without being asked to, a missing library is an error. Nothing is made.
+        assert!(matches!(
+            diff(
+                &source,
+                &drive,
+                &scratch,
+                Options {
+                    create: false,
+                    ..options
+                }
+            ),
+            Err(MirrorError::NotALibrary(_))
+        ));
+        assert!(matches!(
+            diff(&source, &temp.0.join("nowhere"), &scratch, options),
+            Err(MirrorError::NotALibrary(_)),
+        ));
+        assert!(
+            matches!(
+                diff(
+                    &source,
+                    &drive,
+                    &scratch,
+                    Options {
+                        reverse: true,
+                        ..options
+                    }
+                ),
+                Err(MirrorError::NotALibrary(_))
+            ),
+            "there is nothing to copy from"
+        );
+
+        // The diff says what would be made, and makes nothing.
+        let found = diff(&source, &drive, &scratch, options).unwrap();
+        assert!(found.target_is_new);
+        assert_eq!(
+            found.target_path,
+            drive.join("Engine Library").display().to_string()
+        );
+        assert_eq!(found.tracks_added, 3, "every track is new there");
+        assert_eq!((found.files_to_copy, found.bytes_to_copy), (3, 12));
+        let mix = found
+            .changed_playlists
+            .iter()
+            .find(|p| p.name == "Mix")
+            .unwrap();
+        assert_eq!(
+            (mix.kind(), mix.tracks_added),
+            (api::PlaylistChangeKind::Added, 2)
+        );
+        assert_eq!(
+            fs::read_dir(&drive).unwrap().count(),
+            0,
+            "the drive is as it was"
+        );
+
+        // The push makes the library: its folder, the databases and the tracks.
+        let done = push(&source, &drive, &scratch, options, &Progress::default()).unwrap();
+        assert!(done.created);
+        assert_eq!(
+            (
+                done.tracks_added,
+                done.files_copied,
+                done.backup_path.as_str()
+            ),
+            (3, 3, "")
+        );
+        let library = drive.join("Engine Library");
+        assert!(library.join(DATABASE_DIR).join(MAIN_DATABASE).is_file());
+        assert!(
+            !library.join(DATABASE_DIR).join(BACKUP_DIR).exists(),
+            "nothing was replaced"
+        );
+        let made = open(&library, &temp.0.join("check"));
+        assert_eq!(
+            ratings_and_paths(&made),
+            [
+                (
+                    "a.flac".into(),
+                    Some(80),
+                    "../Engine-Tracks/AC_DC/Back_ In Black_/a.flac".into()
+                ),
+                (
+                    "b.flac".into(),
+                    Some(40),
+                    "../Engine-Tracks/Unknown Artist/Unknown Album/b.flac".into()
+                ),
+                (
+                    "c.flac".into(),
+                    Some(100),
+                    "../Engine-Tracks/Zed/Z/c.flac".into()
+                ),
+            ]
+        );
+        let mix = made
+            .playlists()
+            .iter()
+            .find(|p| p.title == "Mix")
+            .map(|p| p.tracks.clone());
+        assert_eq!(mix, Some(vec![0, 2]));
+        assert_eq!(
+            fs::read(drive.join("Engine-Tracks/Zed/Z/c.flac")).unwrap(),
+            b"cccccc"
+        );
+        drop(made);
+
+        // From now on it is a library like any other: nothing is new, nothing is left to do.
+        let again = push(&source, &drive, &scratch, options, &Progress::default()).unwrap();
+        assert!(!again.created);
+        assert_eq!(
+            (
+                again.tracks_added,
+                again.playlists_changed,
+                again.files_copied
+            ),
+            (0, 0, 0)
+        );
+        assert!(
+            !diff(&source, &drive, &scratch, options)
+                .unwrap()
+                .target_is_new
+        );
+
+        // A folder that is called Engine Library is the library's folder itself.
+        let named = temp.0.join("OTHER").join("Engine Library");
+        fs::create_dir_all(&named).unwrap();
+        let found = diff(&source, &named, &scratch, options).unwrap();
+        assert!(found.target_is_new);
+        assert_eq!(found.target_path, named.display().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_library_that_cannot_be_made_leaves_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new("create-fails");
+        let (pc, _) = with_files(&temp.0);
+        let source = open_source(&pc, &temp.0.join("source"));
+        let drive = temp.0.join("DRIVE");
+        fs::create_dir_all(&drive).unwrap();
+        let options = Options {
+            create: true,
+            tracks: track_sync::Options {
+                copy_tracks: true,
+                ..Default::default()
+            },
+            ..Options::default()
+        };
+
+        fs::set_permissions(&drive, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = push(
+            &source,
+            &drive,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        );
+        fs::set_permissions(&drive, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_dir(&drive).unwrap().count(), 0);
     }
 
     #[test]

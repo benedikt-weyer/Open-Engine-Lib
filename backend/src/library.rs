@@ -287,18 +287,7 @@ impl Library {
             return Err(EditError::NoSmartlists);
         }
 
-        let uuid: String =
-            connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
-        // A version 4 UUID in the usual 8-4-4-4-12 form.
-        let variant = ['8', '9', 'a', 'b'][usize::from(uuid.as_bytes()[16] % 4)];
-        let uuid = format!(
-            "{}-{}-4{}-{variant}{}-{}",
-            &uuid[0..8],
-            &uuid[8..12],
-            &uuid[13..16],
-            &uuid[17..20],
-            &uuid[20..32]
-        );
+        let uuid = new_uuid(&connection)?;
 
         // The new one goes after the last smart playlist, and in front of the same
         // playlist it was in front of.
@@ -1115,6 +1104,21 @@ struct SmartRow {
     /// The playlist after this one, if one follows it instead, as a path like `parent`.
     next_path: String,
     rules: String,
+}
+
+/// A new random (version 4) UUID in the usual 8-4-4-4-12 form.
+pub fn new_uuid(connection: &Connection) -> rusqlite::Result<String> {
+    let hex: String =
+        connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+    let variant = ['8', '9', 'a', 'b'][usize::from(hex.as_bytes()[16] % 4)];
+    Ok(format!(
+        "{}-{}-4{}-{variant}{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[17..20],
+        &hex[20..32]
+    ))
 }
 
 /// The titles from the top down to the playlist at `index`, each followed by `;`: how

@@ -77,7 +77,8 @@ impl Options {
 
 /// Whether there is anything to write.
 pub fn has_changes(diff: &GetLibrarySyncDiffResponse) -> bool {
-    diff.playlists_changed > 0
+    diff.target_is_new
+        || diff.playlists_changed > 0
         || diff.origins_changed > 0
         || diff.tracks_added > 0
         || diff.tracks_changed > 0
@@ -191,7 +192,17 @@ pub fn modal<'a>(
         .spacing(12)
         .into(),
         Stage::Done(done, reverse) => {
-            let message = if done.backup_path.is_empty() && done.files_copied == 0 {
+            let message = if done.created {
+                fill(
+                    &strings.libsync_done_new,
+                    &[
+                        ("path", &done.target_path),
+                        ("count", &done.playlists_changed),
+                        ("tracks", &done.tracks_added),
+                        ("files", &done.files_copied),
+                    ],
+                )
+            } else if done.backup_path.is_empty() && done.files_copied == 0 {
                 strings.libsync_none_written.clone()
             } else {
                 fill(
@@ -275,22 +286,27 @@ fn choices<'a>(sources: Sources<'a>, language: Language) -> Element<'a, Message>
         recent = recent.push(pick(path, display_name(path), path.display().to_string()));
     }
 
+    // Every drive: one with a library is synced to it, one without gets a new one.
     let mut drives = column![text(&strings.drives).size(16)].spacing(4);
-    let with_library: Vec<(&Drive, &PathBuf)> = sources
+    let others: Vec<&Drive> = sources
         .drives
         .iter()
-        .filter_map(|drive| Some((drive, drive.library.as_ref()?)))
-        .filter(|(_, library)| library.as_path() != current)
+        .filter(|drive| drive.library.as_deref() != Some(current))
         .collect();
-    if with_library.is_empty() {
+    if others.is_empty() {
         drives = drives.push(text(&strings.no_drives).style(text::secondary));
     }
-    for (drive, library) in with_library {
-        drives = drives.push(pick(
-            library,
-            drive.name.clone(),
-            drive.mount.display().to_string(),
-        ));
+    for drive in others {
+        // A drive with a library is chosen by the library's folder, as it is elsewhere; one
+        // without by itself.
+        let (target, detail) = match &drive.library {
+            Some(library) => (library, drive.mount.display().to_string()),
+            None => (
+                &drive.mount,
+                format!("{} · {}", drive.mount.display(), strings.libsync_drive_new),
+            ),
+        };
+        drives = drives.push(pick(target, drive.name.clone(), detail));
     }
 
     container(scrollable(
@@ -364,6 +380,15 @@ fn ready<'a>(
     ]
     .spacing(6);
 
+    if diff.target_is_new {
+        content = content.push(
+            text(fill(
+                &strings.libsync_new_notice,
+                &[("path", &diff.target_path)],
+            ))
+            .style(text::success),
+        );
+    }
     if !has_changes(diff) {
         content = content.push(text(&strings.libsync_nothing));
     } else {
