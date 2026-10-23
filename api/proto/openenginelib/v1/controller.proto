@@ -3,7 +3,10 @@
 // does what, learns new bindings and carries the actions out. The UI only shows the state
 // and sends commands. Nothing is built in because controllers differ (and some have no
 // published list of their messages): the user picks an action, presses a control, and the
-// pair is remembered (in `controller.toml` in the user's state dir).
+// pair is remembered (in `controller.toml` in the user's state dir). The bindings belong to
+// a profile: the user can keep several (one per controller, say) and switch between them,
+// and the backend has a few built-in profiles for controllers whose messages are known (they
+// can't be changed, only copied).
 syntax = "proto3";
 
 package openenginelib.v1;
@@ -20,7 +23,23 @@ service ControllerService {
   rpc Learn(LearnRequest) returns (ControllerState);
   rpc CancelLearn(CancelLearnRequest) returns (ControllerState);
   // Takes the binding of `action` away.
+  // Errors: FAILED_PRECONDITION if the profile in use is a built-in one.
   rpc ClearBinding(ClearBindingRequest) returns (ControllerState);
+  // Makes the profile called `name` the one in use (what its controls do, and where
+  // learned bindings go). Stops learning.
+  // Errors: NOT_FOUND for a name that no profile has.
+  rpc SelectProfile(SelectProfileRequest) returns (ControllerState);
+  // Adds a profile and makes it the one in use. It starts empty, or as a copy of another
+  // profile (also a built-in one: that is how a built-in profile is made editable).
+  // Errors: INVALID_ARGUMENT for a name that is empty or too long, ALREADY_EXISTS for a
+  // name another profile has, NOT_FOUND for a profile to copy that doesn't exist.
+  rpc CreateProfile(CreateProfileRequest) returns (ControllerState);
+  // Errors: as for CreateProfile, and FAILED_PRECONDITION for a built-in profile.
+  rpc RenameProfile(RenameProfileRequest) returns (ControllerState);
+  // If it is the one in use, the user's profile next to it takes its place, or the first
+  // built-in profile if there is none.
+  // Errors: NOT_FOUND, and FAILED_PRECONDITION for a built-in profile.
+  rpc DeleteProfile(DeleteProfileRequest) returns (ControllerState);
 }
 
 message WatchControllerRequest {}
@@ -37,6 +56,33 @@ message CancelLearnRequest {}
 
 message ClearBindingRequest {
   ControllerAction action = 1;
+}
+
+message SelectProfileRequest {
+  string name = 1;
+}
+
+message CreateProfileRequest {
+  string name = 1;
+  // The profile to copy the bindings of.
+  optional string copy_of = 2;
+}
+
+message RenameProfileRequest {
+  string name = 1;
+  string new_name = 2;
+}
+
+message DeleteProfileRequest {
+  string name = 1;
+}
+
+// A set of bindings with a name. Names are unique and are what the requests go by.
+message ControllerProfile {
+  string name = 1;
+  // Made for a known controller and kept by the backend itself: it can be selected and
+  // copied, not changed.
+  bool built_in = 2;
 }
 
 enum ControllerAction {
@@ -96,6 +142,7 @@ message ControllerState {
   repeated string devices = 2;
   // The action that gets the next control pressed.
   optional ControllerAction learning = 3;
+  // The bindings of the profile in use.
   repeated ControllerBinding bindings = 4;
   // The latest message heard, so it can be seen that the controller is heard.
   optional ControllerInput last_input = 5;
@@ -106,4 +153,8 @@ message ControllerState {
   // and says of which track, so a client that shows cues can fetch them again.
   uint64 cues_revision = 7;
   uint32 cues_track_id = 8;
+  // The built-in profiles first, then the user's in the order they were made.
+  repeated ControllerProfile profiles = 9;
+  // The name of the profile in use.
+  string active_profile = 10;
 }

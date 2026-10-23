@@ -7,6 +7,11 @@
 //! builds up, so they live in their own file in the user state dir
 //! (`<state dir>/open-engine-lib/controller.toml`), which can also be edited by hand.
 //!
+//! The bindings are kept in profiles with a name, so that several controllers (or several
+//! ways of using one) can each have theirs and the user can switch between them. A few
+//! profiles for controllers whose messages are known come with the program (`presets`); they
+//! can't be changed, but a copy of one can.
+//!
 //! The hardware is the audio process's (`audio/midi.rs`); the actions are carried out by
 //! `service/controller.rs`. This is the part in between that knows no hardware and no player.
 
@@ -20,10 +25,16 @@ use open_engine_api::v1 as api;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+mod presets;
+
 const APP_DIR: &str = "open-engine-lib";
 const FILE: &str = "controller.toml";
 /// How many cue pads a track has.
 pub const PADS: usize = crate::cues::SLOTS;
+/// The name of the profile a first start (or a file from before there were profiles) gets.
+const DEFAULT_PROFILE: &str = "Default";
+/// The longest name a profile can have, in characters.
+const NAME_MAX_CHARS: usize = 60;
 
 /// What a control of the controller does to the player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -248,6 +259,71 @@ impl Mapping {
     }
 }
 
+/// Why a profile could not be made, changed or selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileError {
+    EmptyName,
+    NameTooLong,
+    /// Another profile has the name (names are compared without regard to case).
+    NameTaken,
+    /// There is no profile of that name.
+    Unknown,
+    /// Built-in profiles can't be changed, renamed or deleted.
+    BuiltIn,
+}
+
+impl fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ProfileError::EmptyName => "a profile needs a name",
+            ProfileError::NameTooLong => "the name of the profile is too long",
+            ProfileError::NameTaken => "another profile has that name",
+            ProfileError::Unknown => "no such profile",
+            ProfileError::BuiltIn => {
+                "a built-in profile can't be changed (make a copy of it to do that)"
+            }
+        })
+    }
+}
+
+/// A name without the spaces around it, if it is one a profile can have.
+fn clean_name(name: &str) -> Result<String, ProfileError> {
+    let name = name.trim();
+    if name.is_empty() {
+        Err(ProfileError::EmptyName)
+    } else if name.chars().count() > NAME_MAX_CHARS {
+        Err(ProfileError::NameTooLong)
+    } else {
+        Ok(name.to_owned())
+    }
+}
+
+fn same_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// The user's own set of bindings, with the name they know it by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Profile {
+    name: String,
+    #[serde(flatten)]
+    mapping: Mapping,
+}
+
+/// What the file holds.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Store {
+    /// The name of the profile in use.
+    active: Option<String>,
+    #[serde(rename = "profile")]
+    profiles: Vec<Profile>,
+    /// The bindings of before there were profiles. They are read, and become the profile
+    /// `DEFAULT_PROFILE`, but never written.
+    #[serde(rename = "binding", skip_serializing)]
+    legacy: Vec<Binding>,
+}
+
 impl fmt::Display for Control {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
@@ -260,6 +336,12 @@ impl fmt::Display for Control {
 
 #[derive(Default)]
 struct Inner {
+    /// The user's profiles (the built-in ones are in `presets`).
+    profiles: Vec<Profile>,
+    /// The name of the profile in use.
+    active: String,
+    /// The bindings of the profile in use. For the user's profile they are copied back into
+    /// `profiles` when saved.
     mapping: Mapping,
     enabled: bool,
     devices: Vec<String>,
@@ -268,6 +350,117 @@ struct Inner {
     error: Option<String>,
     cues_revision: u64,
     cues_track: u32,
+}
+
+impl Inner {
+    /// Reads what the file held. It never ends up with no profile in use: a first start, a
+    /// file from before there were profiles and one that names a profile that isn't there
+    /// all get one.
+    fn from_store(store: Store) -> Self {
+        let mut inner = Inner::default();
+        for profile in store.profiles {
+            let name = clean_name(&profile.name).ok();
+            if let Some(name) = name
+                && !inner.name_taken(&name, None)
+            {
+                inner.profiles.push(Profile {
+                    name,
+                    mapping: profile.mapping.sanitized(),
+                });
+            }
+        }
+        if store.active.is_none() && inner.profiles.is_empty() {
+            inner.profiles.push(Profile {
+                name: DEFAULT_PROFILE.to_owned(),
+                mapping: Mapping {
+                    bindings: store.legacy,
+                }
+                .sanitized(),
+            });
+        }
+        let first = inner
+            .profiles
+            .first()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| presets::NAMES[0].to_owned());
+        let active = store
+            .active
+            .filter(|name| inner.profile_mapping(name).is_some())
+            .unwrap_or(first);
+        inner.mapping = inner.profile_mapping(&active).unwrap_or_default();
+        inner.active = active;
+        inner
+    }
+
+    fn to_store(&self) -> Store {
+        Store {
+            active: Some(self.active.clone()),
+            profiles: self.profiles.clone(),
+            legacy: Vec::new(),
+        }
+    }
+
+    fn name_taken(&self, name: &str, except: Option<&str>) -> bool {
+        presets::NAMES
+            .iter()
+            .copied()
+            .chain(self.profiles.iter().map(|profile| profile.name.as_str()))
+            .filter(|other| Some(*other) != except)
+            .any(|other| same_name(other, name))
+    }
+
+    /// The bindings of the profile of that name, a built-in or the user's.
+    fn profile_mapping(&self, name: &str) -> Option<Mapping> {
+        presets::mapping(name).or_else(|| {
+            self.profiles
+                .iter()
+                .find(|profile| profile.name == name)
+                .map(|profile| profile.mapping.clone())
+        })
+    }
+
+    /// Checks that the profile in use may be changed.
+    fn editable(&self) -> Result<(), ProfileError> {
+        if presets::is_built_in(&self.active) {
+            Err(ProfileError::BuiltIn)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Puts the working bindings back into the user's profile in use.
+    fn store_mapping(&mut self) {
+        if let Some(profile) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.name == self.active)
+        {
+            profile.mapping = self.mapping.clone();
+        }
+    }
+
+    /// Makes the profile of that name the one in use, and stops learning.
+    fn select(&mut self, name: &str) -> Result<(), ProfileError> {
+        let mapping = self.profile_mapping(name).ok_or(ProfileError::Unknown)?;
+        self.store_mapping();
+        self.active = name.to_owned();
+        self.mapping = mapping;
+        self.learning = None;
+        Ok(())
+    }
+
+    /// Finds a user's profile to change. (A built-in profile is an error of its own kind.)
+    fn user_profile(&self, name: &str) -> Result<usize, ProfileError> {
+        match self
+            .profiles
+            .iter()
+            .position(|profile| profile.name == name)
+        {
+            Some(index) => Ok(index),
+            None if presets::is_built_in(name) => Err(ProfileError::BuiltIn),
+            None => Err(ProfileError::Unknown),
+        }
+    }
 }
 
 /// The controller: what its controls do, what is connected, what it said last, and whether the
@@ -289,20 +482,16 @@ impl Controller {
         Self::load(file)
     }
 
-    /// Reads the file. A missing or unreadable one gives no bindings: they are only a
+    /// Reads the file. A missing or unreadable one gives an empty profile: they are only a
     /// convenience, so they must never stop the backend from starting.
     pub fn load(file: PathBuf) -> Self {
-        let mapping = fs::read_to_string(&file)
+        let store = fs::read_to_string(&file)
             .ok()
-            .and_then(|text| toml::from_str::<Mapping>(&text).ok())
-            .map(Mapping::sanitized)
+            .and_then(|text| toml::from_str::<Store>(&text).ok())
             .unwrap_or_default();
         Self {
             file,
-            inner: Mutex::new(Inner {
-                mapping,
-                ..Inner::default()
-            }),
+            inner: Mutex::new(Inner::from_store(store)),
             changed: watch::channel(0).0,
         }
     }
@@ -316,6 +505,17 @@ impl Controller {
         let result = change(&mut self.lock());
         self.changed.send_modify(|count| *count += 1);
         result
+    }
+
+    /// Like `change`, for a change that can be refused: the watchers are only told if it
+    /// was made.
+    fn try_change<T>(
+        &self,
+        change: impl FnOnce(&mut Inner) -> Result<T, ProfileError>,
+    ) -> Result<T, ProfileError> {
+        let result = change(&mut self.lock())?;
+        self.changed.send_modify(|count| *count += 1);
+        Ok(result)
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -334,6 +534,17 @@ impl Controller {
             })
             .collect();
         bindings.sort_by_key(|binding| binding.action);
+        let profiles = presets::NAMES
+            .iter()
+            .map(|name| api::ControllerProfile {
+                name: (*name).to_owned(),
+                built_in: true,
+            })
+            .chain(inner.profiles.iter().map(|profile| api::ControllerProfile {
+                name: profile.name.clone(),
+                built_in: false,
+            }))
+            .collect();
         api::ControllerState {
             enabled: inner.enabled,
             devices: inner.devices.clone(),
@@ -343,6 +554,8 @@ impl Controller {
             error: inner.error.clone(),
             cues_revision: inner.cues_revision,
             cues_track_id: inner.cues_track,
+            profiles,
+            active_profile: inner.active.clone(),
         }
     }
 
@@ -382,11 +595,11 @@ impl Controller {
             if let Some(action) = inner.learning {
                 if input.pressed() {
                     inner.learning = None;
-                    inner.mapping.bind(input.control, action);
-                    inner.error = self
-                        .save(&inner.mapping)
-                        .err()
-                        .map(|error| error.to_string());
+                    // (A built-in profile is never learned into: learning can't start.)
+                    if inner.editable().is_ok() {
+                        inner.mapping.bind(input.control, action);
+                        self.persist(inner);
+                    }
                 }
                 return None;
             }
@@ -397,25 +610,99 @@ impl Controller {
         })
     }
 
-    pub fn learn(&self, action: Action) {
-        self.change(|inner| inner.learning = Some(action));
+    /// The next press is to be bound to `action`. Not in a built-in profile.
+    pub fn learn(&self, action: Action) -> Result<(), ProfileError> {
+        self.try_change(|inner| {
+            inner.editable()?;
+            inner.learning = Some(action);
+            Ok(())
+        })
     }
 
     pub fn cancel_learning(&self) {
         self.change(|inner| inner.learning = None);
     }
 
-    pub fn clear(&self, action: Action) {
-        self.change(|inner| {
+    pub fn clear(&self, action: Action) -> Result<(), ProfileError> {
+        self.try_change(|inner| {
+            inner.editable()?;
             if inner.learning == Some(action) {
                 inner.learning = None;
             }
             inner.mapping.unbind(action);
-            inner.error = self
-                .save(&inner.mapping)
-                .err()
-                .map(|error| error.to_string());
-        });
+            self.persist(inner);
+            Ok(())
+        })
+    }
+
+    /// Makes the profile of that name the one in use.
+    pub fn select_profile(&self, name: &str) -> Result<(), ProfileError> {
+        self.try_change(|inner| {
+            inner.select(name)?;
+            self.persist(inner);
+            Ok(())
+        })
+    }
+
+    /// Adds a profile, empty or with the bindings of another, and makes it the one in use.
+    pub fn create_profile(&self, name: &str, copy_of: Option<&str>) -> Result<(), ProfileError> {
+        let name = clean_name(name)?;
+        self.try_change(|inner| {
+            if inner.name_taken(&name, None) {
+                return Err(ProfileError::NameTaken);
+            }
+            let mapping = match copy_of {
+                Some(source) => inner.profile_mapping(source).ok_or(ProfileError::Unknown)?,
+                None => Mapping::default(),
+            };
+            inner.store_mapping();
+            inner.profiles.push(Profile {
+                name: name.clone(),
+                mapping,
+            });
+            inner.select(&name)?;
+            self.persist(inner);
+            Ok(())
+        })
+    }
+
+    pub fn rename_profile(&self, name: &str, new_name: &str) -> Result<(), ProfileError> {
+        let new_name = clean_name(new_name)?;
+        self.try_change(|inner| {
+            let index = inner.user_profile(name)?;
+            if inner.name_taken(&new_name, Some(name)) {
+                return Err(ProfileError::NameTaken);
+            }
+            inner.store_mapping();
+            inner.profiles[index].name = new_name.clone();
+            if inner.active == name {
+                inner.active = new_name;
+            }
+            self.persist(inner);
+            Ok(())
+        })
+    }
+
+    /// Takes a profile away. If it was in use, the user's profile next to it takes its place,
+    /// or the first built-in one if there is none.
+    pub fn delete_profile(&self, name: &str) -> Result<(), ProfileError> {
+        self.try_change(|inner| {
+            let index = inner.user_profile(name)?;
+            inner.store_mapping();
+            inner.profiles.remove(index);
+            if inner.active == name {
+                let next = inner
+                    .profiles
+                    .get(index.min(inner.profiles.len().saturating_sub(1)))
+                    .map_or(presets::NAMES[0], |profile| profile.name.as_str())
+                    .to_owned();
+                // (The profile in use is gone, so there is nothing to put back.)
+                inner.active = String::new();
+                inner.select(&next)?;
+            }
+            self.persist(inner);
+            Ok(())
+        })
     }
 
     /// A pad changed the cues of `track`: whoever shows them has to fetch them again.
@@ -426,11 +713,21 @@ impl Controller {
         });
     }
 
-    fn save(&self, mapping: &Mapping) -> io::Result<()> {
+    /// Saves the profiles, and remembers why that failed (the bindings are only a
+    /// convenience, so it is shown, not made an error of the request).
+    fn persist(&self, inner: &mut Inner) {
+        inner.store_mapping();
+        inner.error = self
+            .save(&inner.to_store())
+            .err()
+            .map(|error| error.to_string());
+    }
+
+    fn save(&self, store: &Store) -> io::Result<()> {
         if let Some(parent) = self.file.parent() {
             fs::create_dir_all(parent)?;
         }
-        let text = toml::to_string(mapping).map_err(io::Error::other)?;
+        let text = toml::to_string(store).map_err(io::Error::other)?;
         // Write beside the file and move it into place, so a crash can't leave half of it.
         let temporary = self.file.with_extension("toml.tmp");
         fs::write(&temporary, text)?;
@@ -583,7 +880,7 @@ mod tests {
         let file = TempFile::new("learn");
         let controller = Controller::load(file.0.clone());
         controller.lock().mapping.bind(note(36), Action::PlayPause);
-        controller.learn(Action::Stop);
+        controller.learn(Action::Stop).unwrap();
         // A release is not a press, and a bound control doesn't act while learning.
         assert_eq!(controller.input(release(note(40))), None);
         assert_eq!(controller.lock().learning, Some(Action::Stop));
@@ -599,12 +896,12 @@ mod tests {
     fn learning_can_be_cancelled_and_clearing_a_binding_ends_its_learning() {
         let file = TempFile::new("cancel");
         let controller = Controller::load(file.0.clone());
-        controller.learn(Action::Stop);
+        controller.learn(Action::Stop).unwrap();
         controller.cancel_learning();
         assert_eq!(controller.input(press(note(5))), None);
         assert_eq!(mapping_of(&controller), Mapping::default());
-        controller.learn(Action::Stop);
-        controller.clear(Action::Stop);
+        controller.learn(Action::Stop).unwrap();
+        controller.clear(Action::Stop).unwrap();
         assert_eq!(controller.lock().learning, None);
     }
 
@@ -612,9 +909,9 @@ mod tests {
     fn bindings_are_saved_and_read_back() {
         let file = TempFile::new("save");
         let controller = Controller::load(file.0.clone());
-        controller.learn(Action::Pad(2));
+        controller.learn(Action::Pad(2)).unwrap();
         controller.input(press(note(51)));
-        controller.learn(Action::SeekBack);
+        controller.learn(Action::SeekBack).unwrap();
         controller.input(press(cc(7)));
         let written = fs::read_to_string(&file.0).unwrap();
         assert!(
@@ -623,7 +920,7 @@ mod tests {
         );
         let reloaded = Controller::load(file.0.clone());
         assert_eq!(mapping_of(&reloaded), mapping_of(&controller));
-        controller.clear(Action::Pad(2));
+        controller.clear(Action::Pad(2)).unwrap();
         let reloaded = Controller::load(file.0.clone());
         assert_eq!(mapping_of(&reloaded).control_for(Action::Pad(2)), None);
         assert_eq!(
@@ -640,7 +937,7 @@ mod tests {
         assert!(!watcher.has_changed().unwrap());
         controller.set_enabled(true);
         controller.set_devices(vec!["SC LIVE 4".into()]);
-        controller.learn(Action::Next);
+        controller.learn(Action::Next).unwrap();
         controller.input(press(cc(9)));
         controller.cues_changed(42);
         assert!(watcher.has_changed().unwrap());
@@ -694,5 +991,265 @@ mod tests {
             mapping_of(&Controller::load(file.0.clone())),
             Mapping::default()
         );
+    }
+
+    fn names(controller: &Controller) -> Vec<String> {
+        controller
+            .snapshot()
+            .profiles
+            .into_iter()
+            .map(|profile| profile.name)
+            .collect()
+    }
+
+    #[test]
+    fn a_first_start_has_an_empty_profile_to_learn_into() {
+        let file = TempFile::new("first");
+        let controller = Controller::load(file.0.clone());
+        let state = controller.snapshot();
+        assert_eq!(state.active_profile, DEFAULT_PROFILE);
+        assert_eq!(
+            names(&controller),
+            [presets::NAMES[0], presets::NAMES[1], DEFAULT_PROFILE]
+        );
+        assert!(state.profiles[0].built_in && !state.profiles[2].built_in);
+        assert!(state.bindings.is_empty());
+        controller.learn(Action::Next).unwrap();
+    }
+
+    #[test]
+    fn bindings_from_before_there_were_profiles_become_the_default_profile() {
+        let file = TempFile::new("legacy");
+        fs::create_dir_all(file.0.parent().unwrap()).unwrap();
+        fs::write(
+            &file.0,
+            r#"
+                [[binding]]
+                control = { kind = "note", channel = 1, number = 5 }
+                action = "play_pause"
+            "#,
+        )
+        .unwrap();
+        let controller = Controller::load(file.0.clone());
+        assert_eq!(controller.snapshot().active_profile, DEFAULT_PROFILE);
+        assert_eq!(
+            mapping_of(&controller).control_for(Action::PlayPause),
+            Some(note(5))
+        );
+        // The first change writes the new format, and nothing is lost.
+        controller.learn(Action::Stop).unwrap();
+        controller.input(press(note(6)));
+        let written = fs::read_to_string(&file.0).unwrap();
+        assert!(written.contains("[[profile]]"), "{written}");
+        let reloaded = Controller::load(file.0.clone());
+        assert_eq!(mapping_of(&reloaded), mapping_of(&controller));
+        assert_eq!(mapping_of(&reloaded).bindings.len(), 2);
+    }
+
+    #[test]
+    fn profiles_are_made_switched_between_and_kept_apart() {
+        let file = TempFile::new("profiles");
+        let controller = Controller::load(file.0.clone());
+        controller.learn(Action::Next).unwrap();
+        controller.input(press(note(1)));
+
+        // A new profile starts empty and is the one in use...
+        controller.create_profile("  Booth  ", None).unwrap();
+        assert_eq!(controller.snapshot().active_profile, "Booth");
+        assert!(mapping_of(&controller).bindings.is_empty());
+        controller.learn(Action::Stop).unwrap();
+        controller.input(press(note(2)));
+        // ...and what is learned in it stays out of the others.
+        controller.select_profile(DEFAULT_PROFILE).unwrap();
+        let mapping = mapping_of(&controller);
+        assert_eq!(mapping.control_for(Action::Next), Some(note(1)));
+        assert_eq!(mapping.control_for(Action::Stop), None);
+        controller.select_profile("Booth").unwrap();
+        assert_eq!(
+            mapping_of(&controller).control_for(Action::Stop),
+            Some(note(2))
+        );
+
+        // The one in use, and all the bindings, are still there after a restart.
+        let reloaded = Controller::load(file.0.clone());
+        assert_eq!(reloaded.snapshot().active_profile, "Booth");
+        assert_eq!(mapping_of(&reloaded), mapping_of(&controller));
+        assert_eq!(
+            names(&reloaded),
+            [
+                presets::NAMES[0],
+                presets::NAMES[1],
+                DEFAULT_PROFILE,
+                "Booth"
+            ]
+        );
+    }
+
+    #[test]
+    fn selecting_a_profile_stops_learning_and_an_unknown_one_changes_nothing() {
+        let file = TempFile::new("select");
+        let controller = Controller::load(file.0.clone());
+        controller.learn(Action::Next).unwrap();
+        let watcher = controller.subscribe();
+        assert_eq!(
+            controller.select_profile("Nobody"),
+            Err(ProfileError::Unknown)
+        );
+        assert!(!watcher.has_changed().unwrap(), "a refusal is no change");
+        assert_eq!(
+            controller.snapshot().learning,
+            Some(api::ControllerAction::Next as i32)
+        );
+        controller.select_profile(presets::NAMES[0]).unwrap();
+        assert_eq!(controller.snapshot().learning, None);
+        assert!(watcher.has_changed().unwrap());
+    }
+
+    #[test]
+    fn a_built_in_profile_can_be_used_and_copied_but_not_changed() {
+        let file = TempFile::new("built-in");
+        let controller = Controller::load(file.0.clone());
+        let built_in = presets::NAMES[1];
+        controller.select_profile(built_in).unwrap();
+        assert_eq!(controller.snapshot().bindings.len(), 6 + PADS);
+        // A press of its play button does what it should; learning is not possible.
+        let play = presets::mapping(built_in)
+            .unwrap()
+            .control_for(Action::PlayPause)
+            .unwrap();
+        assert_eq!(controller.input(press(play)), Some(Action::PlayPause));
+        assert_eq!(controller.learn(Action::Next), Err(ProfileError::BuiltIn));
+        assert_eq!(controller.clear(Action::Next), Err(ProfileError::BuiltIn));
+        assert_eq!(
+            controller.rename_profile(built_in, "Mine"),
+            Err(ProfileError::BuiltIn)
+        );
+        assert_eq!(
+            controller.delete_profile(built_in),
+            Err(ProfileError::BuiltIn)
+        );
+        assert_eq!(controller.snapshot().bindings.len(), 6 + PADS);
+
+        // A copy is the way to change it.
+        controller.create_profile("My SC", Some(built_in)).unwrap();
+        assert_eq!(controller.snapshot().bindings.len(), 6 + PADS);
+        controller.clear(Action::Next).unwrap();
+        assert_eq!(controller.snapshot().bindings.len(), 5 + PADS);
+        controller.select_profile(built_in).unwrap();
+        assert_eq!(controller.snapshot().bindings.len(), 6 + PADS);
+    }
+
+    #[test]
+    fn names_are_checked_and_unique_without_regard_to_case() {
+        let file = TempFile::new("names");
+        let controller = Controller::load(file.0.clone());
+        assert_eq!(
+            controller.create_profile("  ", None),
+            Err(ProfileError::EmptyName)
+        );
+        assert_eq!(
+            controller.create_profile(&"x".repeat(NAME_MAX_CHARS + 1), None),
+            Err(ProfileError::NameTooLong)
+        );
+        assert_eq!(
+            controller.create_profile("default", None),
+            Err(ProfileError::NameTaken)
+        );
+        // Built-in names are taken too.
+        assert_eq!(
+            controller.create_profile(&presets::NAMES[0].to_uppercase(), None),
+            Err(ProfileError::NameTaken)
+        );
+        assert_eq!(
+            controller.create_profile("Copy", Some("Nobody")),
+            Err(ProfileError::Unknown)
+        );
+        assert_eq!(
+            names(&controller).len(),
+            presets::NAMES.len() + 1,
+            "nothing was made"
+        );
+
+        controller.create_profile("Booth", None).unwrap();
+        assert_eq!(
+            controller.rename_profile("Booth", "DEFAULT"),
+            Err(ProfileError::NameTaken)
+        );
+        assert_eq!(
+            controller.rename_profile("Nobody", "Studio"),
+            Err(ProfileError::Unknown)
+        );
+        // Only the case of its own name changes.
+        controller.rename_profile("Booth", "booth").unwrap();
+        controller.rename_profile("booth", "Studio").unwrap();
+        // The profile in use keeps being in use, under its new name.
+        assert_eq!(controller.snapshot().active_profile, "Studio");
+        assert_eq!(
+            Controller::load(file.0.clone()).snapshot().active_profile,
+            "Studio"
+        );
+    }
+
+    #[test]
+    fn deleting_the_profile_in_use_selects_its_neighbour_or_a_built_in_one() {
+        let file = TempFile::new("delete");
+        let controller = Controller::load(file.0.clone());
+        controller.create_profile("A", None).unwrap();
+        controller.create_profile("B", None).unwrap();
+        controller.create_profile("C", None).unwrap();
+
+        // Another profile than the one in use: nothing else changes.
+        controller.delete_profile("A").unwrap();
+        assert_eq!(controller.snapshot().active_profile, "C");
+        controller.select_profile("B").unwrap();
+        controller.delete_profile("B").unwrap();
+        assert_eq!(controller.snapshot().active_profile, "C");
+        controller.delete_profile("C").unwrap();
+        assert_eq!(controller.snapshot().active_profile, DEFAULT_PROFILE);
+
+        // Deleting the last of the user's profiles leaves the built-in ones, and that sticks:
+        // the empty profile of a first start does not come back.
+        controller.delete_profile(DEFAULT_PROFILE).unwrap();
+        assert_eq!(controller.snapshot().active_profile, presets::NAMES[0]);
+        assert_eq!(controller.delete_profile("C"), Err(ProfileError::Unknown));
+        let reloaded = Controller::load(file.0.clone());
+        assert_eq!(reloaded.snapshot().active_profile, presets::NAMES[0]);
+        assert_eq!(names(&reloaded), presets::NAMES);
+    }
+
+    #[test]
+    fn a_hand_edited_file_with_profiles_is_cleaned_up() {
+        let file = TempFile::new("profiles-edited");
+        fs::create_dir_all(file.0.parent().unwrap()).unwrap();
+        fs::write(
+            &file.0,
+            r#"
+                active = "Nowhere"
+                [[profile]]
+                name = "One"
+                [[profile.binding]]
+                control = { kind = "note", channel = 1, number = 5 }
+                action = "play_pause"
+                [[profile.binding]]
+                control = { kind = "note", channel = 1, number = 5 }
+                action = "stop"
+                [[profile]]
+                name = "one"
+                [[profile]]
+                name = "   "
+                [[profile]]
+                name = "Two"
+            "#,
+        )
+        .unwrap();
+        let controller = Controller::load(file.0.clone());
+        // A name nobody has falls back to the first profile; repeated names and empty ones
+        // are left out, and so are bindings that clash.
+        assert_eq!(controller.snapshot().active_profile, "One");
+        assert_eq!(
+            names(&controller),
+            [presets::NAMES[0], presets::NAMES[1], "One", "Two"]
+        );
+        assert_eq!(mapping_of(&controller).bindings.len(), 1);
     }
 }

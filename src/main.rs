@@ -188,6 +188,18 @@ pub enum Message {
     ControllerLearnCancel,
     ControllerClear(ControllerAction),
     ControllerEnabledToggled(bool),
+    /// Use the controller profile of that name.
+    ControllerProfileSelected(String),
+    ControllerProfileNameChanged(String),
+    /// A profile with the typed name, empty (`false`) or a copy of the one in use (`true`).
+    ControllerProfileCreate(bool),
+    /// Gives the profile in use the typed name.
+    ControllerProfileRename,
+    /// Deletes the profile in use, once asked twice.
+    ControllerProfileDelete,
+    /// The answer to a change of the profiles: the state it leaves, or why it was refused.
+    /// The flag says whether the typed name was used up.
+    ControllerProfileChanged(bool, Result<ControllerState, String>),
     ThemeSelected(ThemeMode),
     LanguageSelected(Language),
     ResetOverrides,
@@ -1112,6 +1124,12 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::ControllerEnabledToggled(..)
         | Message::ControllerLearn(..)
         | Message::ControllerLearnCancel
+        | Message::ControllerProfileChanged(..)
+        | Message::ControllerProfileCreate(..)
+        | Message::ControllerProfileDelete
+        | Message::ControllerProfileNameChanged(..)
+        | Message::ControllerProfileRename
+        | Message::ControllerProfileSelected(..)
         | Message::ControllerState(..) => handlers::controller::handle(state, message),
         Message::OriginPrefixApplied(..)
         | Message::OriginPrefixApply
@@ -2938,6 +2956,76 @@ mod tests {
         assert_eq!(state.controller.problem(), Some("gone"));
         let _ = handle(&mut state, report(2, 1));
         assert_eq!(state.controller.problem(), None);
+    }
+
+    #[test]
+    fn controller_profiles_are_deleted_on_the_second_press_and_refusals_are_shown() {
+        use open_engine_api::v1::ControllerProfile;
+
+        let mut state = state_playing_with_cues(vec![]);
+        let report = |active: &str| ControllerState {
+            profiles: vec![
+                ControllerProfile {
+                    name: "SC LIVE 4".into(),
+                    built_in: true,
+                },
+                ControllerProfile {
+                    name: "Booth".into(),
+                    built_in: false,
+                },
+            ],
+            active_profile: active.into(),
+            ..ControllerState::default()
+        };
+        let _ = handle(&mut state, Message::ControllerState(Ok(report("Booth"))));
+
+        // The first press on Delete only asks (there is no backend here to answer anyway).
+        let _ = handle(&mut state, Message::ControllerProfileDelete);
+        assert_eq!(state.controller.confirm_delete.as_deref(), Some("Booth"));
+        // Choosing a profile, or leaving the page, takes the question back.
+        let _ = handle(
+            &mut state,
+            Message::ControllerProfileSelected("SC LIVE 4".into()),
+        );
+        assert_eq!(state.controller.confirm_delete, None);
+        let _ = handle(&mut state, Message::ControllerProfileDelete);
+        let _ = handle(&mut state, Message::Navigate(Page::Library));
+        assert_eq!(state.controller.confirm_delete, None);
+
+        // Nothing is made without a name.
+        let _ = handle(&mut state, Message::ControllerProfileCreate(false));
+        let _ = handle(&mut state, Message::ControllerProfileRename);
+        assert_eq!(state.controller.profile_error, None);
+
+        // A refusal is shown as one, not as the controller being out of reach, and the typed
+        // name stays to be corrected.
+        let _ = handle(
+            &mut state,
+            Message::ControllerProfileNameChanged("Booth".into()),
+        );
+        let _ = handle(
+            &mut state,
+            Message::ControllerProfileChanged(true, Err("another profile has that name".into())),
+        );
+        assert_eq!(
+            state.controller.profile_error.as_deref(),
+            Some("another profile has that name")
+        );
+        assert_eq!(state.controller.problem(), None);
+        assert_eq!(state.controller.name_draft, "Booth");
+
+        // A change that was made takes the state, the error and, if it used it, the name.
+        let _ = handle(
+            &mut state,
+            Message::ControllerProfileChanged(false, Ok(report("Booth"))),
+        );
+        assert_eq!(state.controller.profile_error, None);
+        assert_eq!(state.controller.name_draft, "Booth");
+        let _ = handle(
+            &mut state,
+            Message::ControllerProfileChanged(true, Ok(report("Booth"))),
+        );
+        assert_eq!(state.controller.name_draft, "");
     }
 
     #[test]

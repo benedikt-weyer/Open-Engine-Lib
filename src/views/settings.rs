@@ -1,5 +1,7 @@
 use iced::Element;
-use iced::widget::{Column, button, checkbox, column, radio, row, scrollable, slider, text};
+use iced::widget::{
+    Column, button, checkbox, column, pick_list, radio, row, scrollable, slider, text, text_input,
+};
 
 use crate::Message;
 use crate::config::{
@@ -81,6 +83,78 @@ fn control_name(strings: &Strings, control: &Control) -> String {
     )
 }
 
+/// The profile in use, with what changes the profiles: pick one, make one (empty or a copy
+/// of the one in use), rename or delete the one in use. The name field is for the first
+/// three; the built-in profiles can't be renamed or deleted.
+fn profile_picker<'a>(
+    page: Column<'a, Message>,
+    strings: &'a Strings,
+    controller: &'a Controller,
+) -> Column<'a, Message> {
+    let names: Vec<String> = controller
+        .profiles()
+        .iter()
+        .map(|profile| profile.name.clone())
+        .collect();
+    let active = controller.active_profile().map(str::to_owned);
+    let built_in = controller.active_is_built_in();
+    let typed = controller.typed_name().is_some();
+    let confirming = controller.confirm_delete.as_deref() == controller.active_profile();
+
+    let delete = button(text(if confirming {
+        &strings.controller_profile_delete_confirm
+    } else {
+        &strings.controller_profile_delete
+    }))
+    .on_press_maybe(
+        (!built_in && controller.active_profile().is_some())
+            .then_some(Message::ControllerProfileDelete),
+    );
+    let mut page = page
+        .push(text(&strings.controller_profile_heading).size(16))
+        .push(
+            row![
+                pick_list(names, active, Message::ControllerProfileSelected).width(300),
+                delete,
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        );
+    if built_in {
+        page = page.push(
+            text(&strings.controller_profile_built_in)
+                .size(14)
+                .style(text::secondary),
+        );
+    }
+    page = page.push(
+        row![
+            text_input(&strings.controller_profile_name, &controller.name_draft)
+                .on_input(Message::ControllerProfileNameChanged)
+                .on_submit_maybe(typed.then_some(Message::ControllerProfileCreate(false)))
+                .width(300),
+            button(text(&strings.controller_profile_new))
+                .on_press_maybe(typed.then_some(Message::ControllerProfileCreate(false))),
+            button(text(&strings.controller_profile_duplicate))
+                .on_press_maybe(typed.then_some(Message::ControllerProfileCreate(true))),
+            button(text(&strings.controller_profile_rename))
+                .on_press_maybe((typed && !built_in).then_some(Message::ControllerProfileRename)),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+    );
+    if let Some(error) = &controller.profile_error {
+        page = page.push(
+            text(fill(
+                &strings.controller_profile_failed,
+                &[("error", error)],
+            ))
+            .style(text::danger),
+        );
+    }
+    page
+}
+
 /// The controller: whether it is used, what is connected and what each action is bound to,
 /// with a button to bind it by pressing a control. (The backend does the listening and the
 /// learning; this shows what it says.)
@@ -115,6 +189,9 @@ fn controller_section<'a>(
         let message = format!("{}, {value}", control_name(strings, control));
         page = page.push(text(fill(&strings.controller_last, &[("message", &message)])).size(14));
     }
+    page = profile_picker(page, strings, controller);
+    // The bindings of a built-in profile are the program's: they are shown, not learned.
+    let editable = !controller.active_is_built_in();
     for action in controller::ACTIONS {
         let bound = controller.control_for(action);
         let binding = match bound {
@@ -130,9 +207,13 @@ fn controller_section<'a>(
             .align_y(iced::Center)
         } else {
             row![
-                button(text(&strings.controller_learn)).on_press(Message::ControllerLearn(action)),
-                button(text(&strings.controller_clear))
-                    .on_press_maybe(bound.map(|_| Message::ControllerClear(action))),
+                button(text(&strings.controller_learn))
+                    .on_press_maybe(editable.then_some(Message::ControllerLearn(action))),
+                button(text(&strings.controller_clear)).on_press_maybe(
+                    bound
+                        .filter(|_| editable)
+                        .map(|_| Message::ControllerClear(action))
+                ),
             ]
             .spacing(10)
         };
@@ -304,8 +385,11 @@ pub fn view<'a>(
 
     // The page is longer than a small window, so it scrolls; the padding keeps the scrollbar
     // off the controls.
-    scrollable(page.padding(iced::Padding::ZERO.right(16)).width(iced::Fill))
-        .width(iced::Fill)
-        .height(iced::Fill)
-        .into()
+    scrollable(
+        page.padding(iced::Padding::ZERO.right(16))
+            .width(iced::Fill),
+    )
+    .width(iced::Fill)
+    .height(iced::Fill)
+    .into()
 }

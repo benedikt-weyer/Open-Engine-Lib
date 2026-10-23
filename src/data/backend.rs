@@ -20,18 +20,19 @@ use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest, ControllerAction,
-    ControllerState, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
-    GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLibrarySyncDiffRequest,
-    GetLibrarySyncDiffResponse, GetLoopsRequest, GetOriginPrefixRequest, GetOriginPrefixResponse,
-    GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest, LearnRequest,
-    ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
-    NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress, PlayRequest,
-    PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
-    RenamePlaylistRequest, ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse,
-    SaveLibraryAsRequest, SeekRequest, SetControllerEnabledRequest, SetCuesRequest,
-    SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
-    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
-    TogglePauseRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
+    ControllerState, CreatePlaylistRequest, CreateProfileRequest, CreateSmartPlaylistRequest,
+    DeletePlaylistRequest, DeleteProfileRequest, GetAlbumArtRequest, GetCuesRequest,
+    GetInfoRequest, GetLibrarySyncDiffRequest, GetLibrarySyncDiffResponse, GetLoopsRequest,
+    GetOriginPrefixRequest, GetOriginPrefixResponse, GetProgressRequest, GetSyncDiffRequest,
+    GetSyncDiffResponse, GetWaveformRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest,
+    MigrateOriginsRequest, MigrateOriginsResponse, NextRequest, OpenLibraryRequest,
+    OpenLocalFolderRequest, OperationProgress, PlayRequest, PlaybackStatus, PreviousRequest,
+    PullFromSourceRequest, PullFromSourceResponse, RenamePlaylistRequest, RenameProfileRequest,
+    ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse, SaveLibraryAsRequest, SeekRequest,
+    SelectProfileRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest,
+    SetRatingRequest, SmartRules, SoundSwitchState, StopRequest, SyncToLibraryRequest,
+    SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest,
+    UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -944,6 +945,53 @@ pub async fn clear_binding(
         .clear_binding(ClearBindingRequest {
             action: action.into(),
         })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Has the backend use the controller profile of that name.
+pub async fn select_profile(mut backend: Backend, name: String) -> Result<ControllerState, String> {
+    backend
+        .controller
+        .select_profile(SelectProfileRequest { name })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Has the backend add a controller profile and use it: empty, or with the bindings of
+/// `copy_of`.
+pub async fn create_profile(
+    mut backend: Backend,
+    name: String,
+    copy_of: Option<String>,
+) -> Result<ControllerState, String> {
+    backend
+        .controller
+        .create_profile(CreateProfileRequest { name, copy_of })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+pub async fn rename_profile(
+    mut backend: Backend,
+    name: String,
+    new_name: String,
+) -> Result<ControllerState, String> {
+    backend
+        .controller
+        .rename_profile(RenameProfileRequest { name, new_name })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+pub async fn delete_profile(mut backend: Backend, name: String) -> Result<ControllerState, String> {
+    backend
+        .controller
+        .delete_profile(DeleteProfileRequest { name })
         .await
         .map(|response| response.into_inner())
         .map_err(describe)

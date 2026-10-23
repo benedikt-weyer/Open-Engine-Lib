@@ -13,14 +13,14 @@ use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest, ControllerAction,
-    CreateSmartPlaylistRequest, Cue, GetAlbumArtRequest, GetCuesRequest, GetInfoRequest,
-    GetLoopsRequest, GetOriginPrefixRequest, GetProgressRequest, GetSyncDiffRequest,
-    GetWaveformRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest, Loop,
-    MigrateOriginsRequest, OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest,
-    PlaybackErrorKind, PlaybackState, PullFromSourceRequest, ReplaceOriginPrefixRequest,
-    SaveLibraryAsRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest,
-    SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest,
-    WatchControllerRequest,
+    CreateProfileRequest, CreateSmartPlaylistRequest, Cue, DeleteProfileRequest,
+    GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLoopsRequest, GetOriginPrefixRequest,
+    GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest, LearnRequest, ListPlaylistsRequest,
+    ListTracksRequest, Loop, MigrateOriginsRequest, OpenLibraryRequest, OpenLocalFolderRequest,
+    PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest, RenameProfileRequest,
+    ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
+    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule,
+    SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -817,6 +817,165 @@ async fn shows_and_changes_what_the_controls_of_a_dj_controller_do() {
         .into_inner();
     assert!(!state.enabled && state.devices.is_empty() && state.error.is_none());
     assert_eq!(state.bindings.len(), 1, "the bindings stay");
+}
+
+#[tokio::test]
+async fn keeps_profiles_of_what_the_controls_of_a_dj_controller_do() {
+    let temp = TempDir::new("controller-profiles");
+    let file = temp.0.join("state/open-engine-lib/controller.toml");
+    let running = start(&temp.0.join("cache"));
+    let mut controller = ControllerServiceClient::with_interceptor(
+        channel(&running).await,
+        with_token as fn(Request<()>) -> Result<Request<()>, Status>,
+    );
+    let mut watch = controller
+        .watch(WatchControllerRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+
+    // The built-in profiles for the SC LIVE 4 come first, then the user's own one.
+    let state = watch.message().await.unwrap().unwrap();
+    let profiles: Vec<_> = state
+        .profiles
+        .iter()
+        .map(|profile| (profile.name.as_str(), profile.built_in))
+        .collect();
+    assert_eq!(profiles.len(), 3);
+    assert!(profiles[0].0.starts_with("SC LIVE 4") && profiles[0].1);
+    assert!(profiles[1].0.starts_with("SC LIVE 4") && profiles[1].1);
+    assert_eq!(profiles[2], ("Default", false));
+    assert_eq!(state.active_profile, "Default");
+    assert!(state.bindings.is_empty());
+
+    // A built-in profile can be switched to, and the pads of the unit are bound in it...
+    let built_in = state.profiles[0].name.clone();
+    let state = controller
+        .select_profile(SelectProfileRequest {
+            name: built_in.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(state.active_profile, built_in);
+    let pad_1 = state
+        .bindings
+        .iter()
+        .find(|binding| binding.action() == ControllerAction::Pad1)
+        .and_then(|binding| binding.control)
+        .unwrap();
+    assert_eq!((pad_1.channel, pad_1.number), (5, 0x0F));
+    // ...but not changed.
+    assert_eq!(
+        code(
+            controller
+                .learn(LearnRequest {
+                    action: ControllerAction::Next.into(),
+                })
+                .await
+        ),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        code(
+            controller
+                .clear_binding(ClearBindingRequest {
+                    action: ControllerAction::Next.into(),
+                })
+                .await
+        ),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        code(
+            controller
+                .delete_profile(DeleteProfileRequest {
+                    name: built_in.clone(),
+                })
+                .await
+        ),
+        Code::FailedPrecondition
+    );
+
+    // A copy of it is one's own.
+    let state = controller
+        .create_profile(CreateProfileRequest {
+            name: "My SC".into(),
+            copy_of: Some(built_in.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(state.active_profile, "My SC");
+    let copied = state.bindings.len();
+    assert!(copied > 0);
+    let state = controller
+        .clear_binding(ClearBindingRequest {
+            action: ControllerAction::Next.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(state.bindings.len(), copied - 1);
+    assert_eq!(
+        code(
+            controller
+                .create_profile(CreateProfileRequest {
+                    name: "my sc".into(),
+                    copy_of: None,
+                })
+                .await
+        ),
+        Code::AlreadyExists
+    );
+    assert_eq!(
+        code(
+            controller
+                .create_profile(CreateProfileRequest {
+                    name: " ".into(),
+                    copy_of: None,
+                })
+                .await
+        ),
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        code(
+            controller
+                .select_profile(SelectProfileRequest {
+                    name: "Nobody".into(),
+                })
+                .await
+        ),
+        Code::NotFound
+    );
+
+    // Renaming keeps it in use; the file has the profile and which one is in use.
+    let state = controller
+        .rename_profile(RenameProfileRequest {
+            name: "My SC".into(),
+            new_name: "Booth".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(state.active_profile, "Booth");
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        saved.contains(r#"active = "Booth""#) && saved.contains(r#"name = "Booth""#),
+        "{saved}"
+    );
+
+    // Deleting the profile in use puts the one next to it in use.
+    let state = controller
+        .delete_profile(DeleteProfileRequest {
+            name: "Booth".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(state.active_profile, "Default");
+    assert_eq!(state.profiles.len(), 3);
 }
 
 /// Needs a DJ controller plugged in (and the audio process next to the backend): turns the

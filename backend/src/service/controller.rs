@@ -13,7 +13,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use super::{Service, edit_status};
-use crate::controller::{Action, Input};
+use crate::controller::{Action, Input, ProfileError};
 use crate::cues::Cue;
 
 /// Changes that come in quick succession (a jog wheel makes hundreds of messages a second)
@@ -194,7 +194,7 @@ impl ControllerService for Service {
     ) -> Result<Response<api::ControllerState>, Status> {
         let action = Action::from_api(request.into_inner().action())
             .ok_or_else(|| Status::invalid_argument("no such action"))?;
-        self.0.controller.learn(action);
+        self.0.controller.learn(action).map_err(profile_status)?;
         Ok(Response::new(self.0.controller.snapshot()))
     }
 
@@ -212,7 +212,63 @@ impl ControllerService for Service {
     ) -> Result<Response<api::ControllerState>, Status> {
         let action = Action::from_api(request.into_inner().action())
             .ok_or_else(|| Status::invalid_argument("no such action"))?;
-        self.0.controller.clear(action);
+        self.0.controller.clear(action).map_err(profile_status)?;
         Ok(Response::new(self.0.controller.snapshot()))
+    }
+
+    async fn select_profile(
+        &self,
+        request: Request<api::SelectProfileRequest>,
+    ) -> Result<Response<api::ControllerState>, Status> {
+        let controller = &self.0.controller;
+        controller
+            .select_profile(&request.into_inner().name)
+            .map_err(profile_status)?;
+        Ok(Response::new(controller.snapshot()))
+    }
+
+    async fn create_profile(
+        &self,
+        request: Request<api::CreateProfileRequest>,
+    ) -> Result<Response<api::ControllerState>, Status> {
+        let request = request.into_inner();
+        let controller = &self.0.controller;
+        controller
+            .create_profile(&request.name, request.copy_of.as_deref())
+            .map_err(profile_status)?;
+        Ok(Response::new(controller.snapshot()))
+    }
+
+    async fn rename_profile(
+        &self,
+        request: Request<api::RenameProfileRequest>,
+    ) -> Result<Response<api::ControllerState>, Status> {
+        let request = request.into_inner();
+        let controller = &self.0.controller;
+        controller
+            .rename_profile(&request.name, &request.new_name)
+            .map_err(profile_status)?;
+        Ok(Response::new(controller.snapshot()))
+    }
+
+    async fn delete_profile(
+        &self,
+        request: Request<api::DeleteProfileRequest>,
+    ) -> Result<Response<api::ControllerState>, Status> {
+        let controller = &self.0.controller;
+        controller
+            .delete_profile(&request.into_inner().name)
+            .map_err(profile_status)?;
+        Ok(Response::new(controller.snapshot()))
+    }
+}
+
+fn profile_status(error: ProfileError) -> Status {
+    let message = error.to_string();
+    match error {
+        ProfileError::EmptyName | ProfileError::NameTooLong => Status::invalid_argument(message),
+        ProfileError::NameTaken => Status::already_exists(message),
+        ProfileError::Unknown => Status::not_found(message),
+        ProfileError::BuiltIn => Status::failed_precondition(message),
     }
 }

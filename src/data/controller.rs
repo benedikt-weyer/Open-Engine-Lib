@@ -2,7 +2,9 @@
 //! hardware, which control does what, learning a new binding, carrying the actions out: see
 //! `ControllerService`); this only keeps the latest state it reported, for the Settings page.
 
-use open_engine_api::v1::{Control, ControlKind, ControllerAction, ControllerState};
+use open_engine_api::v1::{
+    Control, ControlKind, ControllerAction, ControllerProfile, ControllerState,
+};
 
 /// In the order they are shown.
 pub const ACTIONS: [ControllerAction; 14] = [
@@ -36,6 +38,12 @@ pub struct Controller {
     state: Option<ControllerState>,
     /// Why the backend can't be asked about the controller.
     pub error: Option<String>,
+    /// The name typed for a new profile, or for the one in use to be renamed to.
+    pub name_draft: String,
+    /// The profile whose deletion was asked for once: it takes a second press.
+    pub confirm_delete: Option<String>,
+    /// Why the last change to the profiles was refused (a name that is taken...).
+    pub profile_error: Option<String>,
 }
 
 impl Controller {
@@ -50,6 +58,32 @@ impl Controller {
         self.state = Some(state);
         self.error = None;
         cues_changed
+    }
+
+    /// The name typed for a profile, without the spaces around it, if any.
+    pub fn typed_name(&self) -> Option<String> {
+        let name = self.name_draft.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+
+    /// The profiles, the built-in ones first.
+    pub fn profiles(&self) -> &[ControllerProfile] {
+        self.state.as_ref().map_or(&[], |state| &state.profiles)
+    }
+
+    /// The name of the profile in use.
+    pub fn active_profile(&self) -> Option<&str> {
+        self.state
+            .as_ref()
+            .map(|state| state.active_profile.as_str())
+            .filter(|name| !name.is_empty())
+    }
+
+    /// Whether the profile in use comes with the program, so its bindings can't be changed.
+    pub fn active_is_built_in(&self) -> bool {
+        self.profiles()
+            .iter()
+            .any(|profile| profile.built_in && Some(profile.name.as_str()) == self.active_profile())
     }
 
     pub fn devices(&self) -> &[String] {
@@ -94,7 +128,7 @@ pub fn is_note(control: &Control) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use open_engine_api::v1::{ControllerBinding, ControllerInput};
+    use open_engine_api::v1::{ControllerBinding, ControllerInput, ControllerProfile};
 
     use super::*;
 
@@ -142,6 +176,7 @@ mod tests {
             error: Some("no sequencer".into()),
             cues_revision: 3,
             cues_track_id: 5,
+            ..ControllerState::default()
         };
         // The first state is not a change.
         assert_eq!(controller.update(state.clone()), None);
@@ -166,5 +201,43 @@ mod tests {
         // A failing connection is shown over what the backend said, until it reports again.
         controller.error = Some("gone".into());
         assert_eq!(controller.problem(), Some("gone"));
+    }
+
+    #[test]
+    fn the_profiles_and_the_one_in_use_are_read_from_the_state() {
+        let mut controller = Controller::default();
+        assert!(controller.profiles().is_empty());
+        assert_eq!(controller.active_profile(), None);
+        assert!(!controller.active_is_built_in());
+
+        let profile = |name: &str, built_in| ControllerProfile {
+            name: name.into(),
+            built_in,
+        };
+        let state = |active: &str| ControllerState {
+            profiles: vec![profile("SC LIVE 4", true), profile("Booth", false)],
+            active_profile: active.into(),
+            ..ControllerState::default()
+        };
+        controller.update(state("Booth"));
+        assert_eq!(controller.profiles().len(), 2);
+        assert_eq!(controller.active_profile(), Some("Booth"));
+        assert!(!controller.active_is_built_in());
+        controller.update(state("SC LIVE 4"));
+        assert!(controller.active_is_built_in());
+        // A backend that names no profile (an older one) is none in use.
+        controller.update(state(""));
+        assert_eq!(controller.active_profile(), None);
+        assert!(!controller.active_is_built_in());
+    }
+
+    #[test]
+    fn the_typed_name_is_trimmed_and_may_be_empty() {
+        let mut controller = Controller::default();
+        assert_eq!(controller.typed_name(), None);
+        controller.name_draft = "   ".into();
+        assert_eq!(controller.typed_name(), None);
+        controller.name_draft = "  Booth ".into();
+        assert_eq!(controller.typed_name().as_deref(), Some("Booth"));
     }
 }

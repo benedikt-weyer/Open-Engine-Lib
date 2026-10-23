@@ -6,6 +6,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::Navigate(page) => {
             state.page = page;
+            state.controller.confirm_delete = None;
             // A control pressed on the controller must not be bound by accident later.
             if state.controller.learning().is_some() {
                 return super::controller::ask(state, backend::cancel_learning);
