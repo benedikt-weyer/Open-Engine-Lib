@@ -1172,6 +1172,46 @@ async fn plays_from_a_real_library() {
         status.position_ms
     );
 
+    // Scratching: the track is held (paused) where the hand is, which moves with the calls,
+    // and plays on from there when let go.
+    let before = status.position_ms;
+    let held = playback
+        .begin_scratch(open_engine_api::v1::BeginScratchRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    println!("scratching: {held:?}");
+    assert!(held.scratching, "{held:?}");
+    assert_eq!(held.state(), PlaybackState::Paused);
+    let moved = playback
+        .move_scratch(open_engine_api::v1::MoveScratchRequest { delta_seconds: 2.0 })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        moved.position_ms >= held.position_ms + 1_900,
+        "{} then {}",
+        held.position_ms,
+        moved.position_ms
+    );
+    let back = playback
+        .move_scratch(open_engine_api::v1::MoveScratchRequest {
+            delta_seconds: -1.0,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(back.position_ms < moved.position_ms);
+    let released = playback
+        .end_scratch(open_engine_api::v1::EndScratchRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    println!("after scratching from {before} ms: {released:?}");
+    assert!(!released.scratching);
+    assert_eq!(released.state(), PlaybackState::Playing);
+    assert!(released.position_ms + 500 >= back.position_ms);
+
     let status = playback
         .toggle_pause(open_engine_api::v1::TogglePauseRequest {})
         .await

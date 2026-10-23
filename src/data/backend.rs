@@ -19,20 +19,21 @@ use open_engine_api::v1::controller_service_client::ControllerServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest, ControllerAction,
-    ControllerState, CreatePlaylistRequest, CreateProfileRequest, CreateSmartPlaylistRequest,
-    DeletePlaylistRequest, DeleteProfileRequest, GetAlbumArtRequest, GetCuesRequest,
-    GetInfoRequest, GetLibrarySyncDiffRequest, GetLibrarySyncDiffResponse, GetLoopsRequest,
-    GetOriginPrefixRequest, GetOriginPrefixResponse, GetProgressRequest, GetSyncDiffRequest,
-    GetSyncDiffResponse, GetWaveformRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest,
-    MigrateOriginsRequest, MigrateOriginsResponse, NextRequest, OpenLibraryRequest,
-    OpenLocalFolderRequest, OperationProgress, PlayRequest, PlaybackStatus, PreviousRequest,
-    PullFromSourceRequest, PullFromSourceResponse, RenamePlaylistRequest, RenameProfileRequest,
-    ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse, SaveLibraryAsRequest, SeekRequest,
-    SelectProfileRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest,
-    SetRatingRequest, SmartRules, SoundSwitchState, StopRequest, SyncToLibraryRequest,
-    SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest,
-    UpdateSmartPlaylistRequest, WatchControllerRequest,
+    BeginScratchRequest, CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest,
+    ControllerAction, ControllerState, CreatePlaylistRequest, CreateProfileRequest,
+    CreateSmartPlaylistRequest, DeletePlaylistRequest, DeleteProfileRequest, EndScratchRequest,
+    GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLibrarySyncDiffRequest,
+    GetLibrarySyncDiffResponse, GetLoopsRequest, GetOriginPrefixRequest, GetOriginPrefixResponse,
+    GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest, LearnRequest,
+    ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
+    MoveScratchRequest, NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress,
+    PlayRequest, PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
+    RenamePlaylistRequest, RenameProfileRequest, ReplaceOriginPrefixRequest,
+    ReplaceOriginPrefixResponse, SaveLibraryAsRequest, SeekRequest, SelectProfileRequest,
+    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules,
+    SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
+    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
+    WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -836,6 +837,13 @@ pub enum Control {
     Seek {
         position_ms: u64,
     },
+    /// Hold the track for scratching it, and let go of it.
+    ScratchBegin,
+    ScratchEnd,
+    /// Drag the track by so many seconds, negative for backwards.
+    ScratchMove {
+        delta_seconds: f64,
+    },
     Poll,
 }
 
@@ -862,6 +870,13 @@ pub async fn control(mut backend: Backend, control: Control) -> Result<PlaybackS
         Control::Next => playback.next(NextRequest {}).await,
         Control::Previous => playback.previous(PreviousRequest {}).await,
         Control::Seek { position_ms } => playback.seek(SeekRequest { position_ms }).await,
+        Control::ScratchBegin => playback.begin_scratch(BeginScratchRequest {}).await,
+        Control::ScratchEnd => playback.end_scratch(EndScratchRequest {}).await,
+        Control::ScratchMove { delta_seconds } => {
+            playback
+                .move_scratch(MoveScratchRequest { delta_seconds })
+                .await
+        }
         Control::Poll => {
             playback
                 .get_status(open_engine_api::v1::GetStatusRequest {})

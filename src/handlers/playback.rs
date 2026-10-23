@@ -92,13 +92,44 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 position_ms: (seconds.max(0.0) * 1000.0) as u64,
             });
         }
+        Message::ScratchStart => {
+            let (true, Some(duration)) = (state.scratch.is_none(), state.playing_duration()) else {
+                return Task::none();
+            };
+            // The track is held where it is, which the clock shows from now on.
+            let now = Instant::now();
+            let position = state.clock.position(now, duration);
+            state.scratch = Some(position);
+            state.clock.report(position, false, now);
+            return state.control(Control::ScratchBegin);
+        }
+        Message::ScratchBy(seconds) => {
+            let (Some(position), Some(duration)) = (state.scratch, state.playing_duration()) else {
+                return Task::none();
+            };
+            let position = (position + seconds).clamp(0.0, duration);
+            state.scratch = Some(position);
+            state.clock.report(position, false, Instant::now());
+            return state.control(Control::ScratchMove {
+                delta_seconds: seconds,
+            });
+        }
+        Message::ScratchEnd => {
+            if state.scratch.take().is_some() {
+                // The answer says where the track is and whether it plays on.
+                return state.control(Control::ScratchEnd);
+            }
+        }
         Message::Status(Ok(status)) => {
             state.status = status;
-            state.clock.report(
-                state.status.position_ms as f64 / 1000.0,
-                state.status.state() == PlaybackState::Playing,
-                Instant::now(),
-            );
+            // (The clock of a track dragged by hand is ahead of what the backend knows.)
+            if state.scratch.is_none() {
+                state.clock.report(
+                    state.status.position_ms as f64 / 1000.0,
+                    state.status.state() == PlaybackState::Playing,
+                    Instant::now(),
+                );
+            }
             state.backend_error = None;
             if state.is_stopped() {
                 state.play_source = None;

@@ -173,6 +173,30 @@ impl AudioService for Service {
         self.command(Command::Seek(to)).await
     }
 
+    async fn begin_scratch(
+        &self,
+        _: Request<api::BeginScratchRequest>,
+    ) -> Result<Response<api::PlaybackStatus>, Status> {
+        // Decoding the stretch to scratch takes a moment, and the engine's thread does it,
+        // so the answer says whether it worked.
+        self.command(Command::ScratchBegin).await
+    }
+
+    async fn move_scratch(
+        &self,
+        request: Request<api::MoveScratchRequest>,
+    ) -> Result<Response<api::PlaybackStatus>, Status> {
+        self.command(Command::ScratchMove(request.into_inner().delta_seconds))
+            .await
+    }
+
+    async fn end_scratch(
+        &self,
+        _: Request<api::EndScratchRequest>,
+    ) -> Result<Response<api::PlaybackStatus>, Status> {
+        self.command(Command::ScratchEnd).await
+    }
+
     async fn get_status(
         &self,
         _: Request<api::GetStatusRequest>,
@@ -284,6 +308,7 @@ fn status_message(status: crate::engine::Status) -> api::PlaybackStatus {
             track_id: error.track_id,
             detail: error.detail,
         }),
+        scratching: status.scratching,
     }
 }
 

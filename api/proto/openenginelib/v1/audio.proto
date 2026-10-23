@@ -22,6 +22,9 @@ service AudioService {
   rpc Previous(PreviousRequest) returns (PlaybackStatus);
   rpc Seek(SeekRequest) returns (PlaybackStatus);
   rpc GetStatus(GetStatusRequest) returns (PlaybackStatus);
+  rpc BeginScratch(BeginScratchRequest) returns (PlaybackStatus);
+  rpc MoveScratch(MoveScratchRequest) returns (PlaybackStatus);
+  rpc EndScratch(EndScratchRequest) returns (PlaybackStatus);
   // Stops playback, empties the queue and releases the audio device (which the next Play
   // opens again), for when the library that the queue came from is closed.
   rpc Close(CloseRequest) returns (PlaybackStatus);

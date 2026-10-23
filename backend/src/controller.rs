@@ -47,6 +47,43 @@ pub enum Action {
     SeekForward,
     /// Cue pad `0..PADS`: jumps to its cue, or sets one at the playhead.
     Pad(usize),
+    /// The top of the jog wheel is touched (note on) or let go (note off): holds the track
+    /// for scratching, and lets it go.
+    JogTouch,
+    /// The position of the jog wheel, which a controller sends as a 14-bit number: its high
+    /// 7 bits on the control bound here (a control change) and the low 7 bits on the one
+    /// `JOG_LOW_OFFSET` above it. Scratches while the top is touched.
+    JogWheel,
+}
+
+/// How far above the control with the high bits of a 14-bit value the one with the low bits
+/// is (the MIDI convention: controllers 0 to 31 and their low halves 32 to 63).
+const JOG_LOW_OFFSET: u8 = 32;
+/// The positions a jog wheel reports for one turn of it: 14 bits.
+const JOG_STEPS_PER_TURN: i32 = 1 << 14;
+/// How much of the track a turn of the wheel scratches, in seconds: a record at 33⅓ turns
+/// a minute takes 1.8 seconds for a turn.
+pub const JOG_SECONDS_PER_TURN: f64 = 1.8;
+
+/// How far the jog wheel went from one position it reported to the next, in seconds of the
+/// track: the short way round, so a turn past the end of the scale is not a jump the other
+/// way.
+pub fn jog_seconds(from: u16, to: u16) -> f64 {
+    let steps = i32::from(to) - i32::from(from);
+    let wrapped =
+        (steps + JOG_STEPS_PER_TURN / 2).rem_euclid(JOG_STEPS_PER_TURN) - JOG_STEPS_PER_TURN / 2;
+    f64::from(wrapped) / f64::from(JOG_STEPS_PER_TURN) * JOG_SECONDS_PER_TURN
+}
+
+/// What a message from the controller asks the player to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// A press of the control bound to the action.
+    Press(Action),
+    /// The top of the jog wheel went down (true) or up.
+    JogTouch(bool),
+    /// The jog wheel is at this position (14 bits).
+    JogPosition(u16),
 }
 
 impl Action {
@@ -60,6 +97,8 @@ impl Action {
             Action::SeekBack => "seek_back".into(),
             Action::SeekForward => "seek_forward".into(),
             Action::Pad(slot) => format!("pad_{}", slot + 1),
+            Action::JogTouch => "jog_touch".into(),
+            Action::JogWheel => "jog_wheel".into(),
         }
     }
 
@@ -71,6 +110,8 @@ impl Action {
             "previous" => Action::Previous,
             "seek_back" => Action::SeekBack,
             "seek_forward" => Action::SeekForward,
+            "jog_touch" => Action::JogTouch,
+            "jog_wheel" => Action::JogWheel,
             _ => {
                 let number: usize = key.strip_prefix("pad_")?.parse().ok()?;
                 Action::Pad(number.checked_sub(1).filter(|slot| *slot < PADS)?)
@@ -88,6 +129,8 @@ impl Action {
             A::Next => Action::Next,
             A::SeekBack => Action::SeekBack,
             A::SeekForward => Action::SeekForward,
+            A::JogTouch => Action::JogTouch,
+            A::JogWheel => Action::JogWheel,
             pad => Action::Pad((pad as usize).checked_sub(A::Pad1 as usize)?),
         })
         .filter(|action| !matches!(action, Action::Pad(slot) if *slot >= PADS))
@@ -102,6 +145,8 @@ impl Action {
             Action::Next => A::Next,
             Action::SeekBack => A::SeekBack,
             Action::SeekForward => A::SeekForward,
+            Action::JogTouch => A::JogTouch,
+            Action::JogWheel => A::JogWheel,
             Action::Pad(slot) => {
                 A::try_from(A::Pad1 as i32 + slot as i32).unwrap_or(A::Unspecified)
             }
@@ -286,6 +331,19 @@ impl fmt::Display for ProfileError {
     }
 }
 
+/// The control a jog wheel is bound by when `control` is one of the two it sends its
+/// position on: the one with the high bits.
+fn jog_high_control(control: Control) -> Control {
+    if control.kind == Kind::Cc && (JOG_LOW_OFFSET..2 * JOG_LOW_OFFSET).contains(&control.number) {
+        Control {
+            number: control.number - JOG_LOW_OFFSET,
+            ..control
+        }
+    } else {
+        control
+    }
+}
+
 /// A name without the spaces around it, if it is one a profile can have.
 fn clean_name(name: &str) -> Result<String, ProfileError> {
     let name = name.trim();
@@ -350,6 +408,8 @@ struct Inner {
     error: Option<String>,
     cues_revision: u64,
     cues_track: u32,
+    /// The high 7 bits of the jog wheel's position, which the low 7 bits complete.
+    jog_high: Option<u8>,
 }
 
 impl Inner {
@@ -417,6 +477,23 @@ impl Inner {
                 .find(|profile| profile.name == name)
                 .map(|profile| profile.mapping.clone())
         })
+    }
+
+    /// The jog wheel's position, when `input` is the low half of it: the high half was heard
+    /// just before.
+    fn jog_position(&self, input: Input) -> Option<Event> {
+        let wheel = self.mapping.control_for(Action::JogWheel)?;
+        let low = Control {
+            number: wheel.number.checked_add(JOG_LOW_OFFSET)?,
+            ..wheel
+        };
+        if wheel.kind != Kind::Cc || input.control != low {
+            return None;
+        }
+        let high = self.jog_high?;
+        Some(Event::JogPosition(
+            (u16::from(high) << 7) | u16::from(input.value),
+        ))
     }
 
     /// Checks that the profile in use may be changed.
@@ -588,8 +665,8 @@ impl Controller {
 
     /// Takes a message from the controller. While an action is waiting for its control, the
     /// first press is bound to it and nothing else happens; otherwise a press says which
-    /// action to carry out.
-    pub fn input(&self, input: Input) -> Option<Action> {
+    /// action to carry out, and the jog wheel's touch and position are told as they come.
+    pub fn input(&self, input: Input) -> Option<Event> {
         self.change(|inner| {
             inner.last = Some(input);
             if let Some(action) = inner.learning {
@@ -597,16 +674,28 @@ impl Controller {
                     inner.learning = None;
                     // (A built-in profile is never learned into: learning can't start.)
                     if inner.editable().is_ok() {
-                        inner.mapping.bind(input.control, action);
+                        // The wheel sends both halves of its position; either may be the
+                        // first heard.
+                        let control = if action == Action::JogWheel {
+                            jog_high_control(input.control)
+                        } else {
+                            input.control
+                        };
+                        inner.mapping.bind(control, action);
                         self.persist(inner);
                     }
                 }
                 return None;
             }
-            input
-                .pressed()
-                .then(|| inner.mapping.action_for(input.control))
-                .flatten()
+            match inner.mapping.action_for(input.control) {
+                Some(Action::JogTouch) => Some(Event::JogTouch(input.pressed())),
+                Some(Action::JogWheel) => {
+                    inner.jog_high = Some(input.value);
+                    None
+                }
+                Some(action) => input.pressed().then_some(Event::Press(action)),
+                None => inner.jog_position(input),
+            }
         })
     }
 
@@ -803,6 +892,7 @@ mod tests {
             Action::SeekForward,
         ]
         .into_iter()
+        .chain([Action::JogTouch, Action::JogWheel])
         .chain((0..PADS).map(Action::Pad))
         .collect();
         for action in &all {
@@ -869,7 +959,10 @@ mod tests {
         let file = TempFile::new("press");
         let controller = Controller::load(file.0.clone());
         controller.lock().mapping.bind(note(36), Action::PlayPause);
-        assert_eq!(controller.input(press(note(36))), Some(Action::PlayPause));
+        assert_eq!(
+            controller.input(press(note(36))),
+            Some(Event::Press(Action::PlayPause))
+        );
         assert_eq!(controller.input(release(note(36))), None);
         assert_eq!(controller.input(press(note(37))), None);
         assert_eq!(controller.lock().last, Some(press(note(37))));
@@ -1111,13 +1204,16 @@ mod tests {
         let controller = Controller::load(file.0.clone());
         let built_in = presets::NAMES[1];
         controller.select_profile(built_in).unwrap();
-        assert_eq!(controller.snapshot().bindings.len(), 6 + PADS);
+        assert_eq!(controller.snapshot().bindings.len(), 6 + 2 + PADS);
         // A press of its play button does what it should; learning is not possible.
         let play = presets::mapping(built_in)
             .unwrap()
             .control_for(Action::PlayPause)
             .unwrap();
-        assert_eq!(controller.input(press(play)), Some(Action::PlayPause));
+        assert_eq!(
+            controller.input(press(play)),
+            Some(Event::Press(Action::PlayPause))
+        );
         assert_eq!(controller.learn(Action::Next), Err(ProfileError::BuiltIn));
         assert_eq!(controller.clear(Action::Next), Err(ProfileError::BuiltIn));
         assert_eq!(
@@ -1128,15 +1224,15 @@ mod tests {
             controller.delete_profile(built_in),
             Err(ProfileError::BuiltIn)
         );
-        assert_eq!(controller.snapshot().bindings.len(), 6 + PADS);
+        assert_eq!(controller.snapshot().bindings.len(), 6 + 2 + PADS);
 
         // A copy is the way to change it.
         controller.create_profile("My SC", Some(built_in)).unwrap();
-        assert_eq!(controller.snapshot().bindings.len(), 6 + PADS);
+        assert_eq!(controller.snapshot().bindings.len(), 6 + 2 + PADS);
         controller.clear(Action::Next).unwrap();
-        assert_eq!(controller.snapshot().bindings.len(), 5 + PADS);
+        assert_eq!(controller.snapshot().bindings.len(), 5 + 2 + PADS);
         controller.select_profile(built_in).unwrap();
-        assert_eq!(controller.snapshot().bindings.len(), 6 + PADS);
+        assert_eq!(controller.snapshot().bindings.len(), 6 + 2 + PADS);
     }
 
     #[test]
@@ -1251,5 +1347,108 @@ mod tests {
             [presets::NAMES[0], presets::NAMES[1], "One", "Two"]
         );
         assert_eq!(mapping_of(&controller).bindings.len(), 1);
+    }
+
+    fn wheel(number: u8, value: u8) -> Input {
+        Input {
+            control: cc(number),
+            value,
+        }
+    }
+
+    #[test]
+    fn the_jog_wheel_is_told_as_a_touch_and_a_position_of_14_bits() {
+        let file = TempFile::new("jog");
+        let controller = Controller::load(file.0.clone());
+        {
+            let mut inner = controller.lock();
+            inner.mapping.bind(note(0x21), Action::JogTouch);
+            inner.mapping.bind(cc(0x11), Action::JogWheel);
+        }
+        assert_eq!(
+            controller.input(press(note(0x21))),
+            Some(Event::JogTouch(true))
+        );
+        assert_eq!(
+            controller.input(release(note(0x21))),
+            Some(Event::JogTouch(false))
+        );
+
+        // The high bits alone say nothing yet; the low bits complete the position.
+        assert_eq!(controller.input(wheel(0x11, 0x01)), None);
+        assert_eq!(
+            controller.input(wheel(0x31, 0x05)),
+            Some(Event::JogPosition(0x85))
+        );
+        // The same high bits serve for the next low bits.
+        assert_eq!(
+            controller.input(wheel(0x31, 0x00)),
+            Some(Event::JogPosition(0x80))
+        );
+        assert_eq!(controller.input(wheel(0x11, 0)), None);
+        assert_eq!(
+            controller.input(wheel(0x31, 0)),
+            Some(Event::JogPosition(0)),
+            "a position of 0 is a position"
+        );
+        // Another control with those numbers, or another channel, is not the wheel.
+        assert_eq!(controller.input(wheel(0x32, 1)), None);
+        let elsewhere = Control {
+            channel: 3,
+            ..cc(0x31)
+        };
+        assert_eq!(
+            controller.input(Input {
+                control: elsewhere,
+                value: 1
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn the_low_half_of_the_wheel_is_nothing_before_the_high_half_is_heard() {
+        let file = TempFile::new("jog-first");
+        let controller = Controller::load(file.0.clone());
+        controller.lock().mapping.bind(cc(0x11), Action::JogWheel);
+        assert_eq!(controller.input(wheel(0x31, 9)), None);
+    }
+
+    #[test]
+    fn the_jog_wheel_is_learned_by_either_half_of_its_position() {
+        for turned in [0x11, 0x31] {
+            let file = TempFile::new("jog-learn");
+            let controller = Controller::load(file.0.clone());
+            controller.learn(Action::JogWheel).unwrap();
+            assert_eq!(controller.input(wheel(turned, 3)), None);
+            assert_eq!(
+                controller.lock().mapping.control_for(Action::JogWheel),
+                Some(cc(0x11)),
+                "turned {turned:#x}"
+            );
+        }
+        // Another action is bound to the control as it is.
+        let file = TempFile::new("jog-learn-other");
+        let controller = Controller::load(file.0.clone());
+        controller.learn(Action::Stop).unwrap();
+        controller.input(wheel(0x31, 3));
+        assert_eq!(
+            controller.lock().mapping.control_for(Action::Stop),
+            Some(cc(0x31))
+        );
+    }
+
+    #[test]
+    fn the_wheel_moves_the_short_way_round() {
+        let turn = JOG_SECONDS_PER_TURN;
+        assert_eq!(jog_seconds(100, 100), 0.0);
+        assert!((jog_seconds(0, 4096) - turn / 4.0).abs() < 1e-9);
+        assert!((jog_seconds(4096, 0) + turn / 4.0).abs() < 1e-9);
+        // Past the end of the scale, and back over it.
+        assert!((jog_seconds(16_380, 4) - 8.0 / 16_384.0 * turn).abs() < 1e-9);
+        assert!((jog_seconds(4, 16_380) + 8.0 / 16_384.0 * turn).abs() < 1e-9);
+        // Half a turn is as far as a move can be.
+        assert!(jog_seconds(0, 8_191) > 0.0);
+        assert!(jog_seconds(0, 8_193) < 0.0);
     }
 }

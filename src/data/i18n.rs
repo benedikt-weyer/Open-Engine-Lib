@@ -117,6 +117,8 @@ pub struct Strings {
     pub action_seek_back: String,
     pub action_seek_forward: String,
     pub action_pad: String,
+    pub action_jog_touch: String,
+    pub action_jog_wheel: String,
     pub control_note: String,
     pub control_cc: String,
     pub config_read_only_notice: String,

@@ -104,6 +104,14 @@ enum ControllerAction {
   CONTROLLER_ACTION_PAD_6 = 12;
   CONTROLLER_ACTION_PAD_7 = 13;
   CONTROLLER_ACTION_PAD_8 = 14;
+  // The top of the jog wheel being touched: the track is held while it is, and the wheel
+  // scratches it (see `PlaybackService.BeginScratch`). A note: down is a press, up a release.
+  CONTROLLER_ACTION_JOG_TOUCH = 15;
+  // The position of the jog wheel, which controllers report as a 14-bit number split over
+  // two control changes: the high 7 bits on the control bound here and the low 7 bits on
+  // the control 32 above it (the MIDI convention). Turning it scratches while the top is
+  // touched.
+  CONTROLLER_ACTION_JOG_WHEEL = 16;
 }
 
 enum ControlKind {

@@ -57,6 +57,8 @@ pub struct Status {
     pub position: Duration,
     /// The last track that failed to play since playback was last started.
     pub error: Option<TrackError>,
+    /// The track is held by a scratch; `position` is where the hand is.
+    pub scratching: bool,
 }
 
 #[derive(Debug)]
@@ -71,6 +73,12 @@ pub enum Command {
     Next,
     Previous,
     Seek(Duration),
+    /// Hold the track and start scratching it (see `scratch`).
+    ScratchBegin,
+    /// Drag the track by so many seconds (negative: back) while scratching.
+    ScratchMove(f64),
+    /// Let go of the track.
+    ScratchEnd,
     /// Do nothing but answer with the status as it is right now. (The status the engine
     /// publishes by itself is up to a tick old, which is too stale to draw a moving
     /// playhead from.)
@@ -132,6 +140,19 @@ impl<O: Output> Playback<O> {
                     self.output.seek(to);
                 }
             }
+            Command::ScratchBegin => {
+                if let Some(position) = self.position
+                    && let Err(detail) = self.output.scratch_begin()
+                {
+                    self.error = Some(TrackError {
+                        kind: ErrorKind::Failed,
+                        track_id: self.queue[position].track_id,
+                        detail,
+                    });
+                }
+            }
+            Command::ScratchMove(seconds) => self.output.scratch_move(seconds),
+            Command::ScratchEnd => self.output.scratch_end(),
             Command::Poll => {}
             Command::Close => {
                 self.stop();
@@ -175,6 +196,7 @@ impl<O: Output> Playback<O> {
                 Duration::ZERO
             },
             error: self.error.clone(),
+            scratching: item.is_some() && self.output.is_scratching(),
         }
     }
 
@@ -312,11 +334,17 @@ mod tests {
         closed: bool,
         /// How the last track was started.
         started: Start,
+        /// The scratch: whether one is going on, how far the hand has moved and whether it
+        /// can begin.
+        scratching: bool,
+        scratched: f64,
+        scratch_error: Option<String>,
     }
 
     impl Output for FakeOutput {
         fn play(&mut self, path: &Path, start: Start) -> Result<(), PlayError> {
             self.playing = None;
+            self.scratching = false;
             self.finished.set(false);
             if self.missing.contains(path) {
                 return Err(PlayError::NotFound(path.to_path_buf()));
@@ -344,9 +372,28 @@ mod tests {
         }
         fn stop(&mut self) {
             self.playing = None;
+            self.scratching = false;
         }
         fn close(&mut self) {
             self.closed = true;
+        }
+        fn scratch_begin(&mut self) -> Result<(), String> {
+            if let Some(error) = &self.scratch_error {
+                return Err(error.clone());
+            }
+            self.scratching = true;
+            Ok(())
+        }
+        fn scratch_move(&mut self, seconds: f64) {
+            if self.scratching {
+                self.scratched += seconds;
+            }
+        }
+        fn scratch_end(&mut self) {
+            self.scratching = false;
+        }
+        fn is_scratching(&self) -> bool {
+            self.scratching
         }
     }
 
@@ -590,5 +637,54 @@ mod tests {
         play(&mut playback, &[1], 0);
         playback.handle(Command::Seek(Duration::from_secs(9)));
         assert_eq!(playback.output.seeked, Some(Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn scratching_reaches_the_output_only_while_playing_and_shows_in_the_status() {
+        let (mut playback, _) = playback(&[]);
+        playback.handle(Command::ScratchBegin);
+        playback.handle(Command::ScratchMove(1.0));
+        assert!(!playback.output.scratching, "nothing to hold while stopped");
+        assert!(!playback.status().scratching);
+
+        play(&mut playback, &[1], 0);
+        assert!(!playback.status().scratching);
+        playback.handle(Command::ScratchBegin);
+        playback.handle(Command::ScratchMove(0.5));
+        playback.handle(Command::ScratchMove(-0.2));
+        assert!(playback.status().scratching);
+        assert!((playback.output.scratched - 0.3).abs() < 1e-9);
+
+        playback.handle(Command::ScratchEnd);
+        assert!(!playback.status().scratching);
+        // A move after letting go goes nowhere.
+        playback.handle(Command::ScratchMove(5.0));
+        assert!((playback.output.scratched - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_scratch_that_cannot_begin_is_reported() {
+        let (mut playback, _) = playback(&[]);
+        play(&mut playback, &[4], 0);
+        playback.output.scratch_error = Some("can't decode".to_owned());
+        playback.handle(Command::ScratchBegin);
+
+        let status = playback.status();
+        assert!(!status.scratching);
+        let error = status.error.unwrap();
+        assert_eq!(
+            (error.kind, error.track_id, error.detail.as_str()),
+            (ErrorKind::Failed, 4, "can't decode")
+        );
+    }
+
+    #[test]
+    fn starting_another_track_ends_the_scratch() {
+        let (mut playback, _) = playback(&[]);
+        play(&mut playback, &[1, 2], 0);
+        playback.handle(Command::ScratchBegin);
+        playback.handle(Command::Next);
+        assert!(!playback.status().scratching);
+        assert_eq!(playback.status().track_id, Some(2));
     }
 }

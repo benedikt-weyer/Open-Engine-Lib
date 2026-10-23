@@ -8,7 +8,11 @@
 //! right side (decks 2 and 4) on channel 6, with the same notes. Of the player's actions the
 //! transport buttons have their counterparts: play/pause, cue (as stop), the two track skip
 //! buttons, the two beat jump buttons (as seeking) and the eight performance pads, whatever
-//! pad mode the unit is in.
+//! pad mode the unit is in. The top of the jog wheel scratches: touching it is note 0x21 and
+//! its position is a 14-bit number on controllers 0x11 (high bits) and 0x31 (low bits), again
+//! from the Mixxx mapping. That only reads the position, so how many steps make a turn of the
+//! wheel (`JOG_STEPS_PER_TURN`) is a guess. The side of the wheel, which bends the pitch in
+//! Mixxx, is not used.
 
 use super::{Action, Control, Kind, Mapping, PADS};
 
@@ -39,6 +43,15 @@ fn sc_live_4(channel: u8) -> Mapping {
         number,
     };
     let mut mapping = Mapping::default();
+    mapping.bind(note(0x21), Action::JogTouch);
+    mapping.bind(
+        Control {
+            kind: Kind::Cc,
+            channel,
+            number: 0x11,
+        },
+        Action::JogWheel,
+    );
     for (action, number) in [
         (Action::Previous, 0x04),
         (Action::Next, 0x05),
@@ -65,7 +78,7 @@ mod tests {
         for name in NAMES {
             assert!(is_built_in(name));
             let mapping = mapping(name).unwrap();
-            assert_eq!(mapping.bindings.len(), 6 + PADS, "{name}");
+            assert_eq!(mapping.bindings.len(), 6 + 2 + PADS, "{name}");
             // Nothing a hand-edited file would have cleaned up.
             assert_eq!(mapping.clone().sanitized(), mapping, "{name}");
         }
@@ -86,6 +99,23 @@ mod tests {
             assert_eq!(
                 control(&left, action).number,
                 control(&right, action).number
+            );
+        }
+    }
+
+    #[test]
+    fn the_jog_wheel_scratches_on_the_notes_of_its_side() {
+        for (name, channel) in [(SC_LIVE_4_LEFT, 5), (SC_LIVE_4_RIGHT, 6)] {
+            let mapping = mapping(name).unwrap();
+            let touch = mapping.control_for(Action::JogTouch).unwrap();
+            let wheel = mapping.control_for(Action::JogWheel).unwrap();
+            assert_eq!(
+                (touch.kind, touch.channel, touch.number),
+                (Kind::Note, channel, 0x21)
+            );
+            assert_eq!(
+                (wheel.kind, wheel.channel, wheel.number),
+                (Kind::Cc, channel, 0x11)
             );
         }
     }

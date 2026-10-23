@@ -1068,6 +1068,27 @@ impl PlaybackService for Service {
         Ok(self.audio()?.seek(request.into_inner()).await?)
     }
 
+    async fn begin_scratch(
+        &self,
+        request: Request<api::BeginScratchRequest>,
+    ) -> Result<Response<api::PlaybackStatus>, Status> {
+        Ok(self.audio()?.begin_scratch(request.into_inner()).await?)
+    }
+
+    async fn move_scratch(
+        &self,
+        request: Request<api::MoveScratchRequest>,
+    ) -> Result<Response<api::PlaybackStatus>, Status> {
+        Ok(self.audio()?.move_scratch(request.into_inner()).await?)
+    }
+
+    async fn end_scratch(
+        &self,
+        request: Request<api::EndScratchRequest>,
+    ) -> Result<Response<api::PlaybackStatus>, Status> {
+        Ok(self.audio()?.end_scratch(request.into_inner()).await?)
+    }
+
     async fn get_status(
         &self,
         _: Request<api::GetStatusRequest>,

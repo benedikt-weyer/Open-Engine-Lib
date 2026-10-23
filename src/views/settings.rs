@@ -61,6 +61,8 @@ fn action_name(strings: &Strings, action: ControllerAction) -> String {
             &strings.action_seek_forward,
             &[("seconds", &CONTROLLER_SEEK_SECONDS)],
         ),
+        ControllerAction::JogTouch => strings.action_jog_touch.clone(),
+        ControllerAction::JogWheel => strings.action_jog_wheel.clone(),
         pad => fill(
             &strings.action_pad,
             &[(

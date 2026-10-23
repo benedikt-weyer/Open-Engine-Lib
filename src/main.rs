@@ -46,6 +46,8 @@ use waveform::{Waveform, Waveforms};
 
 /// How often the playback position is fetched from the backend while playing.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How often the player is asked where it is while the jog wheel scratches.
+const SCRATCH_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How long after a library opens to wait with scrolling its track list to the right place.
 const REVEAL_DELAY: Duration = Duration::from_millis(150);
 /// How often to look for USB drives that were plugged in or removed.
@@ -126,6 +128,9 @@ struct State {
     status: PlaybackStatus,
     /// The playhead's position, running on between the reports in `status`.
     clock: Clock,
+    /// Where in the track the zoomed waveform is being dragged to (scratching with the
+    /// mouse), in seconds. The clock follows it at once, the backend's reports wait.
+    scratch: Option<f64>,
     /// The waveform and beatgrid of the playing track.
     waveforms: Waveforms,
     /// The cues of the tracks played.
@@ -348,6 +353,11 @@ pub enum Message {
     Next,
     Previous,
     Tick,
+    /// The zoomed waveform was dragged: the track is held (scratching begins), moved by so
+    /// many seconds (negative: back), and let go of.
+    ScratchStart,
+    ScratchBy(f64),
+    ScratchEnd,
     /// Jump to a point of the track, in seconds (from clicking the waveform overview).
     SeekTo(f32),
     /// A pad of the playing track was clicked: jump to its cue.
@@ -434,6 +444,7 @@ impl State {
             recents_error: None,
             status: PlaybackStatus::default(),
             clock: Clock::new(Instant::now()),
+            scratch: None,
             waveforms: Waveforms::default(),
             cues: TrackCues::default(),
             cues_busy: false,
@@ -479,7 +490,13 @@ impl State {
             _ => false,
         };
         let poll = if watched {
-            iced::time::every(POLL_INTERVAL).map(|_| Message::Tick)
+            // The jog wheel moves the waveform, which has to keep up with it.
+            let interval = if self.scratched_by_controller() {
+                SCRATCH_POLL_INTERVAL
+            } else {
+                POLL_INTERVAL
+            };
+            iced::time::every(interval).map(|_| Message::Tick)
         } else {
             Subscription::none()
         };
@@ -1028,6 +1045,11 @@ impl State {
         iced::exit()
     }
 
+    /// The DJ controller's jog wheel is scratching the track.
+    fn scratched_by_controller(&self) -> bool {
+        self.status.scratching && self.scratch.is_none()
+    }
+
     fn is_stopped(&self) -> bool {
         !matches!(
             self.status.state(),
@@ -1197,6 +1219,9 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::SetStars { .. }
         | Message::ShowCollection
         | Message::ShowPlaylist(..)
+        | Message::ScratchBy(..)
+        | Message::ScratchEnd
+        | Message::ScratchStart
         | Message::Status(..)
         | Message::Stop
         | Message::Tick
@@ -1473,10 +1498,15 @@ fn open_library<'a>(
                 cues: track_cues,
                 loops: track_loops,
             },
-            // Trailing the player by the set delay, to line up with what is heard.
-            state
-                .clock
-                .delayed(f64::from(state.config.effective().waveform_delay_ms) / 1000.0),
+            // Trailing the player by the set delay, to line up with what is heard (a scratch
+            // is heard as it is moved).
+            if state.scratch.is_some() || state.status.scratching {
+                state.clock
+            } else {
+                state
+                    .clock
+                    .delayed(f64::from(state.config.effective().waveform_delay_ms) / 1000.0)
+            },
             colors,
             language,
         )
@@ -1658,6 +1688,7 @@ mod tests {
             recents_error: None,
             status: PlaybackStatus::default(),
             clock: Clock::new(Instant::now()),
+            scratch: None,
             waveforms: Waveforms::default(),
             cues: TrackCues::default(),
             cues_busy: false,
@@ -1786,6 +1817,7 @@ mod tests {
             track_id: Some(2),
             position_ms: 61_250,
             error: None,
+            scratching: false,
         };
 
         assert_eq!(
@@ -1919,6 +1951,7 @@ mod tests {
             track_id: Some(2),
             position_ms: 42_000,
             error: None,
+            scratching: false,
         };
         state.saving = Some("/media/NEW".into());
 
@@ -2889,11 +2922,96 @@ mod tests {
             track_id: Some(1),
             position_ms: 10_000,
             error: None,
+            scratching: false,
         };
         assert!(state.cues.claim(1));
         let generation = state.cues.generation();
         let _ = handle(&mut state, Message::CuesLoaded(generation, 1, Ok(cues)));
         state
+    }
+
+    fn status_at(seconds: u64, state: PlaybackState, scratching: bool) -> PlaybackStatus {
+        PlaybackStatus {
+            state: state.into(),
+            queue_position: Some(0),
+            track_id: Some(1),
+            position_ms: seconds * 1000,
+            error: None,
+            scratching,
+        }
+    }
+
+    #[test]
+    fn dragging_the_waveform_moves_the_playhead_by_hand_and_the_backends_reports_wait() {
+        let mut state = state_playing_with_cues(vec![]);
+        assert!(state.waveforms.claim(1));
+        let generation = state.waveforms.generation();
+        state.waveforms.set(
+            generation,
+            1,
+            Some(Arc::new(Waveform::new(100.0, 100.0, vec![], None))),
+        );
+        let _ = handle(
+            &mut state,
+            Message::Status(Ok(status_at(10, PlaybackState::Paused, false))),
+        );
+        let at = |state: &State| state.clock.position(Instant::now(), 100.0);
+        assert!((at(&state) - 10.0).abs() < 1e-6);
+
+        let _ = handle(&mut state, Message::ScratchStart);
+        assert_eq!(state.scratch, Some(10.0));
+        let _ = handle(&mut state, Message::ScratchBy(2.5));
+        assert_eq!(state.scratch, Some(12.5));
+        assert!((at(&state) - 12.5).abs() < 1e-6);
+
+        // A report that left before the last moves is not believed over the hand.
+        let _ = handle(
+            &mut state,
+            Message::Status(Ok(status_at(10, PlaybackState::Paused, true))),
+        );
+        assert!((at(&state) - 12.5).abs() < 1e-6);
+        assert!(state.status.scratching);
+
+        // The track has its ends.
+        let _ = handle(&mut state, Message::ScratchBy(-50.0));
+        assert_eq!(state.scratch, Some(0.0));
+        let _ = handle(&mut state, Message::ScratchBy(500.0));
+        assert_eq!(state.scratch, Some(100.0));
+
+        // Let go: the backend says where the track went on from, and that is believed.
+        let _ = handle(&mut state, Message::ScratchEnd);
+        assert_eq!(state.scratch, None);
+        let _ = handle(
+            &mut state,
+            Message::Status(Ok(status_at(40, PlaybackState::Playing, false))),
+        );
+        assert!((at(&state) - 40.0).abs() < 1e-6);
+        assert!(state.clock.is_running());
+    }
+
+    #[test]
+    fn a_drag_without_a_track_or_its_waveform_scratches_nothing() {
+        // (No waveform has been loaded: the track's length is not known.)
+        let mut state = state_playing_with_cues(vec![]);
+        let _ = handle(&mut state, Message::ScratchStart);
+        assert_eq!(state.scratch, None);
+        let _ = handle(&mut state, Message::ScratchBy(1.0));
+        let _ = handle(&mut state, Message::ScratchEnd);
+        assert_eq!(state.scratch, None);
+
+        let mut stopped = super::tests::state();
+        let _ = handle(&mut stopped, Message::ScratchStart);
+        assert_eq!(stopped.scratch, None);
+    }
+
+    #[test]
+    fn only_the_controllers_scratch_speeds_up_the_polling() {
+        let mut state = state_playing_with_cues(vec![]);
+        state.status = status_at(10, PlaybackState::Paused, true);
+        assert!(state.scratched_by_controller());
+        // The mouse's scratch is followed locally.
+        state.scratch = Some(10.0);
+        assert!(!state.scratched_by_controller());
     }
 
     #[test]
@@ -3178,6 +3296,7 @@ mod tests {
             track_id: Some(1),
             position_ms: 10_000,
             error: None,
+            scratching: false,
         };
         assert!(state.loops.claim(1));
         let generation = state.loops.generation();
@@ -3475,6 +3594,7 @@ mod tests {
             track_id: Some(1),
             position_ms: 1_000,
             error: None,
+            scratching: false,
         };
         let _ = state.fetch_cues();
         let _ = state.fetch_loops();

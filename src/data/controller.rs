@@ -7,7 +7,7 @@ use open_engine_api::v1::{
 };
 
 /// In the order they are shown.
-pub const ACTIONS: [ControllerAction; 14] = [
+pub const ACTIONS: [ControllerAction; 16] = [
     ControllerAction::PlayPause,
     ControllerAction::Stop,
     ControllerAction::Previous,
@@ -22,6 +22,8 @@ pub const ACTIONS: [ControllerAction; 14] = [
     ControllerAction::Pad6,
     ControllerAction::Pad7,
     ControllerAction::Pad8,
+    ControllerAction::JogTouch,
+    ControllerAction::JogWheel,
 ];
 
 /// The pad (0 to 7) an action is for.

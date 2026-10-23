@@ -7,18 +7,28 @@ use std::time::Duration;
 use open_engine_api::CONTROLLER_SEEK_SECONDS;
 use open_engine_api::v1 as api;
 use open_engine_api::v1::controller_service_server::ControllerService;
-use open_engine_api::v1::midi_event::Event;
+use open_engine_api::v1::midi_event::Event as MidiEvent;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use super::{Service, edit_status};
-use crate::controller::{Action, Input, ProfileError};
+use crate::controller::{Action, Event, Input, ProfileError, jog_seconds};
 use crate::cues::Cue;
 
 /// Changes that come in quick succession (a jog wheel makes hundreds of messages a second)
 /// are told to a watcher as one.
 const WATCH_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Where the jog wheel is and whether a hand is on its top.
+#[derive(Debug, Default)]
+struct Jog {
+    /// The last position it reported, which the next one is measured from. (Kept while
+    /// nothing is touching it too, so the first move after a touch is a move.)
+    position: Option<u16>,
+    /// The track is held for scratching.
+    scratching: bool,
+}
 
 impl Service {
     /// Starts the task that listens to the controllers, unless one is running.
@@ -33,6 +43,44 @@ impl Service {
     fn stop_listening(&self) {
         if let Some(task) = self.0.listener.lock().expect("listener lock").take() {
             task.abort();
+            // A hand on the jog wheel that is never let go of would hold the track for good.
+            if let Ok(mut audio) = self.audio() {
+                tokio::spawn(async move { audio.end_scratch(api::EndScratchRequest {}).await });
+            }
+        }
+    }
+
+    /// Does what a message from the controller asks for.
+    async fn handle(&self, event: Event, jog: &mut Jog) -> Result<(), Status> {
+        match event {
+            Event::Press(action) => self.perform(action).await,
+            Event::JogTouch(true) => {
+                let status = self
+                    .audio()?
+                    .begin_scratch(api::BeginScratchRequest {})
+                    .await?
+                    .into_inner();
+                jog.scratching = status.scratching;
+                Ok(())
+            }
+            Event::JogTouch(false) => {
+                if std::mem::take(&mut jog.scratching) {
+                    self.audio()?.end_scratch(api::EndScratchRequest {}).await?;
+                }
+                Ok(())
+            }
+            Event::JogPosition(position) => {
+                let before = jog.position.replace(position);
+                if let (true, Some(before)) = (jog.scratching, before) {
+                    let delta_seconds = jog_seconds(before, position);
+                    if delta_seconds != 0.0 {
+                        self.audio()?
+                            .move_scratch(api::MoveScratchRequest { delta_seconds })
+                            .await?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -70,6 +118,8 @@ impl Service {
                 audio.seek(api::SeekRequest { position_ms }).await?;
             }
             Action::Pad(slot) => self.press_pad(slot).await?,
+            // (They are told as `Event::Jog...`, never as presses.)
+            Action::JogTouch | Action::JogWheel => {}
         }
         Ok(())
     }
@@ -123,6 +173,7 @@ async fn listen(service: Service) {
         },
         Err(status) => return controller.unavailable(status.message().to_owned()),
     };
+    let mut jog = Jog::default();
     loop {
         let event = match messages.message().await {
             Ok(Some(event)) => event,
@@ -130,16 +181,16 @@ async fn listen(service: Service) {
             Err(status) => return controller.unavailable(status.message().to_owned()),
         };
         match event.event {
-            Some(Event::Input(input)) => {
-                let action = Input::from_api(&input).and_then(|input| controller.input(input));
-                if let Some(action) = action
-                    && let Err(status) = service.perform(action).await
+            Some(MidiEvent::Input(input)) => {
+                let event = Input::from_api(&input).and_then(|input| controller.input(input));
+                if let Some(event) = event
+                    && let Err(status) = service.handle(event, &mut jog).await
                 {
-                    eprintln!("open-engine-backend: {action:?}: {}", status.message());
+                    eprintln!("open-engine-backend: {event:?}: {}", status.message());
                 }
             }
-            Some(Event::Devices(devices)) => controller.set_devices(devices.names),
-            Some(Event::Unavailable(reason)) => return controller.unavailable(reason),
+            Some(MidiEvent::Devices(devices)) => controller.set_devices(devices.names),
+            Some(MidiEvent::Unavailable(reason)) => return controller.unavailable(reason),
             None => {}
         }
     }

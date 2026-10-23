@@ -21,6 +21,15 @@ service PlaybackService {
   // Jumps within the current track. Formats that can't seek ignore it.
   rpc Seek(SeekRequest) returns (PlaybackStatus);
   rpc GetStatus(GetStatusRequest) returns (PlaybackStatus);
+  // Scratching, like a hand on a record: holds the track where it is (it is silent and
+  // reported as paused, with `scratching` set) until EndScratch, and MoveScratch drags it
+  // forwards or backwards, which is heard at the speed of the movement. Only a stretch of
+  // the track around the place where it was held can be scratched (about 15 seconds either
+  // way). EndScratch resumes playing from where the track was left if it was playing when
+  // the scratch began. Does nothing while stopped; starting another track ends it.
+  rpc BeginScratch(BeginScratchRequest) returns (PlaybackStatus);
+  rpc MoveScratch(MoveScratchRequest) returns (PlaybackStatus);
+  rpc EndScratch(EndScratchRequest) returns (PlaybackStatus);
 }
 
 message PlayRequest {
@@ -44,6 +53,16 @@ message SeekRequest {
 
 message GetStatusRequest {}
 
+message BeginScratchRequest {}
+
+message MoveScratchRequest {
+  // How far to move the track, in seconds: negative is backwards. Ignored unless a scratch
+  // is going on.
+  double delta_seconds = 1;
+}
+
+message EndScratchRequest {}
+
 message PlaybackStatus {
   PlaybackState state = 1;
   // Index into the queue and the id of the track being played. Unset while stopped.
@@ -53,6 +72,9 @@ message PlaybackStatus {
   // The last track that failed to play since playback was last started. Cleared
   // by the next Play.
   optional PlaybackError error = 5;
+  // The track is being scratched: `position_ms` is where the hand is, and the state is
+  // paused whatever it was before.
+  bool scratching = 6;
 }
 
 enum PlaybackState {

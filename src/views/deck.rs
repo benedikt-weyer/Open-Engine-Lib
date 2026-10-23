@@ -41,6 +41,9 @@ const OVERVIEW_HEIGHT: f32 = 44.0;
 const PIECE_SECONDS: f64 = 12.0;
 /// Room around a piece for what is drawn a little over its edge (half a beat line).
 const PIECE_MARGIN: f32 = 4.0;
+/// How far (in pixels) the pointer has to move with the button down before the waveform is
+/// taken to be dragged, so that a click that slips a little does not hold the track.
+const DRAG_SLOP: f32 = 3.0;
 /// The overview only needs to follow the playhead a few times a second.
 const OVERVIEW_REDRAW: Duration = Duration::from_millis(100);
 
@@ -290,9 +293,30 @@ struct ZoomState {
     /// By piece: the geometry of `PIECE_SECONDS` of the track (outline and beatgrid),
     /// made when the piece first comes into view.
     pieces: RefCell<Vec<canvas::Cache>>,
+    /// The button is down on the waveform: dragging it scratches the track.
+    drag: Option<Drag>,
 }
 
-/// The scrolling waveform around the playhead.
+/// A drag of the zoomed waveform, in pixels from its left edge.
+#[derive(Debug, Clone, Copy)]
+struct Drag {
+    /// Where the button went down.
+    start: f32,
+    /// Where the pointer was when the track was last moved.
+    at: f32,
+    /// Moved far enough to scratch.
+    scratching: bool,
+}
+
+/// How many seconds of the track the waveform moves under the playhead when it is dragged
+/// by `pixels` to the right: the track goes back, as a record turned by hand would.
+fn scratched_seconds(pixels: f32, pixels_per_second: f64) -> f64 {
+    -f64::from(pixels) / pixels_per_second
+}
+
+/// The scrolling waveform around the playhead. Dragging it with the mouse scratches the
+/// track: the waveform follows the pointer and the track is heard going forwards and
+/// backwards with it.
 ///
 /// Drawing the outline of a few seconds of waveform means building and tessellating
 /// thousands of points, which done anew for every frame took up a fifth of the time
@@ -330,20 +354,81 @@ impl<'a> Widget<Message, Theme, Renderer> for ScrollingWaveform<'a> {
 
     fn update(
         &mut self,
-        _tree: &mut Tree,
+        tree: &mut Tree,
         event: &Event,
-        _layout: Layout<'_>,
-        _cursor: mouse::Cursor,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
     ) {
+        let bounds = layout.bounds();
+        let pixels_per_second = f64::from(bounds.width) / VISIBLE_SECONDS;
+        let state = tree.state.downcast_mut::<ZoomState>();
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(point) = cursor.position_in(bounds) {
+                    state.drag = Some(Drag {
+                        start: point.x,
+                        at: point.x,
+                        scratching: false,
+                    });
+                    shell.capture_event();
+                }
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                if let Some(drag) = &mut state.drag {
+                    // (Also when the pointer is off the waveform: the drag goes on.)
+                    let x = position.x - bounds.x;
+                    if !drag.scratching && (x - drag.start).abs() >= DRAG_SLOP {
+                        drag.scratching = true;
+                        shell.publish(Message::ScratchStart);
+                    }
+                    if drag.scratching {
+                        let seconds = scratched_seconds(x - drag.at, pixels_per_second);
+                        drag.at = x;
+                        if seconds != 0.0 {
+                            shell.publish(Message::ScratchBy(seconds));
+                        }
+                        shell.capture_event();
+                    }
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if let Some(drag) = state.drag.take()
+                    && drag.scratching
+                {
+                    shell.publish(Message::ScratchEnd);
+                    shell.capture_event();
+                }
+            }
+            _ => {}
+        }
+
         // While playing, draw the next frame as soon as the last one is out.
         if self.clock.is_running()
             && matches!(event, Event::Window(window::Event::RedrawRequested(_)))
         {
             shell.request_redraw();
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let state = tree.state.downcast_ref::<ZoomState>();
+        if state.drag.is_some_and(|drag| drag.scratching) {
+            mouse::Interaction::Grabbing
+        } else if cursor.is_over(layout.bounds()) {
+            mouse::Interaction::Grab
+        } else {
+            mouse::Interaction::default()
         }
     }
 
@@ -747,5 +832,18 @@ impl canvas::Program<Message> for Overview<'_> {
         } else {
             mouse::Interaction::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dragging_the_waveform_right_takes_the_track_back() {
+        // 6 seconds across 600 pixels: 100 pixels a second.
+        assert_eq!(scratched_seconds(50.0, 100.0), -0.5);
+        assert_eq!(scratched_seconds(-100.0, 100.0), 1.0);
+        assert_eq!(scratched_seconds(0.0, 100.0), 0.0);
     }
 }

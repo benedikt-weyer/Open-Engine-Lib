@@ -14,6 +14,7 @@
 mod engine;
 mod midi;
 mod player;
+mod scratch;
 mod service;
 mod waveform;
 
