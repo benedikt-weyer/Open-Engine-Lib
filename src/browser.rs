@@ -18,6 +18,7 @@ use crate::config::Language;
 use crate::covers::Covers;
 use crate::i18n::fill;
 use crate::model::{Library, Lighting, Playlist, Track, stars_of};
+use crate::reachable::Reachability;
 
 /// Height of one track row. Fixed, so only the rows in view have to be built.
 const ROW_HEIGHT: f32 = 32.0;
@@ -31,6 +32,8 @@ const REVEAL_MARGIN: usize = 3;
 /// enough rows for a tall window.
 const MIN_VIEWPORT: f32 = 1600.0;
 const INDENT: f32 = 16.0;
+/// Side of the sign that marks a path that can't be reached.
+const WARNING_ICON: f32 = 14.0;
 /// Side of the icon that marks a smart playlist.
 const SMART_ICON: f32 = 14.0;
 /// The width of the place before a playlist's title: the arrow of a folder, or the mark
@@ -167,6 +170,17 @@ impl Browser {
         let visible = (self.viewport_height.max(MIN_VIEWPORT) / ROW_HEIGHT).ceil() as usize;
         let last = (first + visible + 2 * ROW_BUFFER).min(self.tracks().len());
         first.min(last)..last
+    }
+
+    /// The locations and saved origins of the rows that are built, which are the paths to
+    /// have checked.
+    pub fn visible_paths(&self) -> impl Iterator<Item = &str> + '_ {
+        let list = self.tracks();
+        self.visible_rows().flat_map(move |row| {
+            let track = &self.library.tracks[list[row]];
+            let location = (!track.streaming).then_some(track.location.as_str());
+            [location, self.origin(track)].into_iter().flatten()
+        })
     }
 
     /// The covers of the rows that are built, which are the ones to have ready.
@@ -499,6 +513,7 @@ pub fn tracks<'a>(
     browser: &'a Browser,
     playing: Option<usize>,
     covers: &Covers,
+    reachable: &Reachability,
     widths: &ColumnWidths,
     language: Language,
 ) -> Element<'a, Message> {
@@ -535,6 +550,10 @@ pub fn tracks<'a>(
             RowState {
                 selected: browser.selected == Some(row_index),
                 origin: browser.origin(track),
+                location_reachable: reachable.get(&track.location),
+                origin_reachable: browser
+                    .origin(track)
+                    .and_then(|origin| reachable.get(origin)),
                 playing: playing == Some(row_index),
                 stars: stars_of(browser.rating(track.id)),
             },
@@ -625,19 +644,97 @@ fn lighting_cell<'a>(track: &'a Track, language: Language) -> Element<'a, Messag
     .into()
 }
 
-/// Where the track came from, as saved; pointing at it shows all of a long path.
-fn origin_cell<'a>(origin: Option<&'a str>, language: Language) -> Element<'a, Message> {
+/// Where the track came from, as saved.
+fn origin_cell<'a>(
+    origin: Option<&'a str>,
+    reachable: Option<bool>,
+    language: Language,
+) -> Element<'a, Message> {
     match origin {
-        Some(origin) => tooltip(
-            cell(origin),
-            text(origin).size(13),
-            tooltip::Position::FollowCursor,
-        )
-        .style(container::rounded_box)
-        .into(),
+        Some(origin) => path_cell(origin, reachable, language),
         None => cell(&language.strings().origin_none)
             .style(text::secondary)
             .into(),
+    }
+}
+
+/// A path. One that can't be reached (`reachable` is `Some(false)`) is red with a warning
+/// sign in front. Pointing at it shows all of a long path, and says so if it can't be reached.
+fn path_cell<'a>(
+    path: &'a str,
+    reachable: Option<bool>,
+    language: Language,
+) -> Element<'a, Message> {
+    if reachable != Some(false) {
+        return tooltip(
+            cell(path),
+            text(path).size(13),
+            tooltip::Position::FollowCursor,
+        )
+        .style(container::rounded_box)
+        .into();
+    }
+    let shown = row![
+        canvas(WarningIcon).width(WARNING_ICON).height(WARNING_ICON),
+        cell(path).style(text::danger),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    tooltip(
+        shown,
+        column![
+            text(path).size(13),
+            text(&language.strings().path_unreachable)
+                .size(13)
+                .style(text::danger),
+        ],
+        tooltip::Position::FollowCursor,
+    )
+    .style(container::rounded_box)
+    .into()
+}
+
+/// The mark of a path that can't be reached: a triangle with an exclamation mark, in red.
+/// Drawn rather than written as a character so that it looks the same whatever fonts
+/// there are.
+struct WarningIcon;
+
+impl canvas::Program<Message> for WarningIcon {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let palette = theme.extended_palette();
+        let side = bounds.width.min(bounds.height);
+        let point = |x: f32, y: f32| Point::new(x * side, y * side);
+
+        let mut frame = Frame::new(renderer, Size::new(side, side));
+        let triangle = Path::new(|builder| {
+            builder.move_to(point(0.5, 0.06));
+            builder.line_to(point(0.97, 0.92));
+            builder.line_to(point(0.03, 0.92));
+            builder.close();
+        });
+        frame.fill(&triangle, palette.danger.base.color);
+
+        // The mark in it, in the color that is read on red.
+        let ink = palette.danger.base.text;
+        let bar = Path::new(|builder| {
+            builder.move_to(point(0.46, 0.34));
+            builder.line_to(point(0.54, 0.34));
+            builder.line_to(point(0.53, 0.64));
+            builder.line_to(point(0.47, 0.64));
+            builder.close();
+        });
+        frame.fill(&bar, ink);
+        frame.fill(&Path::circle(point(0.5, 0.77), 0.05 * side), ink);
+        vec![frame.into_geometry()]
     }
 }
 
@@ -646,6 +743,9 @@ struct RowState<'a> {
     selected: bool,
     /// Where the track's file was when its origin was saved.
     origin: Option<&'a str>,
+    /// Whether the location and the origin could be reached, if that is known.
+    location_reachable: Option<bool>,
+    origin_reachable: Option<bool>,
     playing: bool,
     /// The track's rating as 0 to 5 stars.
     stars: u8,
@@ -662,6 +762,8 @@ fn track_row<'a>(
     let RowState {
         selected,
         origin,
+        location_reachable,
+        origin_reachable,
         playing,
         stars,
     } = state;
@@ -694,13 +796,7 @@ fn track_row<'a>(
             .style(text::secondary)
             .into()
     } else {
-        tooltip(
-            cell(&track.location),
-            text(&track.location).size(13),
-            tooltip::Position::FollowCursor,
-        )
-        .style(container::rounded_box)
-        .into()
+        path_cell(&track.location, location_reachable, language)
     };
 
     let cells = line(
@@ -715,7 +811,7 @@ fn track_row<'a>(
             style(cell(length)),
             stars_cell(track, stars, track.streaming),
             lighting_cell(track, language),
-            origin_cell(origin, language),
+            origin_cell(origin, origin_reachable, language),
         ],
         location,
         widths,

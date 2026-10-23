@@ -16,6 +16,7 @@ mod model;
 mod navbar;
 mod player_bar;
 mod playlist_dialog;
+mod reachable;
 mod recent;
 mod session;
 mod settings;
@@ -42,6 +43,7 @@ use library_sync_view::Stage as LibrarySyncStage;
 use menubar::MenuItem;
 use model::Library;
 use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
+use reachable::Reachability;
 use recent::Recents;
 use session::{Session, SessionStore};
 use sync_view::Stage as SyncStage;
@@ -119,6 +121,8 @@ struct State {
     scanning_drives: bool,
     /// Cover images fetched for the tracks in view and the one playing.
     covers: Covers,
+    /// Whether the locations and origins in view can be reached.
+    reachable: Reachability,
     /// Why the recent libraries could not be saved.
     recents_error: Option<String>,
     /// What the backend last said about playback, and when.
@@ -279,6 +283,8 @@ pub enum Message {
     Status(Result<PlaybackStatus, String>),
     /// A fetched cover: the covers' generation it was asked in, its id and its image.
     CoverLoaded(u32, u32, Result<Option<Vec<u8>>, String>),
+    /// Which of the paths in view can be reached, in the generation they were asked in.
+    PathsChecked(u32, Vec<(String, bool)>),
     /// A fetched waveform: the waveforms' generation it was asked in, the track id and the waveform.
     WaveformLoaded(u32, u32, Result<Option<Arc<Waveform>>, String>),
 }
@@ -313,6 +319,7 @@ impl State {
             drives: Vec::new(),
             scanning_drives: true,
             covers: Covers::default(),
+            reachable: Reachability::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
             clock: Clock::new(Instant::now()),
@@ -446,6 +453,7 @@ impl State {
         self.restore = restore;
         self.reset_playback();
         self.covers.clear();
+        self.reachable.clear();
         self.waveforms.clear();
         self.sync = None;
         self.library = LibraryState::Opening(path.clone());
@@ -618,6 +626,21 @@ impl State {
         }))
     }
 
+    /// Checks the locations and origins of the rows in view that have not been checked.
+    fn check_paths(&mut self) -> Task<Message> {
+        let LibraryState::Open(browser) = &self.library else {
+            return Task::none();
+        };
+        let paths = self.reachable.claim_unrequested(browser.visible_paths());
+        if paths.is_empty() {
+            return Task::none();
+        }
+        let generation = self.reachable.generation();
+        Task::perform(reachable::check(paths), move |answers| {
+            Message::PathsChecked(generation, answers)
+        })
+    }
+
     /// Asks the backend for the waveform of the track in the player, if it has not been
     /// asked for yet.
     fn fetch_waveform(&mut self) -> Task<Message> {
@@ -679,7 +702,12 @@ fn start_backend() -> Task<Message> {
 fn update(state: &mut State, message: Message) -> Task<Message> {
     let task = handle(state, message);
     state.save_session(false);
-    Task::batch([task, state.fetch_covers(), state.fetch_waveform()])
+    Task::batch([
+        task,
+        state.fetch_covers(),
+        state.fetch_waveform(),
+        state.check_paths(),
+    ])
 }
 
 fn handle(state: &mut State, message: Message) -> Task<Message> {
@@ -1313,6 +1341,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.library = LibraryState::Closed { error: None };
             state.reset_playback();
             state.covers.clear();
+            state.reachable.clear();
             state.waveforms.clear();
             state.sync = None;
             state.library_sync = None;
@@ -1331,6 +1360,10 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::DrivesFound(drives) => {
             state.scanning_drives = false;
+            // A drive coming or going changes what can be reached.
+            if state.drives != drives {
+                state.reachable.clear();
+            }
             state.drives = drives;
         }
         Message::OpenRecent(path) | Message::OpenDrive(path) => {
@@ -1455,6 +1488,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 state.backend_error = Some(error);
             }
         },
+        Message::PathsChecked(generation, answers) => state.reachable.set(generation, answers),
         Message::CoverLoaded(generation, id, result) => match result {
             Ok(image) => state.covers.set(generation, id, image),
             Err(error) => {
@@ -1680,6 +1714,7 @@ fn open_library<'a>(
             browser,
             state.playing_row(browser),
             &state.covers,
+            &state.reachable,
             &state.columns.widths,
             language,
         ),
@@ -1808,6 +1843,7 @@ mod tests {
             drives: Vec::new(),
             scanning_drives: false,
             covers: Covers::default(),
+            reachable: Reachability::default(),
             recents_error: None,
             status: PlaybackStatus::default(),
             clock: Clock::new(Instant::now()),
@@ -2511,6 +2547,37 @@ mod tests {
         assert!(matches!(state.library_sync, Some(LibrarySyncStage::Pick)));
         let _ = handle(&mut state, Message::LibrarySyncClose);
         assert!(state.library_sync.is_none());
+    }
+
+    #[test]
+    fn a_drive_coming_or_going_makes_the_paths_be_checked_again() {
+        let mut state = state();
+        let generation = state.reachable.generation();
+        state.reachable.claim_unrequested(["/media/STICK/a.flac"]);
+        let _ = handle(
+            &mut state,
+            Message::PathsChecked(generation, vec![("/media/STICK/a.flac".into(), false)]),
+        );
+        assert_eq!(state.reachable.get("/media/STICK/a.flac"), Some(false));
+
+        // The same drives again change nothing.
+        let _ = handle(&mut state, Message::DrivesFound(Vec::new()));
+        assert_eq!(state.reachable.get("/media/STICK/a.flac"), Some(false));
+
+        // A drive that appears may bring the file back.
+        let _ = handle(
+            &mut state,
+            Message::DrivesFound(vec![drives::Drive {
+                name: "STICK".into(),
+                mount: "/media/STICK".into(),
+                library: None,
+            }]),
+        );
+        assert_eq!(state.reachable.get("/media/STICK/a.flac"), None);
+        assert_eq!(
+            state.reachable.claim_unrequested(["/media/STICK/a.flac"]),
+            ["/media/STICK/a.flac"]
+        );
     }
 
     #[test]

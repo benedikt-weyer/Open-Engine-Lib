@@ -186,3 +186,4 @@ libsync_writing: Playlists werden geschrieben…
 libsync_run_failed: "Der Abgleich ist fehlgeschlagen: {error}"
 libsync_done: "Fertig: {count} Playlists geändert. Die vorherige Datenbank der anderen Bibliothek liegt in {backup}"
 libsync_none_written: Es musste nichts geschrieben werden.
+path_unreachable: "Nicht erreichbar. Ist das Laufwerk angeschlossen?"
