@@ -10,6 +10,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 || state.library_sync.is_some()
                 || state.smart.is_some()
                 || state.playlist_dialog.is_some()
+                || state.origin_prefix.is_some()
                 || state.cue_editor.is_some()
                 || state.loop_editor.is_some();
             // (The button starts in the usual direction; "compare again" keeps it.)

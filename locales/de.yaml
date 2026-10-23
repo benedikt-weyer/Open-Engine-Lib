@@ -215,6 +215,21 @@ col_origin: Herkunft
 origin_migrate: Orte als Herkunft speichern
 origin_migrate_tip: "Speichert den aktuellen Ort der Datei jedes Titels als Herkunft, wenn noch keine gespeichert ist. Die Herkunft liegt in der eigenen Datenbank von Open Engine Lib, nicht in der Engine-Bibliothek."
 origin_migrated: "Herkunft gespeichert: {saved} neu, {kept} schon bekannt, {skipped} ohne Datei hier."
+origin_prefix_button: Herkunftsordner ändern…
+origin_prefix_tip: "Ersetzt den Ordner, mit dem alle gespeicherten Herkünfte beginnen, durch einen anderen, zum Beispiel nachdem die Musik verschoben wurde. Am neuen Ort muss noch nichts liegen."
+origin_prefix_title: Herkunftsordner ändern
+origin_prefix_loading: Gespeicherte Herkünfte werden gelesen…
+origin_prefix_none: "Es sind noch keine Herkünfte gespeichert. „Orte als Herkunft speichern“ speichert sie."
+origin_prefix_nocommon: Die gespeicherten Herkünfte haben keinen gemeinsamen Ordner, es gibt also keinen Ordner zum Ersetzen.
+origin_prefix_common: "Der Ordner, in dem alle {count} gespeicherten Herkünfte liegen:"
+origin_prefix_new: "Durch diesen Ordner ersetzen:"
+origin_prefix_placeholder: Neuer Ordner
+origin_prefix_browse: Durchsuchen…
+origin_prefix_note: "Jede Herkunft, die mit dem Ordner oben beginnt, bekommt stattdessen den neuen Ordner. Es wird nicht geprüft, ob die Dateien am neuen Ort liegen. Die Änderung wird in der Arbeitskopie gemacht; „Mit der Quelle abgleichen“ schreibt sie in die Bibliothek."
+origin_prefix_apply: Änderungen übernehmen
+origin_prefix_changed: "Herkünfte geändert: {changed}."
+origin_prefix_failed: "Die Herkünfte konnten nicht geändert werden: {error}"
+origin_prefix_load_failed: "Die Herkünfte konnten nicht gelesen werden: {error}"
 origin_none: Nicht gespeichert
 sync_playlist_missing: "{count} nicht in der anderen Bibliothek"
 libsync_button: Abgleichen mit…

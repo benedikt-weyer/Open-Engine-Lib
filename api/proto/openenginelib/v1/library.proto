@@ -99,6 +99,18 @@ service LibraryService {
   // Errors: FAILED_PRECONDITION if no library is open, INTERNAL if the database can't
   // be opened or written.
   rpc MigrateOrigins(MigrateOriginsRequest) returns (MigrateOriginsResponse);
+  // The folder that all saved origins are in (whole folders in common, so `/a/b` and
+  // `/a/c` give `/a`; `/` if they only share the root) and how many origins there are.
+  // Empty and 0 if none is saved. Nothing changes.
+  // Errors: FAILED_PRECONDITION if no library is open or it is a folder of music.
+  rpc GetOriginPrefix(GetOriginPrefixRequest) returns (GetOriginPrefixResponse);
+  // Replaces the leading folders `from` of every saved origin by `to` in the working copy
+  // (`/old` in `/old/a.flac` and `/old/b/c.flac`, but not in `/older/d.flac`). Whether a
+  // file is at the new place is not looked at. Nothing in the Engine library changes, and
+  // the source only gets the origins when the working copy is written to it.
+  // Errors: FAILED_PRECONDITION if no library is open or it is a folder of music,
+  // INVALID_ARGUMENT if `from` or `to` is empty, INTERNAL if the database can't be written.
+  rpc ReplaceOriginPrefix(ReplaceOriginPrefixRequest) returns (ReplaceOriginPrefixResponse);
   // What making the playlists and smart playlists of another library the same as the
   // open one's would change. The tracks of a playlist are matched by where they came
   // from (`originDatabaseUuid` and `originTrackId`), else by a file name that only one
@@ -251,6 +263,23 @@ message MigrateOriginsResponse {
   uint32 skipped = 3;
   // The origin of every track of the library that has one now, new or not.
   repeated TrackOrigin origins = 4;
+}
+message GetOriginPrefixRequest {}
+message GetOriginPrefixResponse {
+  // The folder all origins are in; empty if there is none in common or no origin.
+  string prefix = 1;
+  // How many origins are saved.
+  uint32 count = 2;
+}
+message ReplaceOriginPrefixRequest {
+  string from = 1;
+  string to = 2;
+}
+message ReplaceOriginPrefixResponse {
+  // Origins that changed.
+  uint32 changed = 1;
+  // The origin of every track of the library that has one now, as `MigrateOrigins` gives it.
+  repeated TrackOrigin origins = 2;
 }
 message TrackOrigin {
   // `Track.id`.

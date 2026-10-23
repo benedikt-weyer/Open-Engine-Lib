@@ -382,24 +382,55 @@ impl LibraryService for Service {
                     false,
                 )
                 .map_err(edit_status)?;
-            let saved = library.origins();
-            let known: Vec<api::TrackOrigin> = library
-                .tracks
-                .iter()
-                .enumerate()
-                .filter_map(|(index, track)| {
-                    let origin = saved.get(track.origin_key.as_ref()?)?;
-                    Some(api::TrackOrigin {
-                        track_id: index as u32,
-                        origin: origin.clone(),
-                    })
-                })
-                .collect();
             Ok(api::MigrateOriginsResponse {
                 saved: new as u32,
                 kept: (locations.len() - new) as u32,
                 skipped: (library.tracks.len() - locations.len()) as u32,
-                origins: known,
+                origins: known_origins(&library),
+            })
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map(Response::new)
+    }
+
+    async fn get_origin_prefix(
+        &self,
+        _: Request<api::GetOriginPrefixRequest>,
+    ) -> Result<Response<api::GetOriginPrefixResponse>, Status> {
+        let library = self.engine_library()?;
+        // Reads a file: not on the async threads.
+        tokio::task::spawn_blocking(move || {
+            let (prefix, count) = library.origin_prefix();
+            api::GetOriginPrefixResponse {
+                prefix,
+                count: count as u32,
+            }
+        })
+        .await
+        .map(Response::new)
+        .map_err(|error| Status::internal(error.to_string()))
+    }
+
+    async fn replace_origin_prefix(
+        &self,
+        request: Request<api::ReplaceOriginPrefixRequest>,
+    ) -> Result<Response<api::ReplaceOriginPrefixResponse>, Status> {
+        let library = self.engine_library()?;
+        let request = request.into_inner();
+        if request.from.is_empty() || request.to.is_empty() {
+            return Err(Status::invalid_argument(
+                "the folder to replace and the new one must not be empty",
+            ));
+        }
+        // Reads and writes a file: not on the async threads.
+        tokio::task::spawn_blocking(move || {
+            let changed = library
+                .replace_origin_prefix(&request.from, &request.to)
+                .map_err(edit_status)?;
+            Ok(api::ReplaceOriginPrefixResponse {
+                changed: changed as u32,
+                origins: known_origins(&library),
             })
         })
         .await
@@ -841,6 +872,23 @@ async fn playlists_edited(
     .map_err(|error| Status::internal(error.to_string()))?
     .map(Response::new)
     .map_err(edit_status)
+}
+
+/// The origin of every track of the library that has one saved.
+fn known_origins(library: &Library) -> Vec<api::TrackOrigin> {
+    let saved = library.origins();
+    library
+        .tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, track)| {
+            let origin = saved.get(track.origin_key.as_ref()?)?;
+            Some(api::TrackOrigin {
+                track_id: index as u32,
+                origin: origin.clone(),
+            })
+        })
+        .collect()
 }
 
 fn mirror_options(

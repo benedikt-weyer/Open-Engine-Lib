@@ -215,6 +215,21 @@ col_origin: Origin
 origin_migrate: Save locations as origins
 origin_migrate_tip: "Saves where each track's file is now as its origin, for tracks that have none yet. Origins are kept in Open Engine Lib's own database, not in the Engine library."
 origin_migrated: "Origins saved: {saved} new, {kept} already known, {skipped} without a file here."
+origin_prefix_button: Change origin folder…
+origin_prefix_tip: "Replaces the folder that all saved origins start with by another one, for example after the music was moved. Nothing has to be at the new place yet."
+origin_prefix_title: Change the origin folder
+origin_prefix_loading: Reading the saved origins…
+origin_prefix_none: "No origins are saved yet. “Save locations as origins” saves them."
+origin_prefix_nocommon: The saved origins have no folder in common, so there is no folder to replace.
+origin_prefix_common: "The folder all {count} saved origins are in:"
+origin_prefix_new: "Replace it with this folder:"
+origin_prefix_placeholder: New folder
+origin_prefix_browse: Browse…
+origin_prefix_note: "Every origin that starts with the folder above gets the new folder in its place. It is not checked whether the files are at the new place. The change is made in the working copy; “Sync with the source” writes it to the library."
+origin_prefix_apply: Apply changes
+origin_prefix_changed: "Origins changed: {changed}."
+origin_prefix_failed: "Could not change the origins: {error}"
+origin_prefix_load_failed: "Could not read the origins: {error}"
 origin_none: Not saved
 sync_playlist_missing: "{count} not in the other library"
 libsync_button: Sync to…

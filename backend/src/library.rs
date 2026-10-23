@@ -781,6 +781,36 @@ impl Library {
             .unwrap_or_default()
     }
 
+    /// The folder all saved origins are in (see `origins::common_prefix`) and how many
+    /// origins there are. Empty and 0 if none is saved.
+    pub fn origin_prefix(&self) -> (String, usize) {
+        let origins = self.origins();
+        (
+            origins::common_prefix(origins.values().map(String::as_str)),
+            origins.len(),
+        )
+    }
+
+    /// Replaces the leading folders `from` of every saved origin by `to` in the working
+    /// copy, whether or not a file is at the new place. Returns how many changed. The
+    /// source only gets them when the working copy is written to it.
+    pub fn replace_origin_prefix(&self, from: &str, to: &str) -> Result<usize, EditError> {
+        let Some(origins) = Origins::open_existing(&self.origins_path())
+            .map_err(|error| EditError::Cache(std::io::Error::other(error)))?
+        else {
+            return Ok(0);
+        };
+        let changed = origins
+            .replace_prefix(from, to)
+            .map_err(|error| EditError::Cache(std::io::Error::other(error)))?;
+        if changed > 0 {
+            // Noted, so that opening the library again can't throw the change away before
+            // it reached the source.
+            cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        }
+        Ok(changed)
+    }
+
     /// Saves origins in the working copy: with `overwrite` they replace the ones the
     /// tracks have, else only tracks that have none get one. Returns how many were new
     /// (or, with `overwrite`, different).
@@ -2404,6 +2434,48 @@ mod tests {
             1
         );
         assert_eq!(library.origins()[&key(1)], "/pc/one.flac");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn the_prefix_of_the_origins_is_replaced_in_the_working_copy() {
+        let cache = std::env::temp_dir().join(format!(
+            "open-engine-lib-library-origin-prefix-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(cache.join(DATABASE_DIR)).unwrap();
+        let library = Library::load(database(), PathBuf::from("/lib"), cache.clone()).unwrap();
+        let key = |id: i64| ("db".to_string(), id);
+
+        // Without origins there is no prefix and nothing to change (and no file made).
+        assert_eq!(library.origin_prefix(), (String::new(), 0));
+        assert_eq!(library.replace_origin_prefix("/pc", "/stick").unwrap(), 0);
+        assert!(!cache.join(DATABASE_DIR).join(origins::FILE).exists());
+
+        library
+            .write_origins(&[
+                (key(1), "/pc/Music/one.flac".into()),
+                (key(2), "/pc/Music/House/two.flac".into()),
+            ])
+            .unwrap();
+        let _ = std::fs::remove_file(cache.join("edited"));
+        assert_eq!(library.origin_prefix(), ("/pc/Music".to_string(), 2));
+
+        // Nothing changes for a folder that none is in, and that is not an edit.
+        assert_eq!(library.replace_origin_prefix("/other", "/x").unwrap(), 0);
+        assert!(!cache.join("edited").exists());
+
+        // The new place need not exist.
+        assert_eq!(
+            library
+                .replace_origin_prefix("/pc/Music", "/not/there")
+                .unwrap(),
+            2
+        );
+        assert!(cache.join("edited").exists());
+        assert_eq!(library.origins()[&key(2)], "/not/there/House/two.flac");
+        assert_eq!(library.origin_prefix(), ("/not/there".to_string(), 2));
         let _ = std::fs::remove_dir_all(&cache);
     }
 

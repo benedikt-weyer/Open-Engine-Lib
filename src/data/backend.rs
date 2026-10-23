@@ -22,15 +22,16 @@ use open_engine_api::v1::{
     CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest, ControllerAction,
     ControllerState, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
     GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLibrarySyncDiffRequest,
-    GetLibrarySyncDiffResponse, GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest,
-    GetSyncDiffResponse, GetWaveformRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest,
-    MigrateOriginsRequest, MigrateOriginsResponse, NextRequest, OpenLibraryRequest,
-    OpenLocalFolderRequest, OperationProgress, PlayRequest, PlaybackStatus, PreviousRequest,
-    PullFromSourceRequest, PullFromSourceResponse, RenamePlaylistRequest, SaveLibraryAsRequest,
-    SeekRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest,
-    SmartRules, SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
-    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
-    WatchControllerRequest,
+    GetLibrarySyncDiffResponse, GetLoopsRequest, GetOriginPrefixRequest, GetOriginPrefixResponse,
+    GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest, LearnRequest,
+    ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
+    NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress, PlayRequest,
+    PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
+    RenamePlaylistRequest, ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse,
+    SaveLibraryAsRequest, SeekRequest, SetControllerEnabledRequest, SetCuesRequest,
+    SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
+    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
+    TogglePauseRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -671,6 +672,31 @@ pub async fn migrate_origins(mut backend: Backend) -> Result<MigrateOriginsRespo
     backend
         .library
         .migrate_origins(MigrateOriginsRequest {})
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// The folder all saved origins are in, and how many there are.
+pub async fn get_origin_prefix(mut backend: Backend) -> Result<GetOriginPrefixResponse, String> {
+    backend
+        .library
+        .get_origin_prefix(GetOriginPrefixRequest {})
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Replaces the folder `from` the saved origins start with by `to`, whether or not
+/// anything is at the new place.
+pub async fn replace_origin_prefix(
+    mut backend: Backend,
+    from: String,
+    to: String,
+) -> Result<ReplaceOriginPrefixResponse, String> {
+    backend
+        .library
+        .replace_origin_prefix(ReplaceOriginPrefixRequest { from, to })
         .await
         .map(|response| response.into_inner())
         .map_err(describe)

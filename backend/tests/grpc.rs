@@ -14,9 +14,10 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest, ControllerAction,
     CreateSmartPlaylistRequest, Cue, GetAlbumArtRequest, GetCuesRequest, GetInfoRequest,
-    GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest, LearnRequest,
-    ListPlaylistsRequest, ListTracksRequest, Loop, MigrateOriginsRequest, OpenLibraryRequest,
-    OpenLocalFolderRequest, PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest,
+    GetLoopsRequest, GetOriginPrefixRequest, GetProgressRequest, GetSyncDiffRequest,
+    GetWaveformRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest, Loop,
+    MigrateOriginsRequest, OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest,
+    PlaybackErrorKind, PlaybackState, PullFromSourceRequest, ReplaceOriginPrefixRequest,
     SaveLibraryAsRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest,
     SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest,
     WatchControllerRequest,
@@ -569,6 +570,56 @@ async fn remembers_where_tracks_were_in_its_own_database() {
         .unwrap()
         .into_inner();
     assert_eq!((again.saved, again.kept, again.skipped), (0, 2, 1));
+
+    // The folder both origins are in is found, and replacing it moves them, whether or not
+    // anything is at the new place.
+    let prefix = library
+        .get_origin_prefix(GetOriginPrefixRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        (prefix.prefix.as_str(), prefix.count),
+        (music.to_str().unwrap(), 2)
+    );
+    for (from, to) in [("", "/x"), ("/x", "")] {
+        assert_eq!(
+            code(
+                library
+                    .replace_origin_prefix(ReplaceOriginPrefixRequest {
+                        from: from.into(),
+                        to: to.into(),
+                    })
+                    .await
+            ),
+            Code::InvalidArgument
+        );
+    }
+    let moved = library
+        .replace_origin_prefix(ReplaceOriginPrefixRequest {
+            from: prefix.prefix.clone(),
+            to: "/not/there".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(moved.changed, 2);
+    assert_eq!(
+        moved
+            .origins
+            .iter()
+            .map(|origin| (origin.track_id, origin.origin.as_str()))
+            .collect::<Vec<_>>(),
+        [(0, "/not/there/one.flac"), (1, "/not/there/two.mp3")]
+    );
+    let (one, two) = (
+        "/not/there/one.flac".to_string(),
+        "/not/there/two.mp3".to_string(),
+    );
+    assert_eq!(
+        origins(list(library.clone()).await),
+        [Some(one.clone()), Some(two.clone()), None]
+    );
 
     // The backend can be restarted and still knows.
     drop(library);

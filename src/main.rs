@@ -39,8 +39,8 @@ use session::{Session, SessionStore};
 use sync_view::Stage as SyncStage;
 use views::{
     browser, cue_bar, cue_editor, deck, error_text, library_sync_view, loop_bar, loop_editor,
-    menubar, navbar, player_bar, playlist_dialog, progress_view, settings, sidebar, smart_editor,
-    sync_view,
+    menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog, progress_view, settings,
+    sidebar, smart_editor, sync_view,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -156,6 +156,8 @@ struct State {
     smart: Option<smart_editor::Editor>,
     /// The window for adding, renaming or deleting a playlist, while it is open.
     playlist_dialog: Option<playlist_dialog::Dialog>,
+    /// The window for changing the folder the saved origins start with, while it is open.
+    origin_prefix: Option<origin_prefix_dialog::Dialog>,
     /// The window for editing the cues of the playing track, while it is open.
     cue_editor: Option<cue_editor::Editor>,
     /// The window for editing the saved loops of the playing track, while it is open.
@@ -255,6 +257,16 @@ pub enum Message {
     /// The button that saves the location of every track as its origin.
     MigrateOrigins,
     OriginsMigrated(Result<open_engine_api::v1::MigrateOriginsResponse, String>),
+    /// The button that opens the window for changing the folder the origins start with.
+    OriginPrefixOpen,
+    OriginPrefixLoaded(Result<open_engine_api::v1::GetOriginPrefixResponse, String>),
+    OriginPrefixDialog(origin_prefix_dialog::Event),
+    /// The button that picks the new folder in a file dialog, and what it picked.
+    OriginPrefixBrowse,
+    OriginPrefixPicked(Option<PathBuf>),
+    OriginPrefixApply,
+    OriginPrefixApplied(Result<open_engine_api::v1::ReplaceOriginPrefixResponse, String>),
+    OriginPrefixCancel,
 
     /// The button for a new playlist.
     PlaylistNew,
@@ -425,6 +437,7 @@ impl State {
             library_sync: None,
             smart: None,
             playlist_dialog: None,
+            origin_prefix: None,
             cue_editor: None,
             loop_editor: None,
             saving: None,
@@ -580,6 +593,7 @@ impl State {
             || self.library_sync.is_some()
             || self.smart.is_some()
             || self.playlist_dialog.is_some()
+            || self.origin_prefix.is_some()
             || self.cue_editor.is_some()
             || self.loop_editor.is_some()
     }
@@ -1057,6 +1071,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 | Message::SmartNew
                 | Message::SmartEdit(_)
                 | Message::MigrateOrigins
+                | Message::OriginPrefixOpen
                 | Message::SetStars { .. }
                 | Message::MenuSelected(MenuItem::SaveAs)
         )
@@ -1098,6 +1113,14 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::ControllerLearn(..)
         | Message::ControllerLearnCancel
         | Message::ControllerState(..) => handlers::controller::handle(state, message),
+        Message::OriginPrefixApplied(..)
+        | Message::OriginPrefixApply
+        | Message::OriginPrefixBrowse
+        | Message::OriginPrefixCancel
+        | Message::OriginPrefixDialog(..)
+        | Message::OriginPrefixLoaded(..)
+        | Message::OriginPrefixOpen
+        | Message::OriginPrefixPicked(..) => handlers::origin_prefix::handle(state, message),
         Message::MigrateOrigins
         | Message::OriginsMigrated(..)
         | Message::PlaylistCancel
@@ -1250,6 +1273,9 @@ fn view(state: &State) -> Element<'_, Message> {
     if let Some(editor) = &state.loop_editor {
         return iced::widget::stack![window, loop_editor::modal(editor, language)].into();
     }
+    if let Some(dialog) = &state.origin_prefix {
+        return iced::widget::stack![window, origin_prefix_dialog::modal(dialog, language)].into();
+    }
     match (&state.playlist_dialog, &state.library) {
         (Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
             window,
@@ -1380,6 +1406,16 @@ fn open_library<'a>(
             tooltip(
                 button(text(&strings.origin_migrate)).on_press(Message::MigrateOrigins),
                 text(&strings.origin_migrate_tip).size(13),
+                tooltip::Position::Bottom,
+            )
+            .style(container::rounded_box),
+        );
+        // Changes the folder the saved origins start with (the music moved).
+        header = header.push(
+            tooltip(
+                button(text(&strings.origin_prefix_button))
+                    .on_press_maybe((!state.locked()).then_some(Message::OriginPrefixOpen)),
+                text(&strings.origin_prefix_tip).size(13),
                 tooltip::Position::Bottom,
             )
             .style(container::rounded_box),
@@ -1619,6 +1655,7 @@ mod tests {
             library_sync: None,
             smart: None,
             playlist_dialog: None,
+            origin_prefix: None,
             cue_editor: None,
             loop_editor: None,
             saving: None,
@@ -2270,6 +2307,90 @@ mod tests {
             Message::OriginsMigrated(Err("no database".into())),
         );
         assert_eq!(state.backend_error.as_deref(), Some("no database"));
+    }
+
+    #[test]
+    fn the_origin_folder_is_changed_in_a_window_of_its_own() {
+        use open_engine_api::v1::{
+            GetOriginPrefixResponse, ReplaceOriginPrefixResponse, TrackOrigin,
+        };
+        let mut state = state();
+
+        // No window opens over another, and the window itself blocks the others.
+        state.origin_prefix = Some(origin_prefix_dialog::Dialog::new());
+        let _ = handle(&mut state, Message::PlaylistNew);
+        assert!(state.playlist_dialog.is_none());
+        let _ = handle(&mut state, Message::SyncOpen);
+        assert!(state.sync.is_none());
+
+        // What the backend found is shown, and the new folder starts as it.
+        let _ = handle(
+            &mut state,
+            Message::OriginPrefixLoaded(Ok(GetOriginPrefixResponse {
+                prefix: "/old".into(),
+                count: 2,
+            })),
+        );
+        let dialog = state.origin_prefix.as_ref().unwrap();
+        assert_eq!(dialog.found, Some(("/old".to_string(), 2)));
+        assert_eq!(dialog.new, "/old");
+        assert!(dialog.change().is_none());
+
+        // Typing or picking a folder sets it.
+        let _ = handle(
+            &mut state,
+            Message::OriginPrefixDialog(origin_prefix_dialog::Event::New("/typed".into())),
+        );
+        assert_eq!(state.origin_prefix.as_ref().unwrap().new, "/typed");
+        let _ = handle(
+            &mut state,
+            Message::OriginPrefixPicked(Some(PathBuf::from("/picked"))),
+        );
+        assert_eq!(state.origin_prefix.as_ref().unwrap().new, "/picked");
+        let _ = handle(&mut state, Message::OriginPrefixPicked(None));
+        assert_eq!(state.origin_prefix.as_ref().unwrap().new, "/picked");
+        assert_eq!(
+            state.origin_prefix.as_ref().unwrap().change(),
+            Some(("/old", "/picked"))
+        );
+
+        // A failure stays in the window, which can be tried again.
+        state.origin_prefix.as_mut().unwrap().busy = true;
+        let _ = handle(
+            &mut state,
+            Message::OriginPrefixApplied(Err("locked".into())),
+        );
+        let dialog = state.origin_prefix.as_ref().unwrap();
+        assert!(!dialog.busy);
+        assert_eq!(
+            dialog.error.as_deref(),
+            Some("Could not change the origins: locked")
+        );
+
+        // What changed is shown in the track list and the window closes.
+        let _ = handle(
+            &mut state,
+            Message::OriginPrefixApplied(Ok(ReplaceOriginPrefixResponse {
+                changed: 2,
+                origins: vec![TrackOrigin {
+                    track_id: 1,
+                    origin: "/picked/b.flac".into(),
+                }],
+            })),
+        );
+        assert!(state.origin_prefix.is_none());
+        let open = browser(&state);
+        assert_eq!(open.origin(&open.library.tracks[1]), Some("/picked/b.flac"));
+        assert_eq!(open.origin_notice(), Some("Origins changed: 2."));
+
+        // Cancelling closes it, but not while it is writing.
+        state.origin_prefix = Some(origin_prefix_dialog::Dialog::new());
+        state.origin_prefix.as_mut().unwrap().busy = true;
+        let _ = handle(&mut state, Message::OriginPrefixCancel);
+        assert!(state.origin_prefix.is_some());
+        state.origin_prefix.as_mut().unwrap().busy = false;
+        let _ = handle(&mut state, Message::OriginPrefixCancel);
+        assert!(state.origin_prefix.is_none());
     }
 
     fn library_diff(count: u32) -> Arc<open_engine_api::v1::GetLibrarySyncDiffResponse> {

@@ -13,6 +13,7 @@ pub(crate) mod loop_bar;
 pub(crate) mod loop_editor;
 pub(crate) mod menubar;
 pub(crate) mod navbar;
+pub(crate) mod origin_prefix_dialog;
 pub(crate) mod player_bar;
 pub(crate) mod playlist_dialog;
 pub(crate) mod progress_view;
