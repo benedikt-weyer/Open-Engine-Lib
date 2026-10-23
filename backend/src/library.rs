@@ -27,6 +27,14 @@ use crate::soundswitch::{Lighting, SoundSwitch};
 const DATABASE: &str = "Database2/m.db";
 const LIBRARY_DIR: &str = "Engine Library";
 pub const ARTWORK_DIR: &str = "Artwork";
+/// The folder of an Engine library with the stems of its tracks.
+pub const STEMS_DIR: &str = "Stems";
+
+/// The name of the stems file of the track with this origin (the same in every library it
+/// was copied to).
+pub fn stems_file_name(uuid: &str, id: i64) -> String {
+    format!("{id} {uuid}.stems")
+}
 
 #[derive(Debug)]
 pub enum OpenError {
@@ -173,6 +181,8 @@ pub struct Track {
     pub rating: Option<u32>,
     /// What SoundSwitch has for the track.
     pub lighting: Lighting,
+    /// The library's `Stems` folder has the track's stems, as it had when it was opened.
+    pub has_stems: bool,
 }
 
 /// A playlist or playlist folder. The playlists are stored depth first in display
@@ -771,23 +781,6 @@ impl Library {
             .unwrap_or_default()
     }
 
-    /// Where the audio file of `track` is: its location if there is a file there, else its
-    /// saved origin if there is one there, else (for the error to be about it) the location.
-    pub fn playable_path(&self, track: &Track) -> PathBuf {
-        if !track.path.is_file()
-            && let Some(origin) = track
-                .origin_key
-                .as_ref()
-                .and_then(|key| self.origins().remove(key))
-        {
-            let origin = PathBuf::from(origin);
-            if origin.is_file() {
-                return origin;
-            }
-        }
-        track.path.clone()
-    }
-
     /// Saves origins in the working copy: with `overwrite` they replace the ones the
     /// tracks have, else only tracks that have none get one. Returns how many were new
     /// (or, with `overwrite`, different).
@@ -1149,6 +1142,15 @@ fn load_tracks(
     let drive = dir.parent().map(Path::to_path_buf);
     let soundswitch = drive.as_deref().filter(|_| lighting).map(SoundSwitch::scan);
     let mut rows = statement.query([])?;
+    // The names in the `Stems` folder, read once instead of asking for every track.
+    let stems: HashSet<String> = std::fs::read_dir(dir.join(STEMS_DIR))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut tracks = Vec::new();
     let mut by_id = HashMap::new();
@@ -1181,6 +1183,14 @@ fn load_tracks(
             by_origin.insert(key.clone(), tracks.len());
         }
 
+        let streaming = row
+            .get::<_, Option<String>>(9)?
+            .is_some_and(|source| !source.is_empty());
+        let has_stems = !streaming
+            && origin_key
+                .as_ref()
+                .is_some_and(|(uuid, id)| stems.contains(&stems_file_name(uuid, *id)));
+
         let file = dir.join(&relative);
         let lighting = match (&soundswitch, &drive) {
             (Some(soundswitch), Some(drive)) => soundswitch.lighting(drive, &file),
@@ -1200,14 +1210,13 @@ fn load_tracks(
             path: file,
             relative_path: relative,
             origin_key,
-            streaming: row
-                .get::<_, Option<String>>(9)?
-                .is_some_and(|source| !source.is_empty()),
+            streaming,
             album_art: number(12)?.filter(|id| *id > 0.0).map(|id| id as u32),
             rating: number(13)?
                 .filter(|rating| *rating >= 0.0)
                 .map(|rating| rating as u32),
             lighting,
+            has_stems,
         });
     }
 
@@ -2381,34 +2390,43 @@ mod tests {
     }
 
     #[test]
-    fn a_file_missing_at_its_location_is_found_at_its_origin() {
-        let cache = std::env::temp_dir().join(format!(
-            "open-engine-lib-library-playable-{}",
+    fn tracks_with_a_stems_file_are_marked() {
+        let root = std::env::temp_dir().join(format!(
+            "open-engine-lib-library-stems-{}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&cache);
+        let _ = std::fs::remove_dir_all(&root);
+        let (dir, cache) = (root.join("Engine Library"), root.join("cache"));
+        std::fs::create_dir_all(dir.join(STEMS_DIR)).unwrap();
         std::fs::create_dir_all(cache.join(DATABASE_DIR)).unwrap();
-        let mut library = Library::load(database(), PathBuf::from("/lib"), cache.clone()).unwrap();
-        let key = library.tracks[0].origin_key.clone().unwrap();
-        let (location, origin) = (cache.join("location.flac"), cache.join("origin.flac"));
-        library.tracks[0].path = location.clone();
-        let track = &library.tracks[0];
-
-        // Neither file is there: the error is about the location.
-        assert_eq!(library.playable_path(track), location);
-        library
-            .save_origins(&[(key, origin.display().to_string())], false)
+        let (uuid, id) = Library::load(database(), dir.clone(), cache.clone())
+            .unwrap()
+            .tracks[0]
+            .origin_key
+            .clone()
             .unwrap();
-        assert_eq!(library.playable_path(track), location);
+        // Another track's stems and another library's are no stems of this one.
+        std::fs::write(
+            dir.join(STEMS_DIR).join(stems_file_name(&uuid, id + 100)),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(dir.join(STEMS_DIR).join(stems_file_name("other", id)), b"x").unwrap();
+        let library = Library::load(database(), dir.clone(), cache.clone()).unwrap();
+        assert!(library.tracks.iter().all(|track| !track.has_stems));
 
-        // Only the origin is there, then both, then only the location.
-        std::fs::write(&origin, b"o").unwrap();
-        assert_eq!(library.playable_path(track), origin);
-        std::fs::write(&location, b"l").unwrap();
-        assert_eq!(library.playable_path(track), location);
-        std::fs::remove_file(&origin).unwrap();
-        assert_eq!(library.playable_path(track), location);
-        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::write(dir.join(STEMS_DIR).join(stems_file_name(&uuid, id)), b"x").unwrap();
+        let library = Library::load(database(), dir, cache).unwrap();
+        assert!(library.tracks[0].has_stems);
+        assert_eq!(
+            library
+                .tracks
+                .iter()
+                .filter(|track| track.has_stems)
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A `trackData` blob that starts the way Engine's does: the sample rate and the

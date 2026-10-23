@@ -1503,6 +1503,7 @@ mod tests {
             rating: None,
             lighting: model::Lighting::None,
             lighting_projects: Vec::new(),
+            has_stems: false,
             cue_count: 0,
             loop_count: 0,
             origin: None,

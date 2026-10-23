@@ -673,6 +673,56 @@ async fn exits_when_the_ui_goes_away() {
     }
 }
 
+/// The processes that have `parent` as their parent: their ids and the names of their programs.
+#[cfg(target_os = "linux")]
+fn children_of(parent: u32) -> Vec<(u32, String)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(id) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // "pid (name) state ppid ...": the name may hold spaces, so go from its closing bracket.
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            continue;
+        };
+        let ppid = stat[close + 1..].split_whitespace().nth(1);
+        if ppid.and_then(|ppid| ppid.parse::<u32>().ok()) == Some(parent) {
+            found.push((id, stat[open + 1..close].to_owned()));
+        }
+    }
+    found
+}
+
+/// The audio is another process, started by the backend (the UI never starts or talks to it),
+/// and it goes when the backend does.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn starts_the_audio_process_and_takes_it_along_when_it_exits() {
+    let temp = TempDir::new("audio-process");
+    let mut running = start(&temp.0.join("cache"));
+    // (The name in /proc is cut to 15 characters.)
+    let (audio, _) = children_of(running.child.id())
+        .into_iter()
+        .find(|(_, name)| name.starts_with("open-engine-aud"))
+        .expect("the backend did not start the audio process");
+
+    drop(running.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the backend kept running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // It reads the pipe the backend holds, which closes with the backend, so it exits by itself.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Path::new(&format!("/proc/{audio}")).exists() {
+        assert!(Instant::now() < deadline, "the audio process kept running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Smoke test against a real library and the real sound card. Not run by default:
 /// `OPEN_ENGINE_TEST_LIBRARY=/path/to/drive cargo test -p open-engine-backend --test grpc -- --ignored --nocapture`
 #[tokio::test]

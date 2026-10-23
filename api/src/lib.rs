@@ -1,7 +1,8 @@
-//! The gRPC protocol between the Open Engine Lib UI and its backend.
+//! The gRPC protocol between the Open Engine Lib UI and its backend processes.
 //!
-//! The UI starts the backend, which listens on a loopback port, and talks to it
-//! with the services in [`v1`]. Each major version lives in its own proto package
+//! The UI starts the library process (`open-engine-backend`), which listens on a loopback
+//! port, and talks to it with the services in [`v1`]. That process starts the audio
+//! process (`open-engine-audio`), which only it talks to (`AudioService`). Each major version lives in its own proto package
 //! (`openenginelib.v1`, later `v2`, ...) so a backend can serve several at once.
 //! Within a version only additive changes are made.
 
@@ -37,4 +38,72 @@ pub const LISTENING_PREFIX: &str = "LISTENING ";
 
 pub mod v1 {
     tonic::include_proto!("openenginelib.v1");
+}
+
+/// What both processes do at startup (see [`TOKEN_ENV`] and [`LISTENING_PREFIX`]): the UI
+/// starts them, so they check the token, say where they listen and exit when the UI goes.
+pub mod server {
+    use std::io::{Read, Write};
+
+    use tonic::service::Interceptor;
+    use tonic::service::interceptor::InterceptedService;
+    use tonic::{Request, Status};
+
+    use super::{AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
+
+    /// Rejects requests that don't carry the secret the UI started the process with, so
+    /// other programs on this machine can't use the loopback port.
+    #[derive(Clone)]
+    pub struct Authorize {
+        expected: String,
+    }
+
+    impl Authorize {
+        /// Reads the secret the UI put in the environment.
+        pub fn from_env() -> Result<Self, String> {
+            let token = std::env::var(TOKEN_ENV)
+                .map_err(|_| format!("{TOKEN_ENV} is not set; the UI starts this program"))?;
+            Ok(Self {
+                expected: format!("Bearer {token}"),
+            })
+        }
+
+        /// Puts the check in front of `service`.
+        pub fn protect<S>(&self, service: S) -> InterceptedService<S, Authorize> {
+            InterceptedService::new(service, self.clone())
+        }
+    }
+
+    impl Interceptor for Authorize {
+        fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+            let authorized = request
+                .metadata()
+                .get(AUTHORIZATION)
+                .is_some_and(|value| value.as_bytes() == self.expected.as_bytes());
+            if authorized {
+                Ok(request)
+            } else {
+                Err(Status::unauthenticated("missing or wrong token"))
+            }
+        }
+    }
+
+    /// Calls `on_closed` once the standard input is closed, which is how the process
+    /// notices that the UI is gone (the UI holds the pipe open for as long as it lives).
+    pub fn when_stdin_closes(on_closed: impl FnOnce() + Send + 'static) {
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 256];
+            let mut stdin = std::io::stdin();
+            while stdin.read(&mut sink).is_ok_and(|read| read > 0) {}
+            on_closed();
+        });
+    }
+
+    /// Tells the UI where the process listens: the first and only line on stdout (logs go
+    /// to stderr).
+    pub fn announce(address: std::net::SocketAddr) -> std::io::Result<()> {
+        let mut stdout = std::io::stdout();
+        writeln!(stdout, "{LISTENING_PREFIX}{address}")?;
+        stdout.flush()
+    }
 }

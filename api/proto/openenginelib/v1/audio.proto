@@ -1,0 +1,77 @@
+// How the library process (`open-engine-backend`) uses the audio process
+// (`open-engine-audio`), which it starts. The UI never talks to the audio process: it
+// plays tracks and asks for waveforms through `PlaybackService` and
+// `LibraryService.GetWaveform` of the library process, which looks up the files and
+// passes them on here. The audio process knows nothing about libraries.
+syntax = "proto3";
+
+package openenginelib.v1;
+
+import "openenginelib/v1/playback.proto";
+
+service AudioService {
+  // Replaces the queue and starts the track at `position`.
+  // Errors: INVALID_ARGUMENT for a position outside the queue. A track that can't be
+  // played is not an RPC error: it is reported in the returned status.
+  rpc Play(AudioPlayRequest) returns (PlaybackStatus);
+  // The rest is as in `PlaybackService`.
+  rpc TogglePause(TogglePauseRequest) returns (PlaybackStatus);
+  rpc Stop(StopRequest) returns (PlaybackStatus);
+  rpc Next(NextRequest) returns (PlaybackStatus);
+  rpc Previous(PreviousRequest) returns (PlaybackStatus);
+  rpc Seek(SeekRequest) returns (PlaybackStatus);
+  rpc GetStatus(GetStatusRequest) returns (PlaybackStatus);
+  // Stops playback, empties the queue and releases the audio device (which the next Play
+  // opens again), for when the library that the queue came from is closed.
+  rpc Close(CloseRequest) returns (PlaybackStatus);
+  // The waveform of an audio file, for drawing it. It is computed from the file, so this
+  // takes a moment the first time (the process remembers recent ones).
+  // Errors: INVALID_ARGUMENT for split points or gains out of range, NOT_FOUND if there is
+  // no file at `path` or at `fallback_path`, INTERNAL if it can't be decoded.
+  rpc AnalyzeWaveform(AnalyzeWaveformRequest) returns (AnalyzeWaveformResponse);
+}
+
+message AudioPlayRequest {
+  repeated QueueEntry queue = 1;
+  uint32 position = 2;
+  // Load the track without playing it: it starts out paused (and silent).
+  bool start_paused = 3;
+  // Where in the track to start, in milliseconds. Formats that can't seek start at 0.
+  uint64 start_position_ms = 4;
+}
+
+message QueueEntry {
+  // The library's track id: only handed back in the status.
+  uint32 track_id = 1;
+  // The audio file.
+  string path = 2;
+  // Where else the file may be (the track's saved origin): played if there is no file at
+  // `path`. If there is none at either, the error is about `path`. Empty for none.
+  string fallback_path = 3;
+  // A streaming track, which has no file: it is skipped and reported as an error.
+  bool streaming = 4;
+}
+
+message CloseRequest {}
+
+message AnalyzeWaveformRequest {
+  // The audio file, and where else it may be (a track's saved origin; empty for none): it is
+  // read from `fallback_path` if there is no file at `path`.
+  string path = 1;
+  string fallback_path = 2;
+  // Where the low, mid and high bands meet, in Hz, and how much each band is amplified, as
+  // in `GetWaveformRequest`.
+  optional uint32 low_mid_hz = 3;
+  optional uint32 mid_high_hz = 4;
+  optional float gain_low = 5;
+  optional float gain_mid = 6;
+  optional float gain_high = 7;
+}
+
+message AnalyzeWaveformResponse {
+  double duration_seconds = 1;
+  // How many columns make up a second of the track (100: one per 10 ms).
+  uint32 columns_per_second = 2;
+  // Three bytes per column, as in `GetWaveformResponse.columns`.
+  bytes columns = 3;
+}

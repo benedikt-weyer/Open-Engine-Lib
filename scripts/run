@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build and run the app. Extra arguments are passed to the app (e.g. a library to open).
-# The UI starts the backend executable that sits next to it, so both are built.
+# The UI starts the backend executable that sits next to it, which starts the audio one, so all are built.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release

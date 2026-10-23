@@ -299,6 +299,7 @@ async fn load_library(
                 rating: track.rating,
                 lighting,
                 lighting_projects: track.soundswitch_projects,
+                has_stems: track.has_stems,
                 cue_count: track.cue_count,
                 loop_count: track.loop_count,
                 origin: track.origin,

@@ -1,6 +1,8 @@
-//! The Open Engine Lib backend. The UI starts it, so it is not meant to be run by
-//! hand: it reads the Engine library and plays tracks, serving the gRPC API in
-//! `open-engine-api` on a loopback port.
+//! The Open Engine Lib library process. The UI starts it, so it is not meant to be run by
+//! hand: it reads the Engine library, serving the gRPC API in `open-engine-api` on a
+//! loopback port. Playing tracks and decoding audio for waveforms is the audio process's
+//! job (`open-engine-audio`, `src/audio/`): this process starts it and passes the UI's
+//! requests on to it, so the UI only ever talks to this process.
 //!
 //! Startup contract with the UI:
 //! - the secret every request must carry as a bearer token is in `OPEN_ENGINE_BACKEND_TOKEN`,
@@ -8,17 +10,16 @@
 //!   else there afterwards; logs go to stderr),
 //! - it exits when its stdin is closed, which is how it notices that the UI is gone.
 
+mod audio_client;
 mod beatgrid;
 mod cache;
 mod cues;
-mod engine;
 mod folder;
 mod library;
 mod loops;
 mod mirror;
 mod new_library;
 mod origins;
-mod player;
 mod progress;
 mod save;
 mod service;
@@ -27,50 +28,20 @@ mod soundswitch;
 mod sync;
 mod tag_cache;
 mod track_sync;
-mod waveform;
 
-use std::io::{Read, Write};
 use std::process::ExitCode;
 
+use open_engine_api::server::{self, Authorize};
 use open_engine_api::v1::backend_service_server::BackendServiceServer;
 use open_engine_api::v1::library_service_server::LibraryServiceServer;
 use open_engine_api::v1::playback_service_server::PlaybackServiceServer;
-use open_engine_api::{AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::service::Interceptor;
-use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Server;
-use tonic::{Request, Status};
 
 /// The largest request the backend accepts. A `Play` request lists every track id of
 /// a queue, so this is generous.
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
-
-/// Rejects requests that don't carry the secret the UI started the backend with, so
-/// other programs on this machine can't use the loopback port.
-#[derive(Clone)]
-struct Authorize {
-    expected: String,
-}
-
-impl Interceptor for Authorize {
-    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
-        let authorized = request
-            .metadata()
-            .get(AUTHORIZATION)
-            .is_some_and(|value| value.as_bytes() == self.expected.as_bytes());
-        if authorized {
-            Ok(request)
-        } else {
-            Err(Status::unauthenticated("missing or wrong token"))
-        }
-    }
-}
-
-fn protect<S>(service: S, authorize: &Authorize) -> InterceptedService<S, Authorize> {
-    InterceptedService::new(service, authorize.clone())
-}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -84,42 +55,29 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let token = std::env::var(TOKEN_ENV)
-        .map_err(|_| format!("{TOKEN_ENV} is not set; the backend is started by the UI"))?;
-    let authorize = Authorize {
-        expected: format!("Bearer {token}"),
-    };
-
+    let authorize = Authorize::from_env()?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
 
-    let service = service::Service::new(engine::Engine::spawn(), cache::default_root());
+    // (Without audio the library can still be read; playing says why it cannot.)
+    let audio = audio_client::start().await;
+    if let Err(error) = &audio {
+        eprintln!("open-engine-backend: no audio: {error}");
+    }
+    let service = service::Service::new(audio, cache::default_root());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-
-    // The UI holds our stdin open for as long as it lives.
-    std::thread::spawn(move || {
-        let mut sink = [0u8; 256];
-        let mut stdin = std::io::stdin();
-        while stdin.read(&mut sink).is_ok_and(|read| read > 0) {}
+    server::when_stdin_closes(move || {
         let _ = stop.send(());
     });
-
-    let mut stdout = std::io::stdout();
-    writeln!(stdout, "{LISTENING_PREFIX}{address}")?;
-    stdout.flush()?;
+    server::announce(address)?;
 
     Server::builder()
-        .add_service(protect(
-            BackendServiceServer::new(service.clone()),
-            &authorize,
-        ))
-        .add_service(protect(
+        .add_service(authorize.protect(BackendServiceServer::new(service.clone())))
+        .add_service(authorize.protect(
             LibraryServiceServer::new(service.clone()).max_decoding_message_size(MAX_MESSAGE_SIZE),
-            &authorize,
         ))
-        .add_service(protect(
+        .add_service(authorize.protect(
             PlaybackServiceServer::new(service).max_decoding_message_size(MAX_MESSAGE_SIZE),
-            &authorize,
         ))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
             let _ = stopped.await;

@@ -23,8 +23,10 @@ permissions:
 
 env:
   BIN: open-engine-lib
-  # The UI starts this executable, which has to sit next to it.
+  # The UI starts this executable, which has to sit next to it, and the backend starts the
+  # audio one, which has to sit next to the backend.
   BACKEND: open-engine-backend
+  AUDIO: open-engine-audio
 
 jobs:
   build-linux:
@@ -54,7 +56,7 @@ jobs:
         run: |
           name="$BIN-$TAG-linux-x86_64"
           mkdir "$name"
-          cp "target/release/$BIN" "target/release/$BACKEND" LICENSE README.md "$name/"
+          cp "target/release/$BIN" "target/release/$BACKEND" "target/release/$AUDIO" LICENSE README.md "$name/"
           tar -czf "$name.tar.gz" "$name"
 
       - uses: actions/upload-artifact@v4
@@ -64,6 +66,7 @@ jobs:
             ${{ env.BIN }}-${{ inputs.tag }}-linux-x86_64.tar.gz
             target/release/${{ env.BIN }}
             target/release/${{ env.BACKEND }}
+            target/release/${{ env.AUDIO }}
           if-no-files-found: error
 
   build-appimage:
@@ -83,6 +86,7 @@ jobs:
           mkdir -p AppDir/usr/bin
           install -m755 "target/release/$BIN" "AppDir/usr/bin/$BIN"
           install -m755 "target/release/$BACKEND" "AppDir/usr/bin/$BACKEND"
+          install -m755 "target/release/$AUDIO" "AppDir/usr/bin/$AUDIO"
           cp packaging/open-engine-lib.desktop packaging/open-engine-lib.svg AppDir/
           ln -s "usr/bin/$BIN" AppDir/AppRun
 
@@ -132,7 +136,7 @@ jobs:
         run: |
           name="$BIN-$TAG-windows-x86_64"
           mkdir "$name"
-          cp "target/release/$BIN.exe" "target/release/$BACKEND.exe" LICENSE README.md "$name/"
+          cp "target/release/$BIN.exe" "target/release/$BACKEND.exe" "target/release/$AUDIO.exe" LICENSE README.md "$name/"
           7z a "$name.zip" "$name"
 
       - uses: actions/upload-artifact@v4

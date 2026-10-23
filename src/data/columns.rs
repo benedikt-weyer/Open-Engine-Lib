@@ -29,6 +29,7 @@ pub enum Column {
     Cues,
     Loops,
     Lighting,
+    Stems,
     Origin,
 }
 
@@ -38,12 +39,17 @@ impl Column {
     pub fn is_engine_only(self) -> bool {
         matches!(
             self,
-            Column::Rating | Column::Cues | Column::Loops | Column::Lighting | Column::Origin
+            Column::Rating
+                | Column::Cues
+                | Column::Loops
+                | Column::Lighting
+                | Column::Stems
+                | Column::Origin
         )
     }
 
     /// How many there are.
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 12;
     /// In the order they are shown.
     pub const ALL: [Column; Column::COUNT] = [
         Column::Title,
@@ -56,6 +62,7 @@ impl Column {
         Column::Cues,
         Column::Loops,
         Column::Lighting,
+        Column::Stems,
         Column::Origin,
     ];
 }
@@ -74,6 +81,7 @@ pub struct ColumnWidths {
     cues: f32,
     loops: f32,
     lighting: f32,
+    stems: f32,
     origin: f32,
 }
 
@@ -90,6 +98,7 @@ impl Default for ColumnWidths {
             cues: 56.0,
             loops: 56.0,
             lighting: 72.0,
+            stems: 64.0,
             origin: 260.0,
         }
     }
@@ -108,6 +117,7 @@ impl ColumnWidths {
             Column::Cues => self.cues,
             Column::Loops => self.loops,
             Column::Lighting => self.lighting,
+            Column::Stems => self.stems,
             Column::Origin => self.origin,
         }
     }
@@ -126,6 +136,7 @@ impl ColumnWidths {
             Column::Cues => self.cues = width,
             Column::Loops => self.loops = width,
             Column::Lighting => self.lighting = width,
+            Column::Stems => self.stems = width,
             Column::Origin => self.origin = width,
         }
     }
@@ -220,6 +231,7 @@ mod tests {
                 Column::Cues,
                 Column::Loops,
                 Column::Lighting,
+                Column::Stems,
                 Column::Origin
             ]
         );

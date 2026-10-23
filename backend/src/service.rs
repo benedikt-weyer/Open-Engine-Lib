@@ -1,9 +1,7 @@
 //! The gRPC services (`openenginelib.v1`) that the UI talks to.
 
-use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
 
 use open_engine_api::API_VERSION;
 use open_engine_api::v1 as api;
@@ -14,51 +12,23 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+use crate::audio_client::Audio;
 use crate::cues::Cue;
-use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, EditError, Library, OpenError};
 use crate::loops::Loop;
 use crate::mirror::{self, MirrorError};
-use crate::player::Start;
 use crate::progress::{Phase, Progress};
 use crate::save::{self, SaveError};
 use crate::smartlist::Rules;
 use crate::sync::{self, SyncError};
-use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 
 /// Tracks per message of `ListTracks`, to stay well below gRPC's message size limit.
 const TRACKS_PER_BATCH: usize = 500;
 
-/// Waveforms are kept for the tracks used last, so skipping back to a track is instant.
-const WAVEFORMS_KEPT: usize = 8;
-
-#[derive(Default)]
-struct WaveformCache {
-    /// Paths, oldest first.
-    order: VecDeque<WaveformKey>,
-    waveforms: HashMap<WaveformKey, Arc<Peaks>>,
-}
-
-/// A waveform depends on where the bands were split, not just on the file.
-type WaveformKey = (PathBuf, Split);
-
-impl WaveformCache {
-    fn insert(&mut self, key: WaveformKey, waveform: Arc<Peaks>) {
-        if self.waveforms.insert(key.clone(), waveform).is_none() {
-            self.order.push_back(key);
-        }
-        while self.order.len() > WAVEFORMS_KEPT {
-            if let Some(oldest) = self.order.pop_front() {
-                self.waveforms.remove(&oldest);
-            }
-        }
-    }
-}
-
 struct Shared {
     library: RwLock<Option<Arc<Library>>>,
-    waveforms: Mutex<WaveformCache>,
-    engine: Engine,
+    /// The audio process, which plays and decodes for us, or why it is not there.
+    audio: Result<Audio, String>,
     /// Where copies of the libraries' databases are kept.
     cache_root: PathBuf,
     /// How far the sync that is running has got.
@@ -69,14 +39,22 @@ struct Shared {
 pub struct Service(Arc<Shared>);
 
 impl Service {
-    pub fn new(engine: Engine, cache_root: PathBuf) -> Self {
+    pub fn new(audio: Result<Audio, String>, cache_root: PathBuf) -> Self {
         Self(Arc::new(Shared {
             library: RwLock::new(None),
-            waveforms: Mutex::new(WaveformCache::default()),
-            engine,
+            audio,
             cache_root,
             progress: Progress::default(),
         }))
+    }
+
+    /// The connection to the audio process.
+    fn audio(&self) -> Result<crate::audio_client::Client, Status> {
+        self.0
+            .audio
+            .as_ref()
+            .map(Audio::client)
+            .map_err(|error| Status::unavailable(format!("no audio process: {error}")))
     }
 
     /// Replaces the library that is open by one read again from the same working copy
@@ -114,7 +92,9 @@ impl Service {
 
     /// Stops playback, releases the audio device and forgets the library.
     async fn close(&self) {
-        self.0.engine.send(Command::Close).await;
+        if let Ok(audio) = &self.0.audio {
+            let _ = audio.client().close(api::CloseRequest {}).await;
+        }
         *self.0.library.write().expect("library lock") = None;
     }
 }
@@ -606,18 +586,6 @@ impl LibraryService for Service {
         let library = self.library()?;
         let request = request.into_inner();
         let id = request.track_id;
-        let split = Split {
-            low_mid_hz: request.low_mid_hz.unwrap_or(waveform::DEFAULT_LOW_MID_HZ),
-            mid_high_hz: request.mid_high_hz.unwrap_or(waveform::DEFAULT_MID_HIGH_HZ),
-        };
-        split.validate().map_err(Status::invalid_argument)?;
-        let defaults = Gains::default();
-        let gains = Gains {
-            low: request.gain_low.unwrap_or(defaults.low),
-            mid: request.gain_mid.unwrap_or(defaults.mid),
-            high: request.gain_high.unwrap_or(defaults.high),
-        };
-        gains.validate().map_err(Status::invalid_argument)?;
         let track = library
             .tracks
             .get(id as usize)
@@ -627,51 +595,45 @@ impl LibraryService for Service {
                 "a streaming track has no audio file to analyse",
             ));
         }
-        let path = library.playable_path(track);
+        let path = track.path.display().to_string();
+        let mut audio = self.audio()?;
 
-        let shared = Arc::clone(&self.0);
-        // Decoding a whole track takes a moment and must not block the async threads.
-        let (peaks, grid) = tokio::task::spawn_blocking(move || {
-            let cached = shared
-                .waveforms
-                .lock()
-                .expect("waveform lock")
-                .waveforms
-                .get(&(path.clone(), split))
-                .cloned();
-            let waveform = match cached {
-                Some(waveform) => waveform,
-                None => {
-                    let waveform = Arc::new(waveform::analyze_file(&path, split).map_err(
-                        |error| match error {
-                            AnalyzeError::NotFound => {
-                                Status::not_found(format!("{} does not exist", path.display()))
-                            }
-                            AnalyzeError::Failed(error) => Status::internal(error),
-                        },
-                    )?);
-                    shared
-                        .waveforms
-                        .lock()
-                        .expect("waveform lock")
-                        .insert((path, split), Arc::clone(&waveform));
-                    waveform
-                }
-            };
+        // The saved origin is where else the file may be, and the beatgrid is read from
+        // the database: not on the async threads.
+        let (origin, grid) = tokio::task::spawn_blocking(move || {
+            let origin = library.tracks[id as usize]
+                .origin_key
+                .as_ref()
+                .and_then(|key| library.origins().remove(key));
             let grid = library.beat_grid(id as usize).unwrap_or_else(|error| {
                 // The waveform is still worth showing without its grid.
                 eprintln!("could not read the beatgrid of track {id}: {error}");
                 None
             });
-            Ok::<_, Status>((waveform, grid))
+            (origin, grid)
         })
         .await
-        .map_err(|error| Status::internal(error.to_string()))??;
+        .map_err(|error| Status::internal(error.to_string()))?;
+
+        // The audio process decodes the file (and checks the settings): its errors say
+        // what is wrong with the file or the request, so they are passed on.
+        let peaks = audio
+            .analyze_waveform(api::AnalyzeWaveformRequest {
+                path,
+                fallback_path: origin.unwrap_or_default(),
+                low_mid_hz: request.low_mid_hz,
+                mid_high_hz: request.mid_high_hz,
+                gain_low: request.gain_low,
+                gain_mid: request.gain_mid,
+                gain_high: request.gain_high,
+            })
+            .await?
+            .into_inner();
 
         Ok(Response::new(api::GetWaveformResponse {
             duration_seconds: peaks.duration_seconds,
-            columns_per_second: waveform::COLUMNS_PER_SECOND,
-            columns: peaks.scaled(gains).iter().flatten().copied().collect(),
+            columns_per_second: peaks.columns_per_second,
+            columns: peaks.columns,
             beat_grid: grid.map(|markers| api::BeatGrid {
                 markers: markers
                     .into_iter()
@@ -946,6 +908,7 @@ fn track_message(
         rating,
         soundswitch: track.lighting.state.into(),
         soundswitch_projects: track.lighting.projects.clone(),
+        has_stems: track.has_stems,
         path: track.relative_path.clone(),
         origin,
         cue_count,
@@ -961,9 +924,16 @@ impl PlaybackService for Service {
     ) -> Result<Response<api::PlaybackStatus>, Status> {
         let library = self.library()?;
         let request = request.into_inner();
+        let mut audio = self.audio()?;
 
-        // The saved origins, for a file that is not at its location.
-        let origins = library.origins();
+        // The saved origins, for a file that is not at its location. (Read from the
+        // database: not on the async threads.)
+        let origins = {
+            let library = Arc::clone(&library);
+            tokio::task::spawn_blocking(move || library.origins())
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+        };
         let queue = request
             .track_ids
             .iter()
@@ -972,14 +942,15 @@ impl PlaybackService for Service {
                     .tracks
                     .get(id as usize)
                     .ok_or_else(|| Status::invalid_argument(format!("unknown track id {id}")))?;
-                Ok(QueueItem {
+                Ok(api::QueueEntry {
                     track_id: id,
-                    path: track.path.clone(),
-                    fallback: track
+                    path: track.path.display().to_string(),
+                    fallback_path: track
                         .origin_key
                         .as_ref()
                         .and_then(|key| origins.get(key))
-                        .map(PathBuf::from),
+                        .cloned()
+                        .unwrap_or_default(),
                     streaming: track.streaming,
                 })
             })
@@ -993,92 +964,59 @@ impl PlaybackService for Service {
             )));
         }
 
-        let start = Start {
-            paused: request.start_paused,
-            at: Duration::from_millis(request.start_position_ms),
-        };
-        self.command(Command::Play {
-            queue,
-            position,
-            start,
-        })
-        .await
+        Ok(audio
+            .play(api::AudioPlayRequest {
+                queue,
+                position: request.position,
+                start_paused: request.start_paused,
+                start_position_ms: request.start_position_ms,
+            })
+            .await?)
     }
 
     async fn toggle_pause(
         &self,
         _: Request<api::TogglePauseRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
-        self.command(Command::TogglePause).await
+        Ok(self
+            .audio()?
+            .toggle_pause(api::TogglePauseRequest {})
+            .await?)
     }
 
     async fn stop(
         &self,
         _: Request<api::StopRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
-        self.command(Command::Stop).await
+        Ok(self.audio()?.stop(api::StopRequest {}).await?)
     }
 
     async fn next(
         &self,
         _: Request<api::NextRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
-        self.command(Command::Next).await
+        Ok(self.audio()?.next(api::NextRequest {}).await?)
     }
 
     async fn previous(
         &self,
         _: Request<api::PreviousRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
-        self.command(Command::Previous).await
+        Ok(self.audio()?.previous(api::PreviousRequest {}).await?)
     }
 
     async fn seek(
         &self,
         request: Request<api::SeekRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
-        let to = Duration::from_millis(request.into_inner().position_ms);
-        self.command(Command::Seek(to)).await
+        Ok(self.audio()?.seek(request.into_inner()).await?)
     }
 
     async fn get_status(
         &self,
         _: Request<api::GetStatusRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
-        // Asked of the engine, not read from what it published last: that can be stale.
-        self.command(Command::Poll).await
-    }
-}
-
-impl Service {
-    async fn command(&self, command: Command) -> Result<Response<api::PlaybackStatus>, Status> {
-        Ok(Response::new(status_message(
-            self.0.engine.send(command).await,
-        )))
-    }
-}
-
-fn status_message(status: crate::engine::Status) -> api::PlaybackStatus {
-    api::PlaybackStatus {
-        state: match status.state {
-            State::Stopped => api::PlaybackState::Stopped,
-            State::Playing => api::PlaybackState::Playing,
-            State::Paused => api::PlaybackState::Paused,
-        }
-        .into(),
-        queue_position: status.queue_position,
-        track_id: status.track_id,
-        position_ms: status.position.as_millis() as u64,
-        error: status.error.map(|error| api::PlaybackError {
-            kind: match error.kind {
-                ErrorKind::NotFound => api::PlaybackErrorKind::NotFound,
-                ErrorKind::Streaming => api::PlaybackErrorKind::Streaming,
-                ErrorKind::Failed => api::PlaybackErrorKind::Failed,
-            }
-            .into(),
-            track_id: error.track_id,
-            detail: error.detail,
-        }),
+        Ok(self.audio()?.get_status(api::GetStatusRequest {}).await?)
     }
 }
 

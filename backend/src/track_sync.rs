@@ -14,14 +14,12 @@ use std::path::{Path, PathBuf};
 use open_engine_api::v1 as api;
 use rusqlite::{Connection, OpenFlags};
 
-use crate::library::{ARTWORK_DIR, Library, base64_url};
+use crate::library::{ARTWORK_DIR, Library, STEMS_DIR, base64_url, stems_file_name};
 use crate::mirror::MirrorError;
 use crate::progress::{Phase, Progress};
 
 /// The folder the tracks are copied to, next to the `Engine Library` folder.
 pub const TRACKS_DIR: &str = "Engine-Tracks";
-/// The folder of an Engine library with the stems of its tracks.
-const STEMS_DIR: &str = "Stems";
 /// What a track without an artist or an album is filed under.
 const UNKNOWN_ARTIST: &str = "Unknown Artist";
 const UNKNOWN_ALBUM: &str = "Unknown Album";
@@ -286,7 +284,7 @@ fn place_extra(
 /// copied to has the same, so the file is found under the same name there.
 fn stems_name(track: &crate::library::Track) -> Option<String> {
     let (uuid, id) = track.origin_key.as_ref()?;
-    Some(format!("{id} {uuid}.stems"))
+    Some(stems_file_name(uuid, *id))
 }
 
 fn columns(connection: &Connection, table: &str, schema: &str) -> rusqlite::Result<Vec<String>> {

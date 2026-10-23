@@ -2,11 +2,22 @@
 name = "open-engine-backend"
 version.workspace = true
 edition.workspace = true
-description = "Open Engine Lib backend: reads the Engine library and plays tracks for the UI over gRPC"
+description = "Open Engine Lib backend: the library process, which reads the Engine library, and the audio process, which plays tracks, both for the UI over gRPC"
+
+# The UI starts both. The library process has no audio code and the audio process no
+# SQLite, so each links only what it uses.
+[[bin]]
+name = "open-engine-backend"
+path = "src/main.rs"
+
+[[bin]]
+name = "open-engine-audio"
+path = "src/audio/main.rs"
 
 [dependencies]
 dirs = "7.0.0"
 flate2 = "1.1.10"
+getrandom = "0.4.3"
 lofty = "0.25.4"
 open-engine-api = { path = "../api" }
 rodio = { version = "0.23.0", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }

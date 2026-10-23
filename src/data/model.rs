@@ -32,6 +32,8 @@ pub struct Track {
     pub lighting: Lighting,
     /// The SoundSwitch projects that have lighting for the track.
     pub lighting_projects: Vec<String>,
+    /// The track has stems rendered in the library.
+    pub has_stems: bool,
     /// How many cues the track had set when the library was fetched (the browser knows
     /// what it is now).
     pub cue_count: u32,
@@ -349,6 +351,7 @@ mod tests {
             rating: None,
             lighting: Lighting::None,
             lighting_projects: Vec::new(),
+            has_stems: false,
             cue_count: 0,
             loop_count: 0,
             origin: None,
@@ -394,6 +397,7 @@ mod tests {
             rating: None,
             lighting: Lighting::None,
             lighting_projects: Vec::new(),
+            has_stems: false,
             cue_count: 0,
             loop_count: 0,
             origin: None,

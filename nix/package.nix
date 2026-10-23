@@ -63,7 +63,7 @@ rustPlatform.buildRustPackage {
 
   postFixup = ''
     patchelf --add-rpath ${lib.makeLibraryPath uiLibs} $out/bin/open-engine-lib
-    patchelf --add-rpath ${lib.makeLibraryPath [ alsa-lib ]} $out/bin/open-engine-backend
+    patchelf --add-rpath ${lib.makeLibraryPath [ alsa-lib ]} $out/bin/open-engine-audio
   '';
 
   meta = {

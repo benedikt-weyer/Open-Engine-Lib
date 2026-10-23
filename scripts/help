@@ -3,13 +3,13 @@
 cat <<'TXT'
 Developer commands (scripts/ is on PATH via .envrc):
 
-  run [path]            Build the UI and backend and run the app (release);
+  run [path]            Build the UI, backend and audio process and run the app (release);
                         an optional path opens that Engine library
   help                  Show this list
 
 Cargo shortcuts:
 
-  cargo build           Build the UI and the backend (both are needed to run)
+  cargo build           Build the UI, the backend and the audio process (all are needed to run)
   cargo run             Run the UI (debug); build the backend first
   cargo test --workspace  Run all tests (UI, backend, gRPC end to end)
   cargo check           Type-check

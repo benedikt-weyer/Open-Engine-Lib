@@ -111,6 +111,9 @@ col_rating: Bewertung
 col_lighting: Licht
 lighting_rendered: "SoundSwitch-Lichtshow ist berechnet ({projects})"
 lighting_analysed: "In SoundSwitch analysiert, aber keine Lichtshow berechnet"
+col_stems: Stems
+stems_rendered: "Für diesen Titel sind Stems gerendert"
+stems_none: "Keine Stems gerendert"
 lighting_none: "Nicht in SoundSwitch"
 col_location: Speicherort
 location_streaming: Streaming (keine Datei hier)

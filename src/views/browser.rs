@@ -541,6 +541,7 @@ fn header<'a>(language: Language, widths: &ColumnWidths, kind: Kind) -> Element<
             heading_cell(&strings.col_cues),
             heading_cell(&strings.col_loops),
             heading_cell(&strings.col_lighting),
+            heading_cell(&strings.col_stems),
             heading_cell(&strings.col_origin),
         ],
         heading_cell(&strings.col_location),
@@ -692,6 +693,35 @@ fn lighting_cell<'a>(track: &'a Track, language: Language) -> Element<'a, Messag
         ),
         Lighting::Analysed => ("○", text::secondary, strings.lighting_analysed.clone()),
         Lighting::None => ("–", text::secondary, strings.lighting_none.clone()),
+    };
+    tooltip(
+        cell(mark).style(style),
+        text(tip).size(13),
+        tooltip::Position::FollowCursor,
+    )
+    .style(container::rounded_box)
+    .into()
+}
+
+/// Whether the library has stems rendered for the track: a filled dot, or a dash. Pointing
+/// at it says so in words. (Streaming tracks have no file to have stems for.)
+fn stems_cell<'a>(track: &'a Track, language: Language) -> Element<'a, Message> {
+    if track.streaming {
+        return Space::new().into();
+    }
+    let strings = language.strings();
+    let (mark, style, tip) = if track.has_stems {
+        (
+            "●",
+            text::success as fn(&Theme) -> text::Style,
+            &strings.stems_rendered,
+        )
+    } else {
+        (
+            "–",
+            text::secondary as fn(&Theme) -> text::Style,
+            &strings.stems_none,
+        )
     };
     tooltip(
         cell(mark).style(style),
@@ -880,6 +910,7 @@ fn track_row<'a>(
             cues_cell(cues),
             cues_cell(loops),
             lighting_cell(track, language),
+            stems_cell(track, language),
             origin_cell(origin, origin_reachable, language),
         ],
         location,

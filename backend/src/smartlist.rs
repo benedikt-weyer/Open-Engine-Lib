@@ -407,6 +407,7 @@ mod tests {
             album_art: None,
             rating: None,
             lighting: Lighting::default(),
+            has_stems: false,
         }
     }
 

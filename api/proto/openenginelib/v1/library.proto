@@ -440,6 +440,10 @@ message Track {
   uint32 cue_count = 15;
   // How many loop slots the track has saved, as of now (`SetLoops` changes it).
   uint32 loop_count = 16;
+  // The track has stems rendered: a `Stems/<originTrackId> <originDatabaseUuid>.stems`
+  // file in the library, as it was when the library was opened. Never set for streaming
+  // tracks or folders of music.
+  bool has_stems = 17;
 }
 
 enum SoundSwitchState {

@@ -112,6 +112,9 @@ col_lighting: Lighting
 lighting_rendered: "SoundSwitch lighting is rendered ({projects})"
 lighting_analysed: "Analysed in SoundSwitch, but no lighting is rendered"
 lighting_none: "Not in SoundSwitch"
+col_stems: Stems
+stems_rendered: "Stems are rendered for this track"
+stems_none: "No stems rendered"
 col_location: Location
 location_streaming: Streaming (no file here)
 play: Play

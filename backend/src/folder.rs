@@ -306,6 +306,7 @@ fn track(index: usize, dir: &Path, file: PathBuf, meta: Meta) -> Track {
         album_art: None,
         rating: None,
         lighting: Lighting::default(),
+        has_stems: false,
     }
 }
 

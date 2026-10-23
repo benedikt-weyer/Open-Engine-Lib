@@ -1,26 +1,27 @@
 # Architecture
 
-Open Engine Lib is two programs that run side by side and talk over gRPC.
+Open Engine Lib is three programs that run side by side. The UI talks to the library process over gRPC, and the library process talks to the audio process over gRPC. The UI never talks to the audio process, and the audio process talks to nobody else.
 
 ```
-┌──────────────────────┐   gRPC (openenginelib.v1)    ┌─────────────────────────┐
-│ open-engine-lib      │ ───────────────────────────▶ │ open-engine-backend     │
-│ the UI (iced)        │   127.0.0.1:<port>, token    │ library + audio         │
-│ spawns the backend ──┼─────── stdin / stdout ─────▶ │                         │
-└──────────────────────┘                              └───────────┬─────────────┘
-                                                                  │ copies once
-                                         Engine Library/Database2 ▼ ~/.cache/open-engine-lib
-                                         (m.db, hm.db, …)           (working copy, read here)
-                                         audio files ◀── played in place, never copied
+┌──────────────────┐  gRPC (v1)   ┌─────────────────────────┐  gRPC (AudioService)  ┌─────────────────────┐
+│ open-engine-lib  │ ───────────▶ │ open-engine-backend     │ ────────────────────▶ │ open-engine-audio   │
+│ the UI (iced)    │ 127.0.0.1,   │ the library process:    │   127.0.0.1, token,   │ plays the queue,    │
+│ spawns the       │ token        │ libraries, sync, cues,  │   stdin / stdout      │ computes waveforms  │
+│ library process ─┼─ stdin/stdout▶ covers, beatgrids       │ spawns the audio ────▶│ (rodio, ALSA)       │
+└──────────────────┘              └───────────┬─────────────┘ process               └─────────────────────┘
+                                              │ copies once
+                     Engine Library/Database2 ▼ ~/.cache/open-engine-lib
+                     (m.db, hm.db, …)           (working copy, read here)
+                     audio files ◀── played in place by the audio process, never copied
 ```
 
 | Crate | Directory | Role |
 | --- | --- | --- |
 | `open-engine-lib` | `src/` | The UI: windows, settings, localisation, the library browser. Knows nothing about SQLite or audio. |
-| `open-engine-backend` | `backend/` | Reads the Engine library, owns the playback queue, plays audio (rodio). |
-| `open-engine-api` | `api/` | The `.proto` files and the generated tonic code both sides use. |
+| `open-engine-backend` | `backend/` | Two programs. `open-engine-backend` (`src/main.rs`) is the library process: it reads the Engine library, answers the UI, and starts and uses the audio process. `open-engine-audio` (`src/audio/`) is the audio process: it owns the playback queue and the audio device (rodio) and decodes files for waveforms. It knows no libraries; it is told which files to play. Only the library process links SQLite and only the audio process links ALSA. |
+| `open-engine-api` | `api/` | The `.proto` files and the generated tonic code both sides use, and the startup helpers both processes share (`open_engine_api::server`). |
 
-All three share one version (`[workspace.package]` in the root `Cargo.toml`).
+All three share one version (`[workspace.package]` in the root `Cargo.toml`). The three executables have to stay in one folder: the UI looks for the library process next to itself, and the library process looks for the audio process next to itself (override: `OPEN_ENGINE_AUDIO`).
 
 ## Starting and stopping
 
@@ -31,6 +32,8 @@ All three share one version (`[workspace.package]` in the root `Cargo.toml`).
 5. Every request has to carry `authorization: Bearer <secret>`, otherwise the backend answers `UNAUTHENTICATED`. This keeps other programs on the machine from using the loopback port.
 6. The backend exits when its stdin closes. That happens when the UI exits or is killed, so the backend never outlives it. The UI also kills it when it drops its connection.
 
+The library process starts the audio process the same way, before it listens: it looks for `open-engine-audio` next to itself, gives it a random secret of its own in `OPEN_ENGINE_BACKEND_TOKEN`, reads `LISTENING <address>` from its output, calls `BackendService.GetInfo` and keeps its stdin pipe open. The audio process exits when that pipe closes, which happens when the library process exits or is killed (a test checks this), and is killed when the library process drops it. If it can't be started, the library process says so on stderr and goes on: libraries can be read, and playing or a waveform fails with `UNAVAILABLE` and the reason.
+
 If the backend is missing or fails to start, the library page says so and offers to try again.
 
 ## The API and its versioning
@@ -39,7 +42,8 @@ The protocol lives in `api/proto/openenginelib/v1/`:
 
 - `backend.proto`: `BackendService.GetInfo`, the version handshake.
 - `library.proto`: `LibraryService`: `OpenLibrary`, `CloseLibrary`, `SetRating`, `ListTracks` (server streaming, in batches), `ListPlaylists`, `GetAlbumArt`, `GetWaveform`, `GetCues`, `SetCues`, `GetLoops`, `SetLoops`, `OpenLocalFolder`.
-- `playback.proto`: `PlaybackService`: `Play`, `TogglePause`, `Stop`, `Next`, `Previous`, `Seek`, `GetStatus`. The backend owns the queue and moves on to the next track by itself; the UI polls `GetStatus` while playing.
+- `playback.proto`: `PlaybackService`: `Play`, `TogglePause`, `Stop`, `Next`, `Previous`, `Seek`, `GetStatus`. The audio process owns the queue and moves on to the next track by itself; the UI polls `GetStatus` while playing. The library process serves this service for the UI: it looks the track ids up (location, and the saved origin as the fallback) and passes the files on to the audio process, then passes its answer back.
+- `audio.proto`: `AudioService`, which only the library process uses: the same calls, with the files in the request instead of track ids (`QueueEntry`), a `Close` (stop and release the audio device, which the library process calls when a library is opened or closed) and `AnalyzeWaveform` (the decoding behind `GetWaveform`; the library process adds the beatgrid). It is in the `v1` package like the rest and follows the same rules.
 
 Versioning rules:
 
@@ -86,6 +90,12 @@ Lists are cut at 200 entries (the counts are complete). Matching is by Engine's 
 
 **Edits:** the app changes the working copy (star ratings, cues and loops, see below) and never the source: an edit reaches the source only through this window. Opening a library re-copies the working copy when the source has changed since. So that this can't throw edits away, the backend leaves an `edited` mark in the cache folder when it changes the working copy, which writing to the source clears. A working copy that has the mark and is replaced because the source changed is first moved to `unsynced-edits/` in the cache folder (the latest only), so the edits can still be recovered from there. The app doesn't say so yet.
 
+## Stems
+
+The **Stems** column of the track list shows whether the library has stems rendered for a track: a filled dot if there is a `Stems/<originTrackId> <originDatabaseUuid>.stems` file in the library's folder for the track's origin, a dash if not (nothing for streaming tracks, and the column is left out for a folder of music). The library process lists the `Stems` folder once when it opens the library, so a file that appears later shows after the library is reloaded. `ListTracks` has it as `has_stems`. Stems are copied by "Sync to…" when asked to (see below).
+
+**Stems cannot be played yet.** The files cannot be decoded with what is available (see [Stems](engine-library-format.md#stems)), so the app has no stem switch or per-stem muting.
+
 ## Ratings and SoundSwitch lighting
 
 Two more columns in the track list.
@@ -124,7 +134,7 @@ While a song is loaded in the player, the UI shows a DJ-style deck above the pla
 
   The height is the loudness of the loudest band in all schemes but `stacked`, where every band has its own layer. The color maths is in `colors.rs`.
 
-- **Waveform:** Engine only stores a coarse overview (1,024 columns for the whole track), too rough to zoom into, so the backend computes its own from the audio file. `GetWaveform` decodes the whole file, splits it into low (below about 600 Hz), mid (about 600 Hz to 4 kHz) and high (above about 4 kHz) with second-order Butterworth filters and keeps the peak of each band per 10 ms. The two split points are settings (`waveform_low_mid_hz` and `waveform_mid_high_hz` in `config.toml` and the NixOS module, 20 to 20000 Hz, the first below the second; nonsense values are replaced by the defaults with a warning on the Settings page). The UI sends them with every `GetWaveform` request, and the backend keeps the measured peaks per file and split. A file with a low sample rate can't hold a high split point, so it is lowered for that file. The config is read at startup, so changing the split needs a restart. A 5–8 minute track takes 1–2 seconds; the backend keeps the last 8. The overview strip is the same data pooled down to 1,200 columns in the UI, by RMS rather than by peak: a bin of a few seconds always contains a peak of every band, so peak pooling made all three bands full height everywhere and the front layer covered the others (in the stacked scheme, a nearly all-white overview).
+- **Waveform:** Engine only stores a coarse overview (1,024 columns for the whole track), too rough to zoom into, so the audio process computes its own from the audio file (`AnalyzeWaveform`, which the library process calls for `GetWaveform` and adds the beatgrid to). It decodes the whole file, splits it into low (below about 600 Hz), mid (about 600 Hz to 4 kHz) and high (above about 4 kHz) with second-order Butterworth filters and keeps the peak of each band per 10 ms. The two split points are settings (`waveform_low_mid_hz` and `waveform_mid_high_hz` in `config.toml` and the NixOS module, 20 to 20000 Hz, the first below the second; nonsense values are replaced by the defaults with a warning on the Settings page). The UI sends them with every `GetWaveform` request, and the backend keeps the measured peaks per file and split. A file with a low sample rate can't hold a high split point, so it is lowered for that file. The config is read at startup, so changing the split needs a restart. A 5–8 minute track takes 1–2 seconds; the backend keeps the last 8. The overview strip is the same data pooled down to 1,200 columns in the UI, by RMS rather than by peak: a bin of a few seconds always contains a peak of every band, so peak pooling made all three bands full height everywhere and the front layer covered the others (in the stacked scheme, a nearly all-white overview).
 - **Fixed scaling:** nothing is fitted to the track or to its bands. The backend measures the loudest sample of each band per 10 ms as a share of full scale (a full-scale sine wave in the band is 1). The height drawn is `min(1, peak × gain) ^ 0.8`, the same for every track: a quiet track is drawn lower than a loud one, and a band a track has little of is drawn low. (Mastered music peaks at about 0.9 in the lows, 0.8 in the mids and 0.7 in the highs, with the highs lower on average, so gains of 1 already look natural, with the lows tallest and the highs smallest.) The three gains are settings: `waveform_gain_low`, `waveform_gain_mid` and `waveform_gain_high` (above 0, at most 20; 1 by default), as sliders in a "Waveform levels" section of the Settings page (saved when you let go, and the waveform in the player is redrawn at once) and in `config.toml` and the NixOS module. A gain that makes no sense is replaced by 1 on its own, with a warning on the Settings page. The backend keeps the raw peaks, so changing a gain doesn't analyse the file again, and the overview strip uses the same scale, so it follows the gains too.
 - **Beatgrid:** this is Engine's own analysis, read from `PerformanceData.beatData` (adjusted grid if there is one, else the analysed one) and sent as markers. Between two markers the beats are evenly spaced, before the first and after the last they carry on at the nearest spacing, and beats whose number is a multiple of 4 start a bar. Tracks without a grid just have no lines, and the deck says so.
 - **Delay:** the sound reaches the speakers a little after the player has played it (the audio buffer, the sound server, Bluetooth...), so a waveform drawn at the reported position runs ahead of what is heard. `waveform_delay_ms` (a slider on the Settings page, `config.toml` and the NixOS module; -500 to 500 ms, 0 by default, saved when you let go) draws the whole deck, the zoomed waveform with its beatgrid and the overview's playhead, that long behind the reported position (`Clock::delayed`); negative moves it ahead. It changes only what is drawn: clicking the overview still seeks to the point clicked.
@@ -163,7 +173,7 @@ Besides Engine libraries, a plain folder of music files can be opened. The **Loc
 - **Tracks:** `OpenLocalFolder` scans the folder (`backend/src/folder.rs`): every file below it that the player can decode (`mp3`, `flac`, `wav`, `ogg`, `m4a`, `mp4`; by extension) is a track. Hidden files and folders (names starting with a dot, like the `._` files macOS leaves on drives) are skipped, and so are links to folders. The tags give the title (else the file name), artist, album, genre and BPM (`BPM` or `TBPM`/`tmpo`), and the file's properties the length; they are read with the `lofty` crate on as many threads as there are cores, without covers. A file that can't be read is still a track, with only its name. A real USB drive with 5,300 files in 3,800 folders took about 20 seconds cold the first time, shown as a progress bar (see Progress below).
 - **Tag cache:** what was read from a file is remembered in `tags.db` (SQLite, `backend/src/tag_cache.rs`) in the folder scratch dir under the cache root, keyed by the file's full path together with its size and modification time. A file is only taken from the cache while both still match; a new, changed or replaced file is read again, and files that are gone are dropped from it. A file that can't be read is not remembered, so it is tried again next time. The cache is only a speed-up: if it can't be opened or written, the folder opens all the same (a file that is not a database is replaced). Bump `VERSION` in `tag_cache.rs` when what is read from a file changes. Opening a folder of 3,153 files on a warm mount went from about 220 ms to about 40 ms; the gain is larger on a cold drive, where the remaining cost is one `stat` per file.
 - **Folders:** each folder with music below it is a playlist, in the tree in the sidebar like the playlists of an Engine library, and shows the tracks of all folders below it too (so a folder like `Artist` shows all its albums). "All tracks" is every file, including those directly in the chosen folder. Folders and files are ordered by name, ignoring case.
-- **What is missing:** a folder has nothing but what the files say. The track list leaves out the Rating, Cues, Loops, Lighting and Origin columns, there are no cue and loop pads or covers, the waveform has no beatgrid, and nothing can be edited or synced: the buttons for playlists, smart playlists, syncing and saving origins are not shown, and the backend refuses (`FAILED_PRECONDITION`) `SaveLibraryAs`, the sync and playlist calls, `SetRating`, `SetCues` and `SetLoops` for such a library. Nothing is written to the folder or copied.
+- **What is missing:** a folder has nothing but what the files say. The track list leaves out the Rating, Cues, Loops, Lighting, Stems and Origin columns, there are no cue and loop pads or covers, the waveform has no beatgrid, and nothing can be edited or synced: the buttons for playlists, smart playlists, syncing and saving origins are not shown, and the backend refuses (`FAILED_PRECONDITION`) `SaveLibraryAs`, the sync and playlist calls, `SetRating`, `SetCues` and `SetLoops` for such a library. Nothing is written to the folder or copied.
 - **Not done:** covers from the files' embedded pictures, a rescan when the folder changes (close and open it again), and audio formats the player can't decode (AIFF, Opus, ...).
 
 ## Restoring the last session
