@@ -265,6 +265,7 @@ sync_origins_summary: "Herkunft: {count} neu oder geändert"
 libsync_origins: "Herkünfte, die geschrieben werden: {count}"
 libsync_stars: Die Sterne auf die der geöffneten Bibliothek setzen
 libsync_locations: Die Orte (Pfade) mit denen der geöffneten Bibliothek überschreiben
+libsync_all: "Alles synchronisieren (mit Bereinigung)"
 libsync_stems: "Die Stems der Titel kopieren, die beide Bibliotheken haben, und der kopierten (die .stems-Dateien sind groß)"
 libsync_copy: "Die Titel in einen Ordner Engine-Tracks (Interpret/Album) neben der Bibliothek kopieren und fehlende hinzufügen"
 libsync_tracks_summary: "Titel: {added} hinzuzufügen, {changed} zu ändern"

@@ -2899,7 +2899,7 @@ mod tests {
                 target: target.clone(),
                 initial: false,
                 options: library_sync_view::Options {
-                    remove_missing: true,
+                    remove_missing: false,
                     ..Default::default()
                 },
                 result: Ok(library_diff(9)),

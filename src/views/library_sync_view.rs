@@ -43,14 +43,16 @@ pub struct Options {
 }
 
 impl Default for Options {
-    /// Stars are synced, the rest is for the user to ask for.
+    /// "Sync all (with prune)" is selected: everything is synced and what only the other
+    /// library has is deleted. (The ticks below it can take parts back.)
     fn default() -> Self {
         Self {
-            remove_missing: false,
+            remove_missing: true,
             stars: true,
+            // (The copied files' places are the locations.)
             locations: false,
-            copy_tracks: false,
-            copy_stems: false,
+            copy_tracks: true,
+            copy_stems: true,
             reverse: false,
         }
     }
@@ -65,9 +67,19 @@ pub enum Setting {
     CopyTracks,
     CopyStems,
     Reverse,
+    /// The "Sync all (with prune)" button: everything on, the direction as it is.
+    All,
 }
 
 impl Options {
+    /// Whether "Sync all (with prune)" is what is selected.
+    pub fn is_all(self) -> bool {
+        self == Self {
+            reverse: self.reverse,
+            ..Self::default()
+        }
+    }
+
     pub fn with(mut self, setting: Setting, on: bool) -> Self {
         match setting {
             Setting::RemoveMissing => self.remove_missing = on,
@@ -76,6 +88,12 @@ impl Options {
             Setting::CopyTracks => self.copy_tracks = on,
             Setting::CopyStems => self.copy_stems = on,
             Setting::Reverse => self.reverse = on,
+            Setting::All => {
+                self = Self {
+                    reverse: self.reverse,
+                    ..Self::default()
+                }
+            }
         }
         self
     }
@@ -348,6 +366,13 @@ fn ready<'a>(
     };
     let words =
         |forward: &'a String, backward: &'a String| if reverse { backward } else { forward };
+    let all = button(text(&strings.libsync_all))
+        .on_press_maybe(active.then_some(Message::LibrarySyncOption(Setting::All, true)))
+        .style(if options.is_all() {
+            button::primary
+        } else {
+            button::secondary
+        });
     let mut content = column![
         pick(&strings.libsync_direction_forward, false),
         pick(&strings.libsync_direction_reverse, true),
@@ -356,6 +381,7 @@ fn ready<'a>(
             &[("path", &diff.target_path)]
         )),
         secondary(words(&strings.libsync_hint, &strings.libsync_hint_reverse).clone()),
+        all,
         tick(
             words(&strings.libsync_remove, &strings.libsync_remove_reverse),
             options.remove_missing,
@@ -539,18 +565,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stars_are_on_by_default_and_the_rest_is_asked_for() {
+    fn everything_with_prune_is_selected_by_default_and_the_button_restores_it() {
         let options = Options::default();
-        assert!(options.stars);
-        assert!(!options.remove_missing && !options.locations && !options.copy_tracks);
-        assert!(!options.copy_stems);
+        assert!(options.is_all());
+        assert!(options.stars && options.remove_missing && options.copy_tracks);
+        assert!(options.copy_stems && !options.locations && !options.reverse);
 
         let options = options
-            .with(Setting::CopyTracks, true)
+            .with(Setting::CopyTracks, false)
             .with(Setting::Stars, false)
-            .with(Setting::RemoveMissing, true);
-        assert!(options.copy_tracks && options.remove_missing && !options.stars);
-        assert!(!options.locations);
+            .with(Setting::RemoveMissing, false)
+            .with(Setting::Reverse, true);
+        assert!(!options.is_all());
+        assert!(!options.copy_tracks && !options.remove_missing && !options.stars);
+
+        // The button brings the rest back and leaves the direction alone.
+        let options = options.with(Setting::All, true);
+        assert!(options.is_all() && options.reverse);
+        assert!(options.copy_tracks && options.remove_missing && options.stars);
     }
 
     #[test]

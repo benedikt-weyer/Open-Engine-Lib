@@ -265,6 +265,7 @@ sync_origins_summary: "Origins: {count} new or changed"
 libsync_origins: "Origins to write: {count}"
 libsync_stars: Set the stars to those of the open library
 libsync_locations: Overwrite the locations (paths) with those of the open library
+libsync_all: "Sync all (with prune)"
 libsync_stems: "Copy the stems of the tracks both libraries have and of the copied ones (the .stems files are big)"
 libsync_copy: "Copy the tracks into an Engine-Tracks folder (Artist/Album) beside the library, and add the ones it lacks"
 libsync_tracks_summary: "Tracks: {added} to add, {changed} to change"
