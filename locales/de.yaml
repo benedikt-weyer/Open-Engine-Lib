@@ -57,6 +57,9 @@ waveform_gains_hint: "Ein fester Maßstab, für jeden Titel gleich: 1,00× zeich
 waveform_gain_low: Tiefen
 waveform_gain_mid: Mitten
 waveform_gain_high: Höhen
+waveform_delay_heading: Wellenform-Verzögerung
+waveform_delay_hint: "Läuft die Wellenform dem Ton voraus, verzögere sie; hinkt sie hinterher, wähle einen negativen Wert. Der Ton erreicht die Lautsprecher etwas später, als er abgespielt wird, je nach Audio-Setup unterschiedlich."
+reset_waveform_delay: Verzögerung zurücksetzen
 reset_waveform_gains: Pegel zurücksetzen
 startup_heading: Start
 reopen_library: Letzte Bibliothek wieder öffnen

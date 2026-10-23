@@ -129,6 +129,8 @@ struct State {
     backend_error: Option<String>,
     /// The waveform gain slider being dragged and where it is.
     gain_draft: Option<(WaveformBand, f32)>,
+    /// The waveform delay slider being dragged and where it is, in milliseconds.
+    delay_draft: Option<i32>,
     /// The window comparing the working copy with the source, while it is open.
     sync: Option<SyncStage>,
     /// Where the library is being saved to, and why the last save failed.
@@ -151,6 +153,10 @@ pub enum Message {
     WaveformGainDragged(WaveformBand, f32),
     WaveformGainReleased,
     ResetWaveformGains,
+    /// The waveform delay slider is being dragged to a value (ms): not saved until it is let go.
+    WaveformDelayDragged(i32),
+    WaveformDelayReleased,
+    ResetWaveformDelay,
     /// The border after a column header was pressed.
     ResizeStarted(Column),
     /// The pointer moved, to this x, while a column was being resized.
@@ -260,6 +266,7 @@ impl State {
             play_source: None,
             backend_error: None,
             gain_draft: None,
+            delay_draft: None,
             sync: None,
             saving: None,
             save_error: None,
@@ -631,6 +638,24 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .map(|e| e.to_string());
             state.waveforms.clear();
         }
+        Message::WaveformDelayDragged(delay) => state.delay_draft = Some(delay),
+        Message::WaveformDelayReleased => {
+            if let Some(delay) = state.delay_draft.take() {
+                state.config_error = state
+                    .config
+                    .set_waveform_delay_ms(delay)
+                    .err()
+                    .map(|e| e.to_string());
+            }
+        }
+        Message::ResetWaveformDelay => {
+            state.delay_draft = None;
+            state.config_error = state
+                .config
+                .set_waveform_delay_ms(0)
+                .err()
+                .map(|e| e.to_string());
+        }
         Message::ReopenLibraryToggled(reopen) => {
             state.config_error = state
                 .config
@@ -996,6 +1021,7 @@ fn view(state: &State) -> Element<'_, Message> {
             &state.config,
             state.config_error.as_deref(),
             state.gain_draft,
+            state.delay_draft,
         ),
     };
 
@@ -1139,7 +1165,10 @@ fn open_library<'a>(
     let deck = now.as_ref().map(|now| {
         deck::view(
             state.waveforms.display(now.track.id),
-            state.clock,
+            // Trailing the player by the set delay, to line up with what is heard.
+            state
+                .clock
+                .delayed(f64::from(state.config.effective().waveform_delay_ms) / 1000.0),
             colors,
             language,
         )
@@ -1294,6 +1323,7 @@ mod tests {
             play_source: None,
             backend_error: None,
             gain_draft: None,
+            delay_draft: None,
             sync: None,
             saving: None,
             save_error: None,

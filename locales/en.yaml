@@ -58,6 +58,9 @@ waveform_gain_low: Low
 waveform_gain_mid: Mid
 waveform_gain_high: High
 reset_waveform_gains: Reset the levels
+waveform_delay_heading: Waveform delay
+waveform_delay_hint: "If the waveform runs ahead of the sound, delay it; if it lags behind, make the value negative. Sound reaches the speakers a little after it is played, by an amount that depends on your audio setup."
+reset_waveform_delay: Reset the delay
 startup_heading: Startup
 reopen_library: Reopen the last library
 restore_position: Also go back to the playlist, song and position in it (paused)

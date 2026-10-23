@@ -43,6 +43,13 @@ impl Clock {
         (self.position + moved).clamp(0.0, duration)
     }
 
+    /// The same clock, `seconds` behind: for drawing the waveform later than the player
+    /// reports it, to line up with the sound. (Negative runs ahead.)
+    pub fn delayed(mut self, seconds: f64) -> Self {
+        self.position -= seconds;
+        self
+    }
+
     pub fn is_running(&self) -> bool {
         self.running
     }
@@ -139,5 +146,18 @@ mod tests {
         assert_eq!(clock.position(after(start, 2.0), 300.0), 96.0);
         clock.report(96.0, true, after(start, 2.0));
         assert_eq!(clock.position(after(start, 2.0), 300.0), 96.0);
+    }
+
+    #[test]
+    fn a_delayed_clock_trails_and_stays_within_the_track() {
+        let start = Instant::now();
+        let mut clock = Clock::new(start);
+        clock.report(10.0, true, start);
+        let later = after(start, 1.0);
+        assert!((clock.delayed(0.25).position(later, 300.0) - 10.75).abs() < 1e-9);
+        assert!((clock.delayed(-0.25).position(later, 300.0) - 11.25).abs() < 1e-9);
+        // Near the start it can't go before the beginning, nor past the end near the end.
+        assert_eq!(clock.delayed(30.0).position(start, 300.0), 0.0);
+        assert_eq!(clock.delayed(-300.0).position(start, 300.0), 300.0);
     }
 }

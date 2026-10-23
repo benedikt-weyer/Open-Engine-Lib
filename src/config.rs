@@ -21,6 +21,9 @@ use open_engine_api::{
 };
 use serde::{Deserialize, Serialize};
 
+/// How far the waveform's delay can be set either way, in milliseconds.
+pub const WAVEFORM_DELAY_MAX_MS: i32 = 500;
+
 const APP_DIR: &str = "open-engine-lib";
 const CONFIG_FILE: &str = "config.toml";
 const OVERRIDES_FILE: &str = "overrides.toml";
@@ -117,6 +120,10 @@ pub struct Config {
     pub waveform_gain_low: f32,
     pub waveform_gain_mid: f32,
     pub waveform_gain_high: f32,
+    /// How far the waveform trails the position the player reports, in milliseconds: what
+    /// makes it line up with what is heard, since the sound reaches the speakers a little
+    /// after the player has played it. Negative moves the waveform ahead.
+    pub waveform_delay_ms: i32,
     /// Open the library that was open when the app was last closed.
     pub reopen_library: bool,
     /// When reopening it, also go back to the playlist, the song and its position.
@@ -151,6 +158,9 @@ impl Config {
             self.waveform_low_mid_hz = WAVEFORM_LOW_MID_HZ;
             self.waveform_mid_high_hz = WAVEFORM_MID_HIGH_HZ;
         }
+        self.waveform_delay_ms = self
+            .waveform_delay_ms
+            .clamp(-WAVEFORM_DELAY_MAX_MS, WAVEFORM_DELAY_MAX_MS);
         // A gain that makes no sense is replaced on its own; the others are kept.
         for (gain, default) in [
             (&mut self.waveform_gain_low, WAVEFORM_GAIN_LOW),
@@ -176,6 +186,7 @@ impl Default for Config {
             waveform_gain_low: WAVEFORM_GAIN_LOW,
             waveform_gain_mid: WAVEFORM_GAIN_MID,
             waveform_gain_high: WAVEFORM_GAIN_HIGH,
+            waveform_delay_ms: 0,
             reopen_library: true,
             restore_position: true,
         }
@@ -202,6 +213,8 @@ struct Layer {
     waveform_gain_mid: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     waveform_gain_high: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_delay_ms: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reopen_library: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,6 +246,9 @@ impl Layer {
         }
         if let Some(gain) = self.waveform_gain_high {
             config.waveform_gain_high = gain;
+        }
+        if let Some(delay) = self.waveform_delay_ms {
+            config.waveform_delay_ms = delay;
         }
         if let Some(reopen_library) = self.reopen_library {
             config.reopen_library = reopen_library;
@@ -355,6 +371,13 @@ impl ConfigStore {
                 ));
             }
         }
+        if config.waveform_delay_ms.abs() > WAVEFORM_DELAY_MAX_MS {
+            self.warnings.push(format!(
+                "Limiting waveform_delay_ms = {}: it must be between -{WAVEFORM_DELAY_MAX_MS} and \
+                 {WAVEFORM_DELAY_MAX_MS}.",
+                config.waveform_delay_ms
+            ));
+        }
         if !config.waveform_split_is_valid() {
             self.warnings.push(format!(
                 "Ignoring the waveform split frequencies {} Hz and {} Hz: they must be between \
@@ -419,6 +442,11 @@ impl ConfigStore {
             layer.waveform_gain_mid = Some(WAVEFORM_GAIN_MID);
             layer.waveform_gain_high = Some(WAVEFORM_GAIN_HIGH);
         })
+    }
+
+    /// Sets how far the waveform trails the player, in milliseconds.
+    pub fn set_waveform_delay_ms(&mut self, delay: i32) -> io::Result<()> {
+        self.edit(|layer| layer.waveform_delay_ms = Some(delay))
     }
 
     pub fn set_reopen_library(&mut self, reopen: bool) -> io::Result<()> {
@@ -649,6 +677,34 @@ mod tests {
         let reset = ConfigStore::load(dir.locations()).effective();
         assert_eq!(reset.waveform_gain(WaveformBand::Mid), 1.0);
         assert_eq!(reset.waveform_gain(WaveformBand::High), 1.0);
+    }
+
+    #[test]
+    fn the_waveform_delay_is_a_saved_choice_within_limits() {
+        let dir = TempDir::new();
+        let mut store = ConfigStore::load(dir.locations());
+        assert_eq!(store.effective().waveform_delay_ms, 0);
+
+        store.set_waveform_delay_ms(120).unwrap();
+        assert_eq!(
+            ConfigStore::load(dir.locations())
+                .effective()
+                .waveform_delay_ms,
+            120
+        );
+        store.set_waveform_delay_ms(-80).unwrap();
+        assert_eq!(
+            ConfigStore::load(dir.locations())
+                .effective()
+                .waveform_delay_ms,
+            -80
+        );
+
+        // A value from a hand-written file that is out of range is brought into range.
+        fs::write(dir.path("user.toml"), "waveform_delay_ms = 9000\n").unwrap();
+        let store = ConfigStore::load(dir.locations());
+        assert_eq!(store.effective().waveform_delay_ms, WAVEFORM_DELAY_MAX_MS);
+        assert!(store.warnings[0].contains("waveform_delay_ms"));
     }
 
     #[test]

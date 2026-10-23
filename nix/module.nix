@@ -95,6 +95,18 @@ in
         description = "Like `waveform_gain_low`, for the high band.";
       };
 
+      waveform_delay_ms = lib.mkOption {
+        type = lib.types.nullOr (lib.types.ints.between (-500) 500);
+        default = null;
+        example = 80;
+        description = ''
+          How far the waveform trails the position the player reports, in milliseconds. Sound
+          reaches the speakers a little after it is played, so a waveform that runs ahead of
+          what you hear needs a delay; a negative value moves it ahead instead. Between -500
+          and 500. Unset means 0.
+        '';
+      };
+
       reopen_library = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
         default = null;

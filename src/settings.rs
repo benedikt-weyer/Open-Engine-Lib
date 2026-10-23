@@ -2,7 +2,9 @@ use iced::Element;
 use iced::widget::{button, checkbox, column, radio, row, slider, text};
 
 use crate::Message;
-use crate::config::{ConfigStore, Language, ThemeMode, WaveformBand, WaveformColors};
+use crate::config::{
+    ConfigStore, Language, ThemeMode, WAVEFORM_DELAY_MAX_MS, WaveformBand, WaveformColors,
+};
 use crate::i18n::fill;
 
 fn theme_name(language: Language, theme: ThemeMode) -> &'static str {
@@ -23,6 +25,9 @@ fn waveform_colors_name(language: Language, colors: WaveformColors) -> &'static 
     }
 }
 
+/// The range of the delay slider, in milliseconds. (The same as the config file accepts.)
+const DELAY_SLIDER: std::ops::RangeInclusive<i32> = -WAVEFORM_DELAY_MAX_MS..=WAVEFORM_DELAY_MAX_MS;
+
 /// The range of the gain sliders. (The config file accepts more.)
 const GAIN_SLIDER: std::ops::RangeInclusive<f32> = 0.25..=4.0;
 
@@ -35,11 +40,13 @@ fn band_label(language: Language, band: WaveformBand) -> &'static str {
     }
 }
 
-/// `draft` is the gain slider that is being dragged: it shows where it is before it is saved.
+/// `draft` is the gain slider that is being dragged, and `delay_draft` the delay slider:
+/// they show where they are before it is saved.
 pub fn view<'a>(
     config: &'a ConfigStore,
     error: Option<&'a str>,
     draft: Option<(WaveformBand, f32)>,
+    delay_draft: Option<i32>,
 ) -> Element<'a, Message> {
     let current = config.effective();
     let language = current.language;
@@ -108,6 +115,26 @@ pub fn view<'a>(
     }
     page = page
         .push(button(text(&strings.reset_waveform_gains)).on_press(Message::ResetWaveformGains));
+
+    let delay = delay_draft.unwrap_or(current.waveform_delay_ms);
+    page = page.push(text(&strings.waveform_delay_heading).size(20));
+    page = page.push(
+        text(&strings.waveform_delay_hint)
+            .size(14)
+            .style(text::secondary),
+    );
+    page = page.push(
+        row![
+            slider(DELAY_SLIDER, delay, Message::WaveformDelayDragged)
+                .step(5)
+                .on_release(Message::WaveformDelayReleased)
+                .width(250),
+            text(format!("{delay} ms")).width(70),
+            button(text(&strings.reset_waveform_delay)).on_press(Message::ResetWaveformDelay),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+    );
 
     page = page.push(text(&strings.startup_heading).size(20));
     page = page.push(

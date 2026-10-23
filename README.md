@@ -25,6 +25,7 @@ programs.open-engine-lib = {
   settings.waveform_gain_low = 1.0;     # how much each waveform band is amplified; a fixed scale, 1.0 = true level
   settings.waveform_gain_mid = 1.0;
   settings.waveform_gain_high = 1.0;
+  settings.waveform_delay_ms = 0;   # delay the waveform to line up with the sound, -500 to 500 ms (default: 0)
   settings.reopen_library = true;   # reopen the last library at startup (default: true)
   settings.restore_position = true; # ...and its playlist, song and position, paused (default: true)
 };
