@@ -1,12 +1,15 @@
 //! A plain folder of music as a library: the audio files below it are the tracks, and its
 //! folders are the playlists (a folder holds the tracks of all the folders below it too).
 //! There is no Engine library behind it, so there is nothing but what the files say: the
-//! tags give the title, artist, album, genre and BPM, and the file the length.
+//! tags give the title, artist, album, genre and BPM, and the file the length. What is read
+//! from a file is remembered (`tag_cache.rs`), so that opening the folder again only reads
+//! the files that are new or changed.
 //!
 //! Only files the player can play are tracks. Hidden files and folders (a name starting
 //! with a dot, such as the `._` files macOS leaves on a drive) are skipped, and so are links
 //! to folders, which could lead back to where they came from.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,6 +21,7 @@ use lofty::probe::Probe;
 use crate::library::{Playlist, Track};
 use crate::progress::{Phase, Progress};
 use crate::soundswitch::Lighting;
+use crate::tag_cache::{Stamp, TagCache};
 
 /// What the player can decode (see the `rodio` features in `Cargo.toml`), by file extension.
 const EXTENSIONS: [&str; 6] = ["mp3", "flac", "wav", "ogg", "m4a", "mp4"];
@@ -51,21 +55,28 @@ pub fn is_audio(path: &Path) -> bool {
         })
 }
 
-/// Finds the music below `dir`. Fails only if `dir` itself can't be read. `progress` is
-/// told how many files are found, then how many of them have been read.
-pub fn scan(dir: &Path, progress: &Progress) -> io::Result<Scanned> {
+/// Finds the music below `dir`. Fails only if `dir` itself can't be read. What was read from
+/// the files is kept in the cache file `cache` (not used if `None`). `progress` is told how
+/// many files are found, then how many of them have been looked at.
+pub fn scan(dir: &Path, cache: Option<&Path>, progress: &Progress) -> io::Result<Scanned> {
     progress.phase(Phase::Scanning, 0, 0);
     let mut root = walk(dir, String::new(), 0, progress)?;
     let mut files = Vec::new();
     number(&mut root, &mut files);
 
     progress.phase(Phase::ReadingTags, 0, files.len() as u32);
-    let metadata = read_all(&files, progress);
+    let mut cache = cache.and_then(TagCache::open);
+    let remembered = cache.as_ref().map(|cache| cache.load(dir));
+    let remembered = remembered.unwrap_or_default();
+    let read = read_all(&files, &remembered, progress);
+    if let Some(cache) = &mut cache {
+        remember(cache, &files, &read, &remembered);
+    }
     let tracks = files
         .into_iter()
-        .zip(metadata)
+        .zip(read)
         .enumerate()
-        .map(|(index, (file, meta))| track(index, dir, file, meta))
+        .map(|(index, (file, read))| track(index, dir, file, read.meta))
         .collect();
 
     let mut playlists = Vec::new();
@@ -147,19 +158,33 @@ fn list(node: &Node, depth: usize, parent: Option<usize>, playlists: &mut Vec<Pl
     }
 }
 
-#[derive(Default)]
-struct Meta {
-    title: String,
-    artist: String,
-    album: String,
-    genre: String,
-    bpm: Option<f64>,
-    seconds: Option<u32>,
+#[derive(Default, Clone)]
+pub struct Meta {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub bpm: Option<f64>,
+    pub seconds: Option<u32>,
 }
 
-/// The tags and length of every file, read on as many threads as there are cores: the
-/// files are many, and each is a read from the disk. Each one read is told to `progress`.
-fn read_all(files: &[PathBuf], progress: &Progress) -> Vec<Meta> {
+/// What is known about a file.
+struct Read {
+    meta: Meta,
+    /// How the file looked when `meta` was read from it just now, if it is worth
+    /// remembering (it was not remembered already, and could be read).
+    fresh: Option<Stamp>,
+}
+
+/// The tags and length of every file, on as many threads as there are cores: the files are
+/// many, and each is a read from the disk. A file that looks as it did when it was
+/// `remembered` (its path, size and modification time) is not read again. Each file looked
+/// at is told to `progress`.
+fn read_all(
+    files: &[PathBuf],
+    remembered: &HashMap<String, (Stamp, Meta)>,
+    progress: &Progress,
+) -> Vec<Read> {
     let threads = std::thread::available_parallelism().map_or(1, |threads| threads.get());
     let chunk = files.len().div_ceil(threads).max(1);
     std::thread::scope(|scope| {
@@ -170,9 +195,9 @@ fn read_all(files: &[PathBuf], progress: &Progress) -> Vec<Meta> {
                     files
                         .iter()
                         .map(|file| {
-                            let meta = read(file);
+                            let known = look(file, remembered);
                             progress.file_done();
-                            meta
+                            known
                         })
                         .collect::<Vec<_>>()
                 })
@@ -185,13 +210,55 @@ fn read_all(files: &[PathBuf], progress: &Progress) -> Vec<Meta> {
     })
 }
 
-/// What the file says about itself. A file that can't be read has nothing to say, but is
-/// still a track.
-fn read(path: &Path) -> Meta {
+/// What is known about the file: what was remembered if it looks the same, else what it
+/// says. A file that can't be read has nothing to say, but is still a track.
+fn look(path: &Path, remembered: &HashMap<String, (Stamp, Meta)>) -> Read {
+    let stamp = Stamp::of(path);
+    let before = path.to_str().and_then(|key| remembered.get(key));
+    if let (Some(stamp), Some((then, meta))) = (stamp, before)
+        && stamp == *then
+    {
+        return Read {
+            meta: meta.clone(),
+            fresh: None,
+        };
+    }
+    match read(path) {
+        // (A file that could not be read is not remembered as having nothing: it may be
+        // that it is being copied, or the drive hiccuped.)
+        Some(meta) => Read { meta, fresh: stamp },
+        None => Read {
+            meta: Meta::default(),
+            fresh: None,
+        },
+    }
+}
+
+/// Keeps what was read just now, and forgets the remembered files that are gone.
+fn remember(
+    cache: &mut TagCache,
+    files: &[PathBuf],
+    read: &[Read],
+    remembered: &HashMap<String, (Stamp, Meta)>,
+) {
+    let present: HashSet<&str> = files.iter().filter_map(|file| file.to_str()).collect();
+    let gone = remembered
+        .keys()
+        .map(String::as_str)
+        .filter(|path| !present.contains(path));
+    let fresh = files
+        .iter()
+        .zip(read)
+        .filter_map(|(file, read)| Some((file.to_str()?, read.fresh?, &read.meta)));
+    cache.store(gone, fresh);
+}
+
+/// What the file says about itself, or `None` if it can't be read.
+fn read(path: &Path) -> Option<Meta> {
     let options = ParseOptions::new().read_cover_art(false);
-    let Ok(tagged) = Probe::open(path).and_then(|probe| probe.options(options).read()) else {
-        return Meta::default();
-    };
+    let tagged = Probe::open(path)
+        .and_then(|probe| probe.options(options).read())
+        .ok()?;
     let mut meta = Meta {
         seconds: Some(tagged.properties().duration().as_secs_f64().round() as u32),
         ..Meta::default()
@@ -212,7 +279,7 @@ fn read(path: &Path) -> Meta {
             .find_map(|bpm| bpm.trim().replace(',', ".").parse::<f64>().ok())
             .filter(|bpm| bpm.is_finite() && *bpm > 0.0);
     }
-    meta
+    Some(meta)
 }
 
 fn track(index: usize, dir: &Path, file: PathBuf, meta: Meta) -> Track {
@@ -319,7 +386,7 @@ mod tests {
             wav(&temp.file(relative), 1);
         }
 
-        let scanned = scan(&temp.0, &Progress::default()).unwrap();
+        let scanned = scan(&temp.0, None, &Progress::default()).unwrap();
         // A folder's own files come first, then the folders in it, all by name.
         assert_eq!(
             scanned
@@ -385,7 +452,7 @@ mod tests {
         tag.insert_text(ItemKey::IntegerBpm, "126".into());
         tag.save_to_path(&path, WriteOptions::default()).unwrap();
 
-        let scanned = scan(&temp.0, &Progress::default()).unwrap();
+        let scanned = scan(&temp.0, None, &Progress::default()).unwrap();
         let track = &scanned.tracks[0];
         assert_eq!(
             (
@@ -404,7 +471,7 @@ mod tests {
     fn a_file_that_can_not_be_read_is_still_a_track() {
         let temp = TempDir::new("broken");
         fs::write(temp.file("broken.mp3"), b"not audio").unwrap();
-        let scanned = scan(&temp.0, &Progress::default()).unwrap();
+        let scanned = scan(&temp.0, None, &Progress::default()).unwrap();
         assert_eq!(scanned.tracks.len(), 1);
         assert_eq!(scanned.tracks[0].title, "broken");
         assert_eq!(scanned.tracks[0].length, None);
@@ -413,9 +480,64 @@ mod tests {
     #[test]
     fn a_folder_without_music_has_no_tracks_and_a_missing_one_is_an_error() {
         let temp = TempDir::new("none");
-        let scanned = scan(&temp.0, &Progress::default()).unwrap();
+        let scanned = scan(&temp.0, None, &Progress::default()).unwrap();
         assert!(scanned.tracks.is_empty() && scanned.playlists.is_empty());
-        assert!(scan(&temp.0.join("missing"), &Progress::default()).is_err());
+        assert!(scan(&temp.0.join("missing"), None, &Progress::default()).is_err());
+    }
+
+    #[test]
+    fn a_file_that_looks_the_same_is_not_read_again_but_a_changed_one_is() {
+        let temp = TempDir::new("cache");
+        let cache = temp.0.join("cache").join("tags.db");
+        let music = temp.0.join("music");
+        let (kept, changed, gone) = (
+            music.join("kept.wav"),
+            music.join("changed.wav"),
+            music.join("gone.wav"),
+        );
+        for file in [&kept, &changed, &gone] {
+            fs::create_dir_all(&music).unwrap();
+            wav(file, 1);
+        }
+        let titles = |scanned: &Scanned| {
+            scanned
+                .tracks
+                .iter()
+                .map(|track| track.title.clone())
+                .collect::<Vec<_>>()
+        };
+        let scan = || scan(&music, Some(&cache), &Progress::default()).unwrap();
+        assert_eq!(titles(&scan()), ["changed", "gone", "kept"]);
+
+        // What is remembered is what comes back for a file that looks as it did.
+        let say = |file: &Path, title: &str| {
+            let mut remembered = TagCache::open(&cache).unwrap();
+            let meta = Meta {
+                title: title.into(),
+                ..Meta::default()
+            };
+            remembered.store(
+                [],
+                [(file.to_str().unwrap(), Stamp::of(file).unwrap(), &meta)],
+            );
+        };
+        say(&kept, "Remembered");
+        say(&changed, "Remembered too");
+        assert_eq!(titles(&scan()), ["Remembered too", "gone", "Remembered"]);
+
+        // A file that is not what it was is read again; one that is gone is forgotten.
+        wav(&changed, 2);
+        fs::remove_file(&gone).unwrap();
+        assert_eq!(titles(&scan()), ["changed", "Remembered"]);
+        let remembered = TagCache::open(&cache).unwrap().load(&music);
+        let mut paths: Vec<_> = remembered.keys().cloned().collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [changed.to_str().unwrap(), kept.to_str().unwrap()],
+            "the changed file was remembered anew, and the gone one dropped"
+        );
+        assert_eq!(remembered[changed.to_str().unwrap()].1.seconds, Some(2));
     }
 
     #[test]
@@ -426,7 +548,7 @@ mod tests {
         }
         let progress = Progress::default();
         let running = progress.begin();
-        scan(&temp.0, &progress).unwrap();
+        scan(&temp.0, None, &progress).unwrap();
         let seen = progress.snapshot();
         assert_eq!(
             (seen.running, seen.phase, seen.done_files, seen.total_files),

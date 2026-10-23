@@ -25,6 +25,7 @@ mod service;
 mod smartlist;
 mod soundswitch;
 mod sync;
+mod tag_cache;
 mod track_sync;
 mod waveform;
 

@@ -252,14 +252,15 @@ impl Library {
 
     /// Opens the plain folder of music at `path` as a library: its audio files are the
     /// tracks and its folders the playlists. Nothing is copied or written; `scratch` is
-    /// only where an edit would be noted, and nothing here can be edited. How far the scan
-    /// has got is told to `progress`.
+    /// only where an edit would be noted (and where what was read from the files is
+    /// remembered, which makes the next opening faster), and nothing here can be edited. How
+    /// far the scan has got is told to `progress`.
     pub fn open_folder(
         path: &Path,
         scratch: PathBuf,
         progress: &Progress,
     ) -> Result<Self, OpenError> {
-        let scanned = folder::scan(path, progress)
+        let scanned = folder::scan(path, Some(&scratch.join("tags.db")), progress)
             .map_err(|error| OpenError::NotAFolder(path.to_path_buf(), error))?;
         let by_id = scanned
             .tracks
