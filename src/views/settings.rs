@@ -1,12 +1,16 @@
 use iced::Element;
-use iced::widget::{button, checkbox, column, radio, row, slider, text};
+use iced::widget::{Column, button, checkbox, column, radio, row, slider, text};
 
 use crate::Message;
 use crate::config::{
     ConfigStore, Language, ThemeMode, WAVEFORM_DELAY_MAX_MS, WaveformBand, WaveformColors,
 };
+use open_engine_api::CONTROLLER_SEEK_SECONDS;
+use open_engine_api::v1::{Control, ControllerAction};
+
+use crate::controller::{self, Controller};
 use crate::error_text;
-use crate::i18n::fill;
+use crate::i18n::{Strings, fill};
 
 fn theme_name(language: Language, theme: ThemeMode) -> &'static str {
     let strings = language.strings();
@@ -41,6 +45,115 @@ fn band_label(language: Language, band: WaveformBand) -> &'static str {
     }
 }
 
+fn action_name(strings: &Strings, action: ControllerAction) -> String {
+    match action {
+        ControllerAction::PlayPause => strings.action_play_pause.clone(),
+        ControllerAction::Stop => strings.action_stop.clone(),
+        ControllerAction::Previous => strings.action_previous.clone(),
+        ControllerAction::Next => strings.action_next.clone(),
+        ControllerAction::SeekBack => fill(
+            &strings.action_seek_back,
+            &[("seconds", &CONTROLLER_SEEK_SECONDS)],
+        ),
+        ControllerAction::SeekForward => fill(
+            &strings.action_seek_forward,
+            &[("seconds", &CONTROLLER_SEEK_SECONDS)],
+        ),
+        pad => fill(
+            &strings.action_pad,
+            &[(
+                "number",
+                &(controller::pad_of(pad).map_or(0, |slot| slot + 1)),
+            )],
+        ),
+    }
+}
+
+fn control_name(strings: &Strings, control: &Control) -> String {
+    let template = if controller::is_note(control) {
+        &strings.control_note
+    } else {
+        &strings.control_cc
+    };
+    fill(
+        template,
+        &[("number", &control.number), ("channel", &control.channel)],
+    )
+}
+
+/// The controller: whether it is used, what is connected and what each action is bound to,
+/// with a button to bind it by pressing a control. (The backend does the listening and the
+/// learning; this shows what it says.)
+fn controller_section<'a>(
+    page: Column<'a, Message>,
+    strings: &'a Strings,
+    enabled: bool,
+    controller: &'a Controller,
+) -> Column<'a, Message> {
+    let mut page = page.push(text(&strings.controller_heading).size(20)).push(
+        checkbox(enabled)
+            .label(&strings.controller_enable)
+            .on_toggle(Message::ControllerEnabledToggled),
+    );
+    if !enabled {
+        return page;
+    }
+    page = page.push(
+        text(&strings.controller_hint)
+            .size(14)
+            .style(text::secondary),
+    );
+    page = page.push(text(if controller.devices().is_empty() {
+        strings.controller_none.clone()
+    } else {
+        fill(
+            &strings.controller_connected,
+            &[("devices", &controller.devices().join(", "))],
+        )
+    }));
+    if let Some((control, value)) = controller.last_input() {
+        let message = format!("{}, {value}", control_name(strings, control));
+        page = page.push(text(fill(&strings.controller_last, &[("message", &message)])).size(14));
+    }
+    for action in controller::ACTIONS {
+        let bound = controller.control_for(action);
+        let binding = match bound {
+            Some(control) => text(control_name(strings, control)),
+            None => text(&strings.controller_unassigned).style(text::secondary),
+        };
+        let learn = if controller.learning() == Some(action) {
+            row![
+                text(&strings.controller_waiting),
+                button(text(&strings.controller_cancel)).on_press(Message::ControllerLearnCancel),
+            ]
+            .spacing(10)
+            .align_y(iced::Center)
+        } else {
+            row![
+                button(text(&strings.controller_learn)).on_press(Message::ControllerLearn(action)),
+                button(text(&strings.controller_clear))
+                    .on_press_maybe(bound.map(|_| Message::ControllerClear(action))),
+            ]
+            .spacing(10)
+        };
+        page = page.push(
+            row![
+                text(action_name(strings, action)).width(150),
+                binding.width(200),
+                learn
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        );
+    }
+    if let Some(error) = controller.problem() {
+        page = page.push(
+            text(fill(&strings.controller_unavailable, &[("error", &error)])).style(text::danger),
+        );
+    }
+    page
+}
+
 /// `draft` is the gain slider that is being dragged, and `delay_draft` the delay slider:
 /// they show where they are before it is saved.
 pub fn view<'a>(
@@ -48,6 +161,7 @@ pub fn view<'a>(
     error: Option<&'a str>,
     draft: Option<(WaveformBand, f32)>,
     delay_draft: Option<i32>,
+    controller: &'a Controller,
 ) -> Element<'a, Message> {
     let current = config.effective();
     let language = current.language;
@@ -136,6 +250,8 @@ pub fn view<'a>(
         .spacing(10)
         .align_y(iced::Center),
     );
+
+    page = controller_section(page, strings, current.controller_enabled, controller);
 
     page = page.push(text(&strings.startup_heading).size(20));
     page = page.push(

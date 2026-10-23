@@ -3165,6 +3165,7 @@ dependencies = [
 name = "open-engine-backend"
 version = "0.1.0"
 dependencies = [
+ "alsa",
  "dirs",
  "flate2",
  "getrandom 0.4.3",
@@ -3172,8 +3173,10 @@ dependencies = [
  "open-engine-api",
  "rodio",
  "rusqlite",
+ "serde",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
 ]
 

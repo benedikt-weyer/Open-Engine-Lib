@@ -1,0 +1,109 @@
+// Controlling the player with a DJ controller (anything that sends MIDI). The backend does
+// it all: the audio process listens to the hardware, the library process knows which control
+// does what, learns new bindings and carries the actions out. The UI only shows the state
+// and sends commands. Nothing is built in because controllers differ (and some have no
+// published list of their messages): the user picks an action, presses a control, and the
+// pair is remembered (in `controller.toml` in the user's state dir).
+syntax = "proto3";
+
+package openenginelib.v1;
+
+service ControllerService {
+  // The state now, and again whenever it changes (a controller plugged in, a message heard,
+  // a binding learned...). Changes that come in quick succession (a jog wheel) are merged.
+  rpc Watch(WatchControllerRequest) returns (stream ControllerState);
+  // Starts or stops listening to controllers. It is off when the backend starts.
+  rpc SetEnabled(SetControllerEnabledRequest) returns (ControllerState);
+  // The next control pressed on a controller is bound to `action`, instead of doing what it
+  // is bound to. Replaces what the control and the action were bound to before.
+  // Errors: INVALID_ARGUMENT for an unspecified action.
+  rpc Learn(LearnRequest) returns (ControllerState);
+  rpc CancelLearn(CancelLearnRequest) returns (ControllerState);
+  // Takes the binding of `action` away.
+  rpc ClearBinding(ClearBindingRequest) returns (ControllerState);
+}
+
+message WatchControllerRequest {}
+
+message SetControllerEnabledRequest {
+  bool enabled = 1;
+}
+
+message LearnRequest {
+  ControllerAction action = 1;
+}
+
+message CancelLearnRequest {}
+
+message ClearBindingRequest {
+  ControllerAction action = 1;
+}
+
+enum ControllerAction {
+  CONTROLLER_ACTION_UNSPECIFIED = 0;
+  CONTROLLER_ACTION_PLAY_PAUSE = 1;
+  CONTROLLER_ACTION_STOP = 2;
+  CONTROLLER_ACTION_PREVIOUS = 3;
+  CONTROLLER_ACTION_NEXT = 4;
+  // Jumps back or forward by `CONTROLLER_SEEK_SECONDS` (in `open-engine-api`).
+  CONTROLLER_ACTION_SEEK_BACK = 5;
+  CONTROLLER_ACTION_SEEK_FORWARD = 6;
+  // The eight cue pads of the playing track: jumps to the pad's cue, or sets one at the
+  // playhead if the pad has none.
+  CONTROLLER_ACTION_PAD_1 = 7;
+  CONTROLLER_ACTION_PAD_2 = 8;
+  CONTROLLER_ACTION_PAD_3 = 9;
+  CONTROLLER_ACTION_PAD_4 = 10;
+  CONTROLLER_ACTION_PAD_5 = 11;
+  CONTROLLER_ACTION_PAD_6 = 12;
+  CONTROLLER_ACTION_PAD_7 = 13;
+  CONTROLLER_ACTION_PAD_8 = 14;
+}
+
+enum ControlKind {
+  CONTROL_KIND_UNSPECIFIED = 0;
+  // A key or button: note on and note off.
+  CONTROL_KIND_NOTE = 1;
+  // A control change: a button or a knob.
+  CONTROL_KIND_CC = 2;
+}
+
+// Which control of a controller a message comes from.
+message Control {
+  ControlKind kind = 1;
+  // The MIDI channel, 1 to 16 as controller manuals number them.
+  uint32 channel = 2;
+  // The note or controller number, 0 to 127.
+  uint32 number = 3;
+}
+
+// A message from a controller.
+message ControllerInput {
+  Control control = 1;
+  // The velocity or controller value, 0 to 127. A button is down when it is above 0.
+  uint32 value = 2;
+}
+
+message ControllerBinding {
+  ControllerAction action = 1;
+  Control control = 2;
+}
+
+message ControllerState {
+  // Whether controllers are listened to.
+  bool enabled = 1;
+  // The names of the controllers that are connected.
+  repeated string devices = 2;
+  // The action that gets the next control pressed.
+  optional ControllerAction learning = 3;
+  repeated ControllerBinding bindings = 4;
+  // The latest message heard, so it can be seen that the controller is heard.
+  optional ControllerInput last_input = 5;
+  // Why controllers can't be used (no MIDI sequencer, no audio process) or why the bindings
+  // could not be saved.
+  optional string error = 6;
+  // Counts the times an action changed the cues of a track (a pad without a cue was pressed)
+  // and says of which track, so a client that shows cues can fetch them again.
+  uint64 cues_revision = 7;
+  uint32 cues_track_id = 8;
+}

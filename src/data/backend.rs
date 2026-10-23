@@ -15,19 +15,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use open_engine_api::v1::backend_service_client::BackendServiceClient;
+use open_engine_api::v1::controller_service_client::ControllerServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
+    CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest, ControllerAction,
+    ControllerState, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
     GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLibrarySyncDiffRequest,
     GetLibrarySyncDiffResponse, GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest,
-    GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest,
+    GetSyncDiffResponse, GetWaveformRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest,
     MigrateOriginsRequest, MigrateOriginsResponse, NextRequest, OpenLibraryRequest,
     OpenLocalFolderRequest, OperationProgress, PlayRequest, PlaybackStatus, PreviousRequest,
     PullFromSourceRequest, PullFromSourceResponse, RenamePlaylistRequest, SaveLibraryAsRequest,
-    SeekRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState,
-    StopRequest, SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest,
-    SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
+    SeekRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest,
+    SmartRules, SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
+    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
+    WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -83,6 +86,7 @@ pub struct Backend {
     _process: Arc<Process>,
     library: LibraryServiceClient<Connection>,
     playback: PlaybackServiceClient<Connection>,
+    controller: ControllerServiceClient<Connection>,
 }
 
 impl std::fmt::Debug for Backend {
@@ -191,8 +195,9 @@ pub async fn start() -> Result<Backend, String> {
         _process: process,
         library: LibraryServiceClient::with_interceptor(channel.clone(), token.clone())
             .max_decoding_message_size(MAX_MESSAGE_SIZE),
-        playback: PlaybackServiceClient::with_interceptor(channel, token)
+        playback: PlaybackServiceClient::with_interceptor(channel.clone(), token.clone())
             .max_decoding_message_size(MAX_MESSAGE_SIZE),
+        controller: ControllerServiceClient::with_interceptor(channel, token),
     })
 }
 
@@ -837,4 +842,83 @@ pub async fn control(mut backend: Backend, control: Control) -> Result<PlaybackS
         }
     };
     status.map(|status| status.into_inner()).map_err(describe)
+}
+
+/// The state of the DJ controller as the backend reports it: now, and again whenever it
+/// changes. Ends with an error when the backend stops answering.
+pub fn watch_controller(
+    mut backend: Backend,
+) -> impl iced::futures::Stream<Item = Result<ControllerState, String>> {
+    use iced::futures::SinkExt;
+    iced::stream::channel(8, async move |mut output| {
+        let mut states = match backend.controller.watch(WatchControllerRequest {}).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                let _ = output.send(Err(describe(status))).await;
+                return;
+            }
+        };
+        loop {
+            let next = match states.message().await {
+                Ok(Some(state)) => Ok(state),
+                Ok(None) => Err("the backend stopped reporting the controller".to_owned()),
+                Err(status) => Err(describe(status)),
+            };
+            let failed = next.is_err();
+            if output.send(next).await.is_err() || failed {
+                return;
+            }
+        }
+    })
+}
+
+/// Has the backend start or stop listening to DJ controllers.
+pub async fn set_controller_enabled(
+    mut backend: Backend,
+    enabled: bool,
+) -> Result<ControllerState, String> {
+    backend
+        .controller
+        .set_enabled(SetControllerEnabledRequest { enabled })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Has the backend bind the next control pressed on a controller to `action`.
+pub async fn learn_control(
+    mut backend: Backend,
+    action: ControllerAction,
+) -> Result<ControllerState, String> {
+    backend
+        .controller
+        .learn(LearnRequest {
+            action: action.into(),
+        })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+pub async fn cancel_learning(mut backend: Backend) -> Result<ControllerState, String> {
+    backend
+        .controller
+        .cancel_learn(CancelLearnRequest {})
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+pub async fn clear_binding(
+    mut backend: Backend,
+    action: ControllerAction,
+) -> Result<ControllerState, String> {
+    backend
+        .controller
+        .clear_binding(ClearBindingRequest {
+            action: action.into(),
+        })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
 }

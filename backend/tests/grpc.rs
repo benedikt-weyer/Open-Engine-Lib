@@ -8,15 +8,18 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use open_engine_api::v1::backend_service_client::BackendServiceClient;
+use open_engine_api::v1::controller_service_client::ControllerServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, CreateSmartPlaylistRequest, Cue, GetAlbumArtRequest, GetCuesRequest,
-    GetInfoRequest, GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest,
+    CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest, ControllerAction,
+    CreateSmartPlaylistRequest, Cue, GetAlbumArtRequest, GetCuesRequest, GetInfoRequest,
+    GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest, LearnRequest,
     ListPlaylistsRequest, ListTracksRequest, Loop, MigrateOriginsRequest, OpenLibraryRequest,
     OpenLocalFolderRequest, PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest,
-    SaveLibraryAsRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule, SmartRules,
-    SyncToSourceRequest, UpdateSmartPlaylistRequest,
+    SaveLibraryAsRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest,
+    SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest,
+    WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -83,6 +86,8 @@ fn start(cache: &Path) -> Running {
         .env("OPEN_ENGINE_LIB_CACHE", cache)
         // Beside the cache, so that tests don't touch the user's own origins.
         .env("OPEN_ENGINE_LIB_DATA", cache.with_file_name("origins-data"))
+        // Likewise for the DJ controller's bindings.
+        .env("XDG_STATE_HOME", cache.with_file_name("state"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -652,6 +657,161 @@ async fn pulling_replaces_the_working_copy_with_the_source() {
         .unwrap()
         .into_inner();
     assert!(diff.changed_databases.is_empty());
+}
+
+#[tokio::test]
+async fn shows_and_changes_what_the_controls_of_a_dj_controller_do() {
+    let temp = TempDir::new("controller");
+    // Bindings that an earlier run learned, one of them nonsense.
+    let state_dir = temp.0.join("state/open-engine-lib");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let file = state_dir.join("controller.toml");
+    std::fs::write(
+        &file,
+        r#"
+            [[binding]]
+            control = { kind = "note", channel = 1, number = 36 }
+            action = "play_pause"
+            [[binding]]
+            control = { kind = "cc", channel = 40, number = 1 }
+            action = "stop"
+            [[binding]]
+            control = { kind = "cc", channel = 2, number = 17 }
+            action = "pad_3"
+        "#,
+    )
+    .unwrap();
+    let running = start(&temp.0.join("cache"));
+    let mut controller = ControllerServiceClient::with_interceptor(
+        channel(&running).await,
+        with_token as fn(Request<()>) -> Result<Request<()>, Status>,
+    );
+
+    // It is off until asked, and knows the bindings that were valid.
+    let mut watch = controller
+        .watch(WatchControllerRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let state = watch.message().await.unwrap().unwrap();
+    assert!(!state.enabled && state.devices.is_empty() && state.learning.is_none());
+    let bound: Vec<_> = state
+        .bindings
+        .iter()
+        .map(|binding| (binding.action(), binding.control.unwrap().number))
+        .collect();
+    assert_eq!(
+        bound,
+        [
+            (ControllerAction::PlayPause, 36),
+            (ControllerAction::Pad3, 17)
+        ]
+    );
+
+    // Learning is told to the watcher, and can be cancelled.
+    let learning = controller
+        .learn(LearnRequest {
+            action: ControllerAction::Next.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(learning.learning, Some(ControllerAction::Next.into()));
+    let state = watch.message().await.unwrap().unwrap();
+    assert_eq!(state.learning, Some(ControllerAction::Next.into()));
+    let state = controller
+        .cancel_learn(CancelLearnRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(state.learning, None);
+    assert_eq!(
+        code(
+            controller
+                .learn(LearnRequest {
+                    action: ControllerAction::Unspecified.into(),
+                })
+                .await
+        ),
+        Code::InvalidArgument
+    );
+
+    // Clearing a binding is remembered in the file.
+    let state = controller
+        .clear_binding(ClearBindingRequest {
+            action: ControllerAction::PlayPause.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(state.bindings.len(), 1);
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        saved.contains("pad_3") && !saved.contains("play_pause"),
+        "{saved}"
+    );
+
+    // Turning it on starts the listening (whether there is a controller, or even a MIDI
+    // sequencer, depends on the machine); turning it off forgets what was heard.
+    let state = controller
+        .set_enabled(SetControllerEnabledRequest { enabled: true })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(state.enabled);
+    let state = controller
+        .set_enabled(SetControllerEnabledRequest { enabled: false })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!state.enabled && state.devices.is_empty() && state.error.is_none());
+    assert_eq!(state.bindings.len(), 1, "the bindings stay");
+}
+
+/// Needs a DJ controller plugged in (and the audio process next to the backend): turns the
+/// controller on, lists what is connected and prints the messages it sends for
+/// `OPEN_ENGINE_TEST_SECONDS` (10), so press some buttons while it runs.
+/// `cargo test -p open-engine-backend --test grpc hears_a_connected -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs a DJ controller"]
+async fn hears_a_connected_dj_controller() {
+    let temp = TempDir::new("hears");
+    let running = start(&temp.0.join("cache"));
+    let mut controller = ControllerServiceClient::with_interceptor(
+        channel(&running).await,
+        with_token as fn(Request<()>) -> Result<Request<()>, Status>,
+    );
+    let mut watch = controller
+        .watch(WatchControllerRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    controller
+        .set_enabled(SetControllerEnabledRequest { enabled: true })
+        .await
+        .unwrap();
+    let seconds = std::env::var("OPEN_ENGINE_TEST_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10);
+    let end = Instant::now() + Duration::from_secs(seconds);
+    let mut devices = Vec::new();
+    while let Ok(Ok(Some(state))) = tokio::time::timeout(
+        end.saturating_duration_since(Instant::now()),
+        watch.message(),
+    )
+    .await
+    {
+        if state.devices != devices {
+            println!("connected: {:?}", state.devices);
+            devices = state.devices.clone();
+        }
+        if let Some(input) = &state.last_input {
+            println!("{:?}", input);
+        }
+        assert_eq!(state.error, None);
+    }
+    assert!(!devices.is_empty(), "no controller was found");
 }
 
 #[tokio::test]

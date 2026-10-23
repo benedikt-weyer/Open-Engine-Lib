@@ -28,6 +28,7 @@ programs.open-engine-lib = {
   settings.waveform_delay_ms = 0;   # delay the waveform to line up with the sound, -500 to 500 ms (default: 0)
   settings.reopen_library = true;   # reopen the last library at startup (default: true)
   settings.restore_position = true; # ...and its playlist, song and position, paused (default: true)
+  settings.controller_enabled = true; # control the player from a DJ controller connected over USB (default: true)
 };
 ```
 

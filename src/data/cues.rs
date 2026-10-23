@@ -10,16 +10,7 @@ pub const SLOTS: usize = 8;
 
 /// The color Engine gives a new cue on each pad (0xAARRGGBB). The ones for the pads 1 to 6
 /// and 8 are from a real library; pad 7's is a guess, as none of its tracks had it set.
-pub const PALETTE: [u32; SLOTS] = [
-    0xfff4_d338,
-    0xffef_8130,
-    0xffaa_55c4,
-    0xffce_3239,
-    0xff86_c64b,
-    0xff20_c670,
-    0xffe0_559e,
-    0xff15_71e2,
-];
+pub const PALETTE: [u32; SLOTS] = open_engine_api::CUE_PAD_COLORS;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
@@ -164,6 +155,11 @@ impl<T> Fetched<T> {
     /// loaded from now on.
     pub fn claim(&mut self, id: u32) -> bool {
         self.asked.insert(id)
+    }
+
+    /// Lets the list of `id` be asked for again (it changed in the backend).
+    pub fn release(&mut self, id: u32) {
+        self.asked.remove(&id);
     }
 
     /// Stores what the backend said for `id`. Answers for an earlier library are ignored.

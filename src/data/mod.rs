@@ -9,6 +9,7 @@ pub(crate) mod clock;
 pub(crate) mod colors;
 pub(crate) mod columns;
 pub(crate) mod config;
+pub(crate) mod controller;
 pub(crate) mod covers;
 pub(crate) mod cues;
 pub(crate) mod drives;

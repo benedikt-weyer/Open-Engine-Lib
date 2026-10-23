@@ -13,11 +13,12 @@ use browser::{Browser, Change, Source};
 use clock::Clock;
 use columns::{Column, ColumnStore};
 use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, WaveformColors};
+use controller::Controller;
 use covers::Covers;
 use cues::{Cue, TrackCues};
 use data::{
-    backend, clock, colors, columns, config, covers, cues, drives, i18n, local_folders, loops,
-    model, reachable, recent, session, waveform,
+    backend, clock, colors, columns, config, controller, covers, cues, drives, i18n, local_folders,
+    loops, model, reachable, recent, session, waveform,
 };
 use drives::Drive;
 use i18n::fill;
@@ -28,7 +29,10 @@ use local_folders::LocalFolders;
 use loops::{Loop, TrackLoops};
 use menubar::MenuItem;
 use model::Library;
-use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
+use open_engine_api::v1::{
+    ControllerAction, ControllerState, PlaybackError, PlaybackErrorKind, PlaybackState,
+    PlaybackStatus,
+};
 use reachable::Reachability;
 use recent::Recents;
 use session::{Session, SessionStore};
@@ -167,11 +171,21 @@ struct State {
     columns: ColumnStore,
     /// The column whose width is being dragged.
     resize: Option<Resize>,
+    /// The DJ controller: what its controls do, what is connected, what it said last.
+    controller: Controller,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Navigate(Page),
+    /// What the backend reports of the DJ controller (or why it can't): it listens to the
+    /// controller, learns what its controls do and does it. This is only for showing it.
+    ControllerState(Result<ControllerState, String>),
+    /// The next control pressed on the controller is to be bound to this action.
+    ControllerLearn(ControllerAction),
+    ControllerLearnCancel,
+    ControllerClear(ControllerAction),
+    ControllerEnabledToggled(bool),
     ThemeSelected(ThemeMode),
     LanguageSelected(Language),
     ResetOverrides,
@@ -419,6 +433,7 @@ impl State {
             reload_result: None,
             columns: ColumnStore::discover(),
             resize: None,
+            controller: Controller::default(),
         };
         (state, Task::batch([start_backend(), scan_drives()]))
     }
@@ -1071,6 +1086,11 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::SyncOpen
         | Message::SyncPulled(..)
         | Message::SyncStart => handlers::sync::handle(state, message),
+        Message::ControllerClear(..)
+        | Message::ControllerEnabledToggled(..)
+        | Message::ControllerLearn(..)
+        | Message::ControllerLearnCancel
+        | Message::ControllerState(..) => handlers::controller::handle(state, message),
         Message::MigrateOrigins
         | Message::OriginsMigrated(..)
         | Message::PlaylistCancel
@@ -1165,6 +1185,7 @@ fn view(state: &State) -> Element<'_, Message> {
             state.config_error.as_deref(),
             state.gain_draft,
             state.delay_draft,
+            &state.controller,
         ),
     };
 
@@ -1599,6 +1620,7 @@ mod tests {
             reload_result: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
             resize: None,
+            controller: Controller::default(),
         }
     }
 
@@ -2755,6 +2777,39 @@ mod tests {
         );
         assert_eq!(state.backend_error.as_deref(), Some("no"));
         assert_eq!(state.cues.get(1), None);
+    }
+
+    #[test]
+    fn what_the_backend_reports_of_the_controller_is_kept_and_a_change_of_cues_refetches_them() {
+        let mut state = state_playing_with_cues(vec![Cue::new(2, 5.0)]);
+        let report = |revision, track| {
+            Message::ControllerState(Ok(ControllerState {
+                enabled: true,
+                devices: vec!["SC LIVE 4".into()],
+                cues_revision: revision,
+                cues_track_id: track,
+                ..ControllerState::default()
+            }))
+        };
+        let _ = handle(&mut state, report(0, 0));
+        assert_eq!(state.controller.devices(), ["SC LIVE 4"]);
+        assert!(
+            !state.cues.claim(1),
+            "the cues were fetched, not to be again"
+        );
+
+        // A pad on the controller set a cue of another track: nothing to fetch for this one.
+        let _ = handle(&mut state, report(1, 7));
+        assert!(!state.cues.claim(1));
+        // One of the playing track: its cues are to be asked for again.
+        let _ = handle(&mut state, report(2, 1));
+        assert!(state.cues.claim(1), "released to be fetched again");
+
+        // The connection to the backend failing is shown.
+        let _ = handle(&mut state, Message::ControllerState(Err("gone".into())));
+        assert_eq!(state.controller.problem(), Some("gone"));
+        let _ = handle(&mut state, report(2, 1));
+        assert_eq!(state.controller.problem(), None);
     }
 
     #[test]

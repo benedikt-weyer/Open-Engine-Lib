@@ -123,6 +123,16 @@ in
           its position in the song (paused, not playing). Unset means yes.
         '';
       };
+
+      controller_enabled = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = false;
+        description = ''
+          Listen to DJ controllers (anything that sends MIDI) to control the player. Which
+          control does what is learned on the Settings page, not set here. Unset means yes.
+        '';
+      };
     };
   };
 

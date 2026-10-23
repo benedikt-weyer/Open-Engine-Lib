@@ -10,11 +10,18 @@ use open_engine_api::API_VERSION;
 use open_engine_api::v1 as api;
 use open_engine_api::v1::audio_service_server::AudioService;
 use open_engine_api::v1::backend_service_server::BackendService;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
+use crate::midi;
 use crate::player::Start;
 use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
+
+/// How many MIDI messages wait for the library process before the ones of a busy control
+/// (a jog wheel) are dropped.
+const MIDI_EVENTS_BUFFERED: usize = 256;
 
 /// Waveforms are kept for the tracks used last, so skipping back to a track is instant.
 const WAVEFORMS_KEPT: usize = 8;
@@ -172,6 +179,21 @@ impl AudioService for Service {
     ) -> Result<Response<api::PlaybackStatus>, Status> {
         // Asked of the engine, not read from what it published last: that can be stale.
         self.command(Command::Poll).await
+    }
+
+    type WatchMidiStream = ReceiverStream<Result<api::MidiEvent, Status>>;
+
+    async fn watch_midi(
+        &self,
+        _: Request<api::WatchMidiRequest>,
+    ) -> Result<Response<Self::WatchMidiStream>, Status> {
+        let (events, receiver) = mpsc::channel(MIDI_EVENTS_BUFFERED);
+        // The thread ends when the call is dropped, which drops the receiver.
+        std::thread::Builder::new()
+            .name("midi".into())
+            .spawn(move || midi::listen(events))
+            .map_err(|error| Status::internal(format!("could not listen to MIDI: {error}")))?;
+        Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
     async fn close(

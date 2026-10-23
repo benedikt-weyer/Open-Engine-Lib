@@ -26,7 +26,7 @@ let
     libxi
     libxrandr
   ];
-  # The backend links ALSA for audio output.
+  # The audio process links ALSA, for audio output and for MIDI controllers.
   runtimeLibs = uiLibs ++ [ alsa-lib ];
 in
 rustPlatform.buildRustPackage {

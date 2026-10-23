@@ -25,6 +25,23 @@ pub const WAVEFORM_GAIN_HIGH: f32 = 1.0;
 /// The largest gain accepted.
 pub const WAVEFORM_MAX_GAIN: f32 = 20.0;
 
+/// How far the controller's seek buttons jump, in seconds.
+pub const CONTROLLER_SEEK_SECONDS: u32 = 5;
+
+/// The color Engine gives a new cue on each of the eight pads (0xAARRGGBB). The ones for the
+/// pads 1 to 6 and 8 are from a real library; pad 7's is a guess, as none of its tracks had
+/// it set.
+pub const CUE_PAD_COLORS: [u32; 8] = [
+    0xfff4_d338,
+    0xffef_8130,
+    0xffaa_55c4,
+    0xffce_3239,
+    0xff86_c64b,
+    0xff20_c670,
+    0xffe0_559e,
+    0xff15_71e2,
+];
+
 /// The environment variable the UI uses to give the backend the secret that every
 /// request must carry as a bearer token (see [`AUTHORIZATION`]).
 pub const TOKEN_ENV: &str = "OPEN_ENGINE_BACKEND_TOKEN";

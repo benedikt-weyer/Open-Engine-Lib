@@ -7,6 +7,7 @@ syntax = "proto3";
 
 package openenginelib.v1;
 
+import "openenginelib/v1/controller.proto";
 import "openenginelib/v1/playback.proto";
 
 service AudioService {
@@ -29,6 +30,28 @@ service AudioService {
   // Errors: INVALID_ARGUMENT for split points or gains out of range, NOT_FOUND if there is
   // no file at `path` or at `fallback_path`, INTERNAL if it can't be decoded.
   rpc AnalyzeWaveform(AnalyzeWaveformRequest) returns (AnalyzeWaveformResponse);
+  // The messages of the MIDI controllers that are connected, and which ones are, until the
+  // call is dropped (which is also when the process stops listening). The audio process
+  // only reports what the hardware sends; what it means is for the library process to say.
+  rpc WatchMidi(WatchMidiRequest) returns (stream MidiEvent);
+}
+
+message WatchMidiRequest {}
+
+message MidiEvent {
+  oneof event {
+    ControllerInput input = 1;
+    // Sent first, and again when a controller is plugged in or pulled out.
+    MidiDevices devices = 2;
+    // MIDI can't be used at all (the sequencer can't be opened, or this system has none), and
+    // why. The stream ends after it.
+    string unavailable = 3;
+  }
+}
+
+message MidiDevices {
+  // The names of the controllers that are connected.
+  repeated string names = 1;
 }
 
 message AudioPlayRequest {

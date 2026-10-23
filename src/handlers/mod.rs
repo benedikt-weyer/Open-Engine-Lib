@@ -1,6 +1,7 @@
 //! The handlers of the messages (`handle` in `main.rs` routes them), one module per
 //! feature.
 
+pub(super) mod controller;
 pub(super) mod cues;
 pub(super) mod library;
 pub(super) mod library_sync;

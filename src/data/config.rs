@@ -128,6 +128,8 @@ pub struct Config {
     pub reopen_library: bool,
     /// When reopening it, also go back to the playlist, the song and its position.
     pub restore_position: bool,
+    /// Listen to DJ controllers (anything that sends MIDI) to control the player.
+    pub controller_enabled: bool,
 }
 
 fn gain_is_valid(gain: f32) -> bool {
@@ -189,6 +191,7 @@ impl Default for Config {
             waveform_delay_ms: 0,
             reopen_library: true,
             restore_position: true,
+            controller_enabled: true,
         }
     }
 }
@@ -219,6 +222,8 @@ struct Layer {
     reopen_library: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     restore_position: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    controller_enabled: Option<bool>,
 }
 
 impl Layer {
@@ -255,6 +260,9 @@ impl Layer {
         }
         if let Some(restore_position) = self.restore_position {
             config.restore_position = restore_position;
+        }
+        if let Some(controller_enabled) = self.controller_enabled {
+            config.controller_enabled = controller_enabled;
         }
     }
 }
@@ -451,6 +459,10 @@ impl ConfigStore {
 
     pub fn set_reopen_library(&mut self, reopen: bool) -> io::Result<()> {
         self.edit(|layer| layer.reopen_library = Some(reopen))
+    }
+
+    pub fn set_controller_enabled(&mut self, enabled: bool) -> io::Result<()> {
+        self.edit(|layer| layer.controller_enabled = Some(enabled))
     }
 
     pub fn set_restore_position(&mut self, restore: bool) -> io::Result<()> {

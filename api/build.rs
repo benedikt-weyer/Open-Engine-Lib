@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-const PROTOS: [&str; 4] = [
+const PROTOS: [&str; 5] = [
     "openenginelib/v1/audio.proto",
     "openenginelib/v1/backend.proto",
+    "openenginelib/v1/controller.proto",
     "openenginelib/v1/library.proto",
     "openenginelib/v1/playback.proto",
 ];

@@ -13,6 +13,7 @@
 mod audio_client;
 mod beatgrid;
 mod cache;
+mod controller;
 mod cues;
 mod folder;
 mod library;
@@ -33,6 +34,7 @@ use std::process::ExitCode;
 
 use open_engine_api::server::{self, Authorize};
 use open_engine_api::v1::backend_service_server::BackendServiceServer;
+use open_engine_api::v1::controller_service_server::ControllerServiceServer;
 use open_engine_api::v1::library_service_server::LibraryServiceServer;
 use open_engine_api::v1::playback_service_server::PlaybackServiceServer;
 use tokio::net::TcpListener;
@@ -64,7 +66,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = &audio {
         eprintln!("open-engine-backend: no audio: {error}");
     }
-    let service = service::Service::new(audio, cache::default_root());
+    let service = service::Service::new(
+        audio,
+        cache::default_root(),
+        controller::Controller::discover(),
+    );
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     server::when_stdin_closes(move || {
         let _ = stop.send(());
@@ -77,8 +83,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             LibraryServiceServer::new(service.clone()).max_decoding_message_size(MAX_MESSAGE_SIZE),
         ))
         .add_service(authorize.protect(
-            PlaybackServiceServer::new(service).max_decoding_message_size(MAX_MESSAGE_SIZE),
+            PlaybackServiceServer::new(service.clone()).max_decoding_message_size(MAX_MESSAGE_SIZE),
         ))
+        .add_service(authorize.protect(ControllerServiceServer::new(service)))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
             let _ = stopped.await;
         })

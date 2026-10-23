@@ -22,6 +22,12 @@ lofty = "0.25.4"
 open-engine-api = { path = "../api" }
 rodio = { version = "0.23.0", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-stream = "0.1.19"
+toml = "1.1.8"
 tonic = "0.14.6"
+
+# The audio process listens to MIDI controllers through the ALSA sequencer (`src/audio/midi.rs`).
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = "0.11.0"

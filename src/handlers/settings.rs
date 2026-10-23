@@ -4,7 +4,13 @@ use crate::*;
 
 pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::Navigate(page) => state.page = page,
+        Message::Navigate(page) => {
+            state.page = page;
+            // A control pressed on the controller must not be bound by accident later.
+            if state.controller.learning().is_some() {
+                return super::controller::ask(state, backend::cancel_learning);
+            }
+        }
         Message::ThemeSelected(theme) => {
             state.config_error = state.config.set_theme(theme).err().map(|e| e.to_string());
         }
@@ -105,10 +111,12 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::BackendStarted(Ok(backend)) => {
+            let controller = super::controller::start(state, &backend);
             state.backend = BackendState::Ready(backend);
             if let Some((path, restore)) = state.open_when_ready.take() {
-                return state.open(path, restore);
+                return Task::batch([controller, state.open(path, restore)]);
             }
+            return controller;
         }
         Message::BackendStarted(Err(error)) => state.backend = BackendState::Failed(error),
         Message::RetryBackend => {

@@ -12,6 +12,7 @@
 //!   gone.
 
 mod engine;
+mod midi;
 mod player;
 mod service;
 mod waveform;

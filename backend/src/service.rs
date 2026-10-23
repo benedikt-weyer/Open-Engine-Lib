@@ -1,7 +1,7 @@
 //! The gRPC services (`openenginelib.v1`) that the UI talks to.
 
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use open_engine_api::API_VERSION;
 use open_engine_api::v1 as api;
@@ -13,6 +13,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::audio_client::Audio;
+use crate::controller::Controller;
 use crate::cues::Cue;
 use crate::library::{self, EditError, Library, OpenError};
 use crate::loops::Loop;
@@ -21,6 +22,8 @@ use crate::progress::{Phase, Progress};
 use crate::save::{self, SaveError};
 use crate::smartlist::Rules;
 use crate::sync::{self, SyncError};
+
+mod controller;
 
 /// Tracks per message of `ListTracks`, to stay well below gRPC's message size limit.
 const TRACKS_PER_BATCH: usize = 500;
@@ -33,18 +36,23 @@ struct Shared {
     cache_root: PathBuf,
     /// How far the sync that is running has got.
     progress: Progress,
+    /// The DJ controller, and the task that listens to it while it is turned on.
+    controller: Controller,
+    listener: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Clone)]
 pub struct Service(Arc<Shared>);
 
 impl Service {
-    pub fn new(audio: Result<Audio, String>, cache_root: PathBuf) -> Self {
+    pub fn new(audio: Result<Audio, String>, cache_root: PathBuf, controller: Controller) -> Self {
         Self(Arc::new(Shared {
             library: RwLock::new(None),
             audio,
             cache_root,
             progress: Progress::default(),
+            controller,
+            listener: Mutex::new(None),
         }))
     }
 

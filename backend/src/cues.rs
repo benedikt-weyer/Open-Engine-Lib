@@ -36,6 +36,18 @@ pub struct Cue {
     pub color: u32,
 }
 
+impl Cue {
+    /// A cue on the pad `slot` at `position_seconds`, named and colored the way Engine does it.
+    pub fn for_pad(slot: usize, position_seconds: f64) -> Self {
+        Self {
+            slot,
+            label: format!("Cue {}", slot + 1),
+            position_seconds,
+            color: open_engine_api::CUE_PAD_COLORS[slot.min(SLOTS - 1)],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Slot {
     label: String,

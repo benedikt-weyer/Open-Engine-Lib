@@ -1,0 +1,218 @@
+//! The DJ controller: the service the UI uses to show and set it up, the task that listens to
+//! the audio process's MIDI messages, and what a press on a bound control does to the player.
+//! (Which control does what is `crate::controller`; the hardware is the audio process's.)
+
+use std::time::Duration;
+
+use open_engine_api::CONTROLLER_SEEK_SECONDS;
+use open_engine_api::v1 as api;
+use open_engine_api::v1::controller_service_server::ControllerService;
+use open_engine_api::v1::midi_event::Event;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status};
+
+use super::{Service, edit_status};
+use crate::controller::{Action, Input};
+use crate::cues::Cue;
+
+/// Changes that come in quick succession (a jog wheel makes hundreds of messages a second)
+/// are told to a watcher as one.
+const WATCH_INTERVAL: Duration = Duration::from_millis(100);
+
+impl Service {
+    /// Starts the task that listens to the controllers, unless one is running.
+    fn start_listening(&self) {
+        let mut listener = self.0.listener.lock().expect("listener lock");
+        if listener.as_ref().is_none_or(|task| task.is_finished()) {
+            *listener = Some(tokio::spawn(listen(self.clone())));
+        }
+    }
+
+    /// Stops the task. (The audio process stops listening to the hardware once it is gone.)
+    fn stop_listening(&self) {
+        if let Some(task) = self.0.listener.lock().expect("listener lock").take() {
+            task.abort();
+        }
+    }
+
+    /// Does what a press on the control bound to `action` asks for.
+    async fn perform(&self, action: Action) -> Result<(), Status> {
+        let mut audio = self.audio()?;
+        match action {
+            // (Nothing happens while the player is stopped: there is no song to pause.)
+            Action::PlayPause => {
+                audio.toggle_pause(api::TogglePauseRequest {}).await?;
+            }
+            Action::Stop => {
+                audio.stop(api::StopRequest {}).await?;
+            }
+            Action::Next => {
+                audio.next(api::NextRequest {}).await?;
+            }
+            Action::Previous => {
+                audio.previous(api::PreviousRequest {}).await?;
+            }
+            Action::SeekBack | Action::SeekForward => {
+                let status = audio
+                    .get_status(api::GetStatusRequest {})
+                    .await?
+                    .into_inner();
+                if status.track_id.is_none() {
+                    return Ok(());
+                }
+                let step = u64::from(CONTROLLER_SEEK_SECONDS) * 1000;
+                let position_ms = if action == Action::SeekBack {
+                    status.position_ms.saturating_sub(step)
+                } else {
+                    status.position_ms.saturating_add(step)
+                };
+                audio.seek(api::SeekRequest { position_ms }).await?;
+            }
+            Action::Pad(slot) => self.press_pad(slot).await?,
+        }
+        Ok(())
+    }
+
+    /// A cue pad of the playing track: a pad with a cue jumps to it, an empty one gets a cue
+    /// at the playhead (and whoever shows the cues is told to fetch them again).
+    async fn press_pad(&self, slot: usize) -> Result<(), Status> {
+        let mut audio = self.audio()?;
+        let status = audio
+            .get_status(api::GetStatusRequest {})
+            .await?
+            .into_inner();
+        let Some(track) = status.track_id else {
+            return Ok(());
+        };
+        let library = self.library()?;
+        if library.is_folder() {
+            return Ok(());
+        }
+
+        let mut cues = {
+            let library = library.clone();
+            tokio::task::spawn_blocking(move || library.cues(track as usize))
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+                .map_err(|error| Status::internal(error.to_string()))?
+        };
+        if let Some(cue) = cues.iter().find(|cue| cue.slot == slot) {
+            let position_ms = (cue.position_seconds.max(0.0) * 1000.0) as u64;
+            audio.seek(api::SeekRequest { position_ms }).await?;
+            return Ok(());
+        }
+        cues.push(Cue::for_pad(slot, status.position_ms as f64 / 1000.0));
+        tokio::task::spawn_blocking(move || library.set_cues(track as usize, &cues))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(edit_status)?;
+        self.0.controller.cues_changed(track);
+        Ok(())
+    }
+}
+
+/// Listens to what the audio process hears of the controllers, until it is aborted or the
+/// audio process stops.
+async fn listen(service: Service) {
+    let controller = &service.0.controller;
+    let mut messages = match service.audio() {
+        Ok(mut audio) => match audio.watch_midi(api::WatchMidiRequest {}).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => return controller.unavailable(status.message().to_owned()),
+        },
+        Err(status) => return controller.unavailable(status.message().to_owned()),
+    };
+    loop {
+        let event = match messages.message().await {
+            Ok(Some(event)) => event,
+            Ok(None) => return controller.unavailable("the audio process stopped".to_owned()),
+            Err(status) => return controller.unavailable(status.message().to_owned()),
+        };
+        match event.event {
+            Some(Event::Input(input)) => {
+                let action = Input::from_api(&input).and_then(|input| controller.input(input));
+                if let Some(action) = action
+                    && let Err(status) = service.perform(action).await
+                {
+                    eprintln!("open-engine-backend: {action:?}: {}", status.message());
+                }
+            }
+            Some(Event::Devices(devices)) => controller.set_devices(devices.names),
+            Some(Event::Unavailable(reason)) => return controller.unavailable(reason),
+            None => {}
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl ControllerService for Service {
+    type WatchStream = ReceiverStream<Result<api::ControllerState, Status>>;
+
+    async fn watch(
+        &self,
+        _: Request<api::WatchControllerRequest>,
+    ) -> Result<Response<Self::WatchStream>, Status> {
+        let service = self.clone();
+        let mut changes = service.0.controller.subscribe();
+        let (sender, receiver) = mpsc::channel(4);
+        tokio::spawn(async move {
+            loop {
+                if sender
+                    .send(Ok(service.0.controller.snapshot()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if changes.changed().await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(WATCH_INTERVAL).await;
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+
+    async fn set_enabled(
+        &self,
+        request: Request<api::SetControllerEnabledRequest>,
+    ) -> Result<Response<api::ControllerState>, Status> {
+        if request.into_inner().enabled {
+            self.0.controller.set_enabled(true);
+            self.start_listening();
+        } else {
+            self.stop_listening();
+            self.0.controller.set_enabled(false);
+        }
+        Ok(Response::new(self.0.controller.snapshot()))
+    }
+
+    async fn learn(
+        &self,
+        request: Request<api::LearnRequest>,
+    ) -> Result<Response<api::ControllerState>, Status> {
+        let action = Action::from_api(request.into_inner().action())
+            .ok_or_else(|| Status::invalid_argument("no such action"))?;
+        self.0.controller.learn(action);
+        Ok(Response::new(self.0.controller.snapshot()))
+    }
+
+    async fn cancel_learn(
+        &self,
+        _: Request<api::CancelLearnRequest>,
+    ) -> Result<Response<api::ControllerState>, Status> {
+        self.0.controller.cancel_learning();
+        Ok(Response::new(self.0.controller.snapshot()))
+    }
+
+    async fn clear_binding(
+        &self,
+        request: Request<api::ClearBindingRequest>,
+    ) -> Result<Response<api::ControllerState>, Status> {
+        let action = Action::from_api(request.into_inner().action())
+            .ok_or_else(|| Status::invalid_argument("no such action"))?;
+        self.0.controller.clear(action);
+        Ok(Response::new(self.0.controller.snapshot()))
+    }
+}
