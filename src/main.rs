@@ -446,7 +446,14 @@ impl State {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let poll = if self.status.state() == PlaybackState::Playing {
+        // A paused song is also watched when a DJ controller is on: it can resume the song
+        // (or move within it) without the UI having asked for it.
+        let watched = match self.status.state() {
+            PlaybackState::Playing => true,
+            PlaybackState::Paused => self.config.effective().controller_enabled,
+            _ => false,
+        };
+        let poll = if watched {
             iced::time::every(POLL_INTERVAL).map(|_| Message::Tick)
         } else {
             Subscription::none()
