@@ -86,6 +86,12 @@ jobs:
           cp packaging/open-engine-lib.desktop packaging/open-engine-lib.svg AppDir/
           ln -s "usr/bin/$BIN" AppDir/AppRun
 
+      # appimagetool validates the .desktop file with desktop-file-validate.
+      - name: Install appimagetool dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils
+
       - name: Build AppImage
         env:
           TAG: ${{ inputs.tag }}
