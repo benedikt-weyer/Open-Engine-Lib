@@ -2,10 +2,15 @@ native_name: English
 menu_file: File
 menu_open: Open…
 menu_save_as: Save as…
+menu_reload: Reload from disk
 menu_exit: Exit
 save_as_title: Choose where to save the library
 saving_library: "Saving the library to {path}…"
 save_library_failed: "Could not save the library: {error}"
+reloading_library: "Reloading the library from disk…"
+reload_done: "Reloaded from disk."
+reload_done_kept: "Reloaded from disk. Edits that were not synced are kept in {path}"
+reload_failed: "Could not reload the library: {error}"
 sync_button: "Sync with the source…"
 sync_title: "Sync with the source"
 sync_source: "Source: {path}"

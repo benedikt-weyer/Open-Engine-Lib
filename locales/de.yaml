@@ -2,10 +2,15 @@ native_name: Deutsch
 menu_file: Datei
 menu_open: Öffnen…
 menu_save_as: Speichern unter…
+menu_reload: Vom Datenträger neu laden
 menu_exit: Beenden
 save_as_title: Speicherort für die Bibliothek wählen
 saving_library: "Die Bibliothek wird nach {path} gespeichert…"
 save_library_failed: "Die Bibliothek konnte nicht gespeichert werden: {error}"
+reloading_library: "Die Bibliothek wird vom Datenträger neu geladen…"
+reload_done: "Vom Datenträger neu geladen."
+reload_done_kept: "Vom Datenträger neu geladen. Nicht abgeglichene Änderungen liegen in {path}"
+reload_failed: "Die Bibliothek konnte nicht neu geladen werden: {error}"
 sync_button: "Mit dem Original abgleichen…"
 sync_title: "Mit dem Original abgleichen"
 sync_source: "Original: {path}"

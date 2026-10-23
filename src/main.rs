@@ -179,6 +179,10 @@ struct State {
     /// Where the library is being saved to, and why the last save failed.
     saving: Option<PathBuf>,
     save_error: Option<String>,
+    /// Whether the library is being read from the disk again, and how the last time went
+    /// (what to say, and whether it failed).
+    reloading: bool,
+    reload_result: Option<(String, bool)>,
     /// How wide the user made the track list's columns.
     columns: ColumnStore,
     /// The column whose width is being dragged.
@@ -268,6 +272,8 @@ pub enum Message {
 
     /// A File menu entry was picked.
     MenuSelected(MenuItem),
+    /// The working copy was replaced by the library on the disk (or it could not be).
+    Reloaded(Result<open_engine_api::v1::PullFromSourceResponse, String>),
     SaveAsChosen(Option<PathBuf>),
     LibrarySaved(Result<Arc<Library>, String>),
     ReopenLibraryToggled(bool),
@@ -427,6 +433,8 @@ impl State {
             loop_editor: None,
             saving: None,
             save_error: None,
+            reloading: false,
+            reload_result: None,
             columns: ColumnStore::discover(),
             resize: None,
         };
@@ -515,6 +523,39 @@ impl State {
             ),
             Message::LibraryReloaded,
         )
+    }
+
+    /// Whether the library is being saved or read again, so that nothing may replace or
+    /// change it meanwhile.
+    fn locked(&self) -> bool {
+        self.saving.is_some() || self.reloading
+    }
+
+    /// Reads the open library from the disk again, replacing the working copy. The edits
+    /// that were not synced are kept aside by the backend. A folder of music is scanned
+    /// again.
+    fn reload_from_disk(&mut self) -> Task<Message> {
+        let LibraryState::Open(browser) = &self.library else {
+            return Task::none();
+        };
+        if self.locked() || self.window_open() || self.syncing() {
+            return Task::none();
+        }
+        if !browser.library.is_engine() {
+            let path = PathBuf::from(&browser.library.path);
+            // What was open stays open, but nothing is started.
+            let session = self.snapshot().map(|session| Session {
+                loaded: false,
+                ..session
+            });
+            return self.open_as(path, model::Kind::Folder, session);
+        }
+        let Some(backend) = self.backend() else {
+            return Task::none();
+        };
+        self.reloading = true;
+        self.reload_result = None;
+        Task::perform(backend::pull_from_source(backend), Message::Reloaded)
     }
 
     /// Whether a sync is writing, so that how far it is gets asked.
@@ -612,6 +653,7 @@ impl State {
         self.cues.clear();
         self.loops.clear();
         self.sync = None;
+        self.reload_result = None;
         self.library = LibraryState::Opening(path.clone());
         match kind {
             model::Kind::Engine => {
@@ -1119,7 +1161,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::SyncOpen => {
-            let busy = state.saving.is_some()
+            let busy = state.locked()
                 || matches!(state.sync, Some(SyncStage::Syncing { .. }))
                 || state.library_sync.is_some()
                 || state.smart.is_some()
@@ -1218,26 +1260,29 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::LibraryReloaded(result) => match result {
-            Ok(library) => {
-                // What was open stays open: the list, the song and where it is in the list,
-                // but nothing is started.
-                let session = state.snapshot().map(|session| Session {
-                    loaded: false,
-                    ..session
-                });
-                state.covers.clear();
-                state.reachable.clear();
-                // Pulling from the source can have replaced the cues.
-                state.cues.clear();
-                state.loops.clear();
-                state.library = LibraryState::Open(Browser::new(library));
-                if let Some(session) = session {
-                    return state.restore_session(session);
+        Message::LibraryReloaded(result) => {
+            state.reloading = false;
+            match result {
+                Ok(library) => {
+                    // What was open stays open: the list, the song and where it is in the list,
+                    // but nothing is started.
+                    let session = state.snapshot().map(|session| Session {
+                        loaded: false,
+                        ..session
+                    });
+                    state.covers.clear();
+                    state.reachable.clear();
+                    // Pulling from the source can have replaced the cues.
+                    state.cues.clear();
+                    state.loops.clear();
+                    state.library = LibraryState::Open(Browser::new(library));
+                    if let Some(session) = session {
+                        return state.restore_session(session);
+                    }
                 }
+                Err(error) => state.backend_error = Some(error),
             }
-            Err(error) => state.backend_error = Some(error),
-        },
+        }
         Message::SyncFinished(result) => {
             if let Some(SyncStage::Syncing { diff, acknowledged }) = &state.sync {
                 state.sync = Some(match result {
@@ -1262,7 +1307,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::PlaylistNew
         | Message::PlaylistRename(_)
         | Message::PlaylistDelete(_)
-            if state.saving.is_some() || state.window_open() => {}
+            if state.locked() || state.window_open() => {}
         Message::SmartNew => {
             if matches!(state.library, LibraryState::Open(_)) {
                 state.smart = Some(smart_editor::Editor::new());
@@ -1341,7 +1386,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         },
 
         Message::LibrarySyncOpen => {
-            if state.saving.is_none()
+            if !state.locked()
                 && !state.window_open()
                 && matches!(state.library, LibraryState::Open(_))
             {
@@ -1633,7 +1678,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::MenuSelected(item) => match item {
             MenuItem::Open => return handle(state, Message::ChooseLibrary),
             MenuItem::SaveAs => {
-                if state.saving.is_none() && matches!(state.library, LibraryState::Open(_)) {
+                if !state.locked() && matches!(state.library, LibraryState::Open(_)) {
                     state.save_error = None;
                     let strings = state.config.effective().language.strings();
                     let title = strings.save_as_title.clone();
@@ -1649,8 +1694,32 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                     );
                 }
             }
+            MenuItem::Reload => return state.reload_from_disk(),
             MenuItem::Exit => return state.exit(),
         },
+        Message::Reloaded(result) => {
+            let strings = state.config.effective().language.strings();
+            match result {
+                // The backend reads the new working copy; so must this.
+                Ok(done) => {
+                    let message = if done.kept_edits_path.is_empty() {
+                        strings.reload_done.clone()
+                    } else {
+                        fill(
+                            &strings.reload_done_kept,
+                            &[("path", &done.kept_edits_path)],
+                        )
+                    };
+                    state.reload_result = Some((message, false));
+                    return state.reload_library();
+                }
+                Err(error) => {
+                    state.reloading = false;
+                    state.reload_result =
+                        Some((fill(&strings.reload_failed, &[("error", &error)]), true));
+                }
+            }
+        }
         Message::SaveAsChosen(Some(path)) => {
             if let (Some(backend), LibraryState::Open(_), None) =
                 (state.backend(), &state.library, &state.saving)
@@ -1689,7 +1758,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::OpenDrive(_)
         | Message::AddLocalFolder
         | Message::OpenLocalFolder(_)
-            if state.saving.is_some() => {}
+            if state.locked() => {}
         Message::AddLocalFolder => {
             let title = state
                 .config
@@ -1709,7 +1778,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 Message::LocalFolderChosen,
             );
         }
-        Message::LocalFolderChosen(Some(_)) if state.saving.is_some() => {}
+        Message::LocalFolderChosen(Some(_)) if state.locked() => {}
         Message::LocalFolderChosen(Some(path)) => {
             state.recents_error = state
                 .local_folders
@@ -1737,7 +1806,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 LibraryState::Open(browser)
                     if !browser.library.is_engine() && Path::new(&browser.library.path) == path
             );
-            if open && state.saving.is_none() {
+            if open && !state.locked() {
                 return handle(state, Message::CloseLibrary);
             }
         }
@@ -1760,7 +1829,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 Message::LibraryChosen,
             );
         }
-        Message::LibraryChosen(Some(_)) if state.saving.is_some() => {}
+        Message::LibraryChosen(Some(_)) if state.locked() => {}
         Message::LibraryChosen(Some(path)) => return state.open(path, None),
         Message::LibraryChosen(None) => {}
         Message::LibraryOpened(result) => {
@@ -1799,6 +1868,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.loops.clear();
             state.sync = None;
             state.library_sync = None;
+            state.reload_result = None;
             // Closing a library on purpose means the next start doesn't reopen it.
             state.save(&Session::default(), true);
             if let Some(backend) = state.backend() {
@@ -1859,7 +1929,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         // The databases are being cloned: a rating set now might miss the clone.
-        Message::SetStars { .. } if state.saving.is_some() => {}
+        Message::SetStars { .. } if state.locked() => {}
         Message::SetStars { track, stars } => {
             let Some(backend) = state.backend() else {
                 return Task::none();
@@ -1935,8 +2005,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         // The databases are being cloned: a cue set now might miss the clone. And one
         // change is written at a time.
         Message::CueAdd(_) | Message::CueRemove(_) | Message::CueEditorSave
-            if state.saving.is_some() || state.cues_busy => {}
-        Message::CueEditorOpen if state.saving.is_some() || state.window_open() => {}
+            if state.locked() || state.cues_busy => {}
+        Message::CueEditorOpen if state.locked() || state.window_open() => {}
         Message::CueAdd(slot) => {
             if let Some(id) = state.playing_id()
                 && let Some(cues) = state.cues.get(id)
@@ -2016,8 +2086,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         // The databases are being cloned: a loop set now might miss the clone. And one
         // change is written at a time.
         Message::LoopAdd(_) | Message::LoopRemove(_) | Message::LoopEditorSave
-            if state.saving.is_some() || state.loops_busy => {}
-        Message::LoopEditorOpen if state.saving.is_some() || state.window_open() => {}
+            if state.locked() || state.loops_busy => {}
+        Message::LoopEditorOpen if state.locked() || state.window_open() => {}
         Message::LoopAdd(slot) => {
             if let Some(id) = state.playing_id()
                 && let Some(loops) = state.loops.get(id)
@@ -2253,8 +2323,15 @@ fn view(state: &State) -> Element<'_, Message> {
         menubar::view(
             language,
             matches!(state.library, LibraryState::Open(_)),
-            state.saving.as_deref(),
-            state.save_error.as_deref(),
+            menubar::Status {
+                saving: state.saving.as_deref(),
+                error: state.save_error.as_deref(),
+                reloading: state.reloading,
+                reload: state
+                    .reload_result
+                    .as_ref()
+                    .map(|(message, failed)| (message.as_str(), *failed)),
+            },
         ),
         navbar::view(state.page, language),
         container(page).padding(20).width(Fill).height(Fill)
@@ -2367,8 +2444,8 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
                 local: &state.local_folders,
             },
             browser.map(|browser| browser.library.path.as_str()),
-            !matches!(state.library, LibraryState::Opening(_)) && state.saving.is_none(),
-            state.saving.is_none(),
+            !matches!(state.library, LibraryState::Opening(_)) && !state.locked(),
+            !state.locked(),
             language,
         ),
         content
@@ -2443,7 +2520,7 @@ fn open_library<'a>(
         } else {
             &strings.close_folder
         }))
-        .on_press_maybe(state.saving.is_none().then_some(Message::CloseLibrary)),
+        .on_press_maybe((!state.locked()).then_some(Message::CloseLibrary)),
     );
 
     let now = (!state.is_stopped())
@@ -2658,6 +2735,8 @@ mod tests {
             loop_editor: None,
             saving: None,
             save_error: None,
+            reloading: false,
+            reload_result: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
             resize: None,
         }
@@ -2904,7 +2983,7 @@ mod tests {
             Message::LibrarySaved(Ok(Arc::new(library_at("/media/NEW/Engine Library")))),
         );
 
-        assert!(state.saving.is_none() && state.save_error.is_none());
+        assert!(!state.locked() && state.save_error.is_none());
         let browser = browser(&state);
         assert_eq!(
             browser.library.path, "/media/NEW/Engine Library",
@@ -2934,6 +3013,72 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_reload_unlocks_the_library_and_says_why() {
+        let mut state = state();
+        state.reloading = true;
+
+        let _ = handle(
+            &mut state,
+            Message::Reloaded(Err("the source can't be reached".into())),
+        );
+
+        assert!(!state.locked());
+        let (message, failed) = state.reload_result.clone().unwrap();
+        assert!(failed && message.contains("the source can't be reached"));
+        assert_eq!(browser(&state).library.path, "/media/DRIVE/Engine Library");
+    }
+
+    #[test]
+    fn a_reload_is_done_when_the_library_is_fetched_again() {
+        let mut state = state();
+        state.reloading = true;
+
+        let _ = handle(
+            &mut state,
+            Message::Reloaded(Ok(open_engine_api::v1::PullFromSourceResponse {
+                files_written: 2,
+                kept_edits_path: "/cache/unsynced-edits".into(),
+            })),
+        );
+        // The backend has the new working copy, but this has not fetched it yet.
+        assert!(state.locked());
+        let (message, failed) = state.reload_result.clone().unwrap();
+        assert!(!failed && message.contains("/cache/unsynced-edits"));
+
+        let _ = handle(
+            &mut state,
+            Message::LibraryReloaded(Ok(Arc::new(library_at("/media/DRIVE/Engine Library")))),
+        );
+        assert!(!state.locked());
+        assert_eq!(browser(&state).library.path, "/media/DRIVE/Engine Library");
+
+        // Without edits that were kept there is nothing to point at.
+        state.reloading = true;
+        let _ = handle(
+            &mut state,
+            Message::Reloaded(Ok(open_engine_api::v1::PullFromSourceResponse {
+                files_written: 2,
+                kept_edits_path: String::new(),
+            })),
+        );
+        let (message, _) = state.reload_result.clone().unwrap();
+        assert!(!message.contains('/'), "{message}");
+    }
+
+    #[test]
+    fn no_other_library_is_opened_while_one_is_reloaded() {
+        let mut state = state();
+        state.reloading = true;
+
+        let _ = handle(&mut state, Message::OpenRecent("/media/OTHER".into()));
+        let _ = handle(&mut state, Message::SyncOpen);
+
+        assert!(matches!(state.library, LibraryState::Open(_)));
+        assert_eq!(browser(&state).library.path, "/media/DRIVE/Engine Library");
+        assert!(state.sync.is_none());
+    }
+
+    #[test]
     fn a_failed_save_keeps_the_library_where_it_was_and_says_why() {
         let mut state = state();
         state.saving = Some("/media/NEW".into());
@@ -2943,7 +3088,7 @@ mod tests {
             Message::LibrarySaved(Err("there already is a library there".into())),
         );
 
-        assert!(state.saving.is_none());
+        assert!(!state.locked());
         assert_eq!(
             state.save_error.as_deref(),
             Some("there already is a library there")
@@ -4151,7 +4296,7 @@ mod tests {
         }
         assert!(state.sync.is_none() && state.library_sync.is_none());
         assert!(state.playlist_dialog.is_none() && state.smart.is_none());
-        assert!(state.saving.is_none());
+        assert!(!state.locked());
 
         let _ = handle(&mut state, Message::SetStars { track: 1, stars: 3 });
         assert_eq!(browser(&state).rating(1), None);

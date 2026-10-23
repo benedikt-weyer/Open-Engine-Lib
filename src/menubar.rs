@@ -14,6 +14,8 @@ use crate::i18n::fill;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuItem {
     Open,
+    /// Reads the library from the disk again, replacing the working copy.
+    Reload,
     SaveAs,
     Exit,
 }
@@ -31,13 +33,14 @@ impl fmt::Display for Entry {
     }
 }
 
-/// The items of the File menu: Save as only when there is a library to save, and nothing
-/// that changes the library while one is being saved.
-pub fn items(library_is_open: bool, saving: bool) -> Vec<MenuItem> {
+/// The items of the File menu: Reload and Save as only when there is a library, and nothing
+/// that changes the library while one is being saved or reloaded.
+pub fn items(library_is_open: bool, busy: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
-    if !saving {
+    if !busy {
         items.push(MenuItem::Open);
         if library_is_open {
+            items.push(MenuItem::Reload);
             items.push(MenuItem::SaveAs);
         }
     }
@@ -45,20 +48,37 @@ pub fn items(library_is_open: bool, saving: bool) -> Vec<MenuItem> {
     items
 }
 
-/// `saving` is where the library is being saved to, `error` why the last save failed.
+/// What the bar says besides the menu.
+pub struct Status<'a> {
+    /// Where the library is being saved to.
+    pub saving: Option<&'a Path>,
+    /// Why the last save failed.
+    pub error: Option<&'a str>,
+    /// Whether the library is being read from the disk again.
+    pub reloading: bool,
+    /// How the last reload went: what to say, and whether it failed.
+    pub reload: Option<(&'a str, bool)>,
+}
+
 pub fn view<'a>(
     language: Language,
     library_is_open: bool,
-    saving: Option<&'a Path>,
-    error: Option<&'a str>,
+    status: Status<'a>,
 ) -> Element<'a, Message> {
     let strings = language.strings();
-    let entries: Vec<Entry> = items(library_is_open, saving.is_some())
+    let Status {
+        saving,
+        error,
+        reloading,
+        reload,
+    } = status;
+    let entries: Vec<Entry> = items(library_is_open, saving.is_some() || reloading)
         .into_iter()
         .map(|item| Entry {
             item,
             label: match item {
                 MenuItem::Open => &strings.menu_open,
+                MenuItem::Reload => &strings.menu_reload,
                 MenuItem::SaveAs => &strings.menu_save_as,
                 MenuItem::Exit => &strings.menu_exit,
             },
@@ -105,6 +125,16 @@ pub fn view<'a>(
                 .style(text::danger),
         );
     }
+    if reloading {
+        bar = bar.push(text(&strings.reloading_library).size(14));
+    } else if let Some((message, failed)) = reload {
+        let message = text(message).size(14);
+        bar = bar.push(if failed {
+            message.style(text::danger)
+        } else {
+            message
+        });
+    }
     iced::widget::container(bar.width(Fill))
         .padding([2, 12])
         .into()
@@ -119,12 +149,17 @@ mod tests {
         assert_eq!(items(false, false), [MenuItem::Open, MenuItem::Exit]);
         assert_eq!(
             items(true, false),
-            [MenuItem::Open, MenuItem::SaveAs, MenuItem::Exit]
+            [
+                MenuItem::Open,
+                MenuItem::Reload,
+                MenuItem::SaveAs,
+                MenuItem::Exit
+            ]
         );
     }
 
     #[test]
-    fn while_saving_only_exit_is_left() {
+    fn while_busy_only_exit_is_left() {
         assert_eq!(items(true, true), [MenuItem::Exit]);
         assert_eq!(items(false, true), [MenuItem::Exit]);
     }

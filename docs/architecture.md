@@ -50,9 +50,11 @@ Versioning rules:
 
 The `.proto` files are compiled in pure Rust (`protox`), so building needs no `protoc`.
 
-## The menu bar: Open, Save as, Exit
+## The menu bar: Open, Reload, Save as, Exit
 
-A **File** menu sits at the top of the window: **Open…** (the same as "Open library…"), **Save as…** (only while a library is open) and **Exit** (which saves the session first, like closing the window).
+A **File** menu sits at the top of the window: **Open…** (the same as "Open library…"), **Reload from disk** and **Save as…** (both only while a library is open) and **Exit** (which saves the session first, like closing the window).
+
+**Reload from disk** replaces the working copy by what is on the disk: for an Engine library it is `PullFromSource` (the same as "Replace the working copy with the source" in the sync window, but without the comparison first), after which the UI fetches the library again and keeps the list, the song and its place in it; edits that were not synced are moved to `unsynced-edits` in the cache folder and the menu bar says where. For a folder of music the folder is scanned again. While it runs, nothing else may open or replace the library (`State::locked`, which also covers saving).
 
 **Save as…** asks for a folder and calls `SaveLibraryAs`. The backend clones the *working copy* of the databases (the cache, which is what the app reads) into a new `Engine Library` folder inside the chosen one (or into the chosen folder if it is called that), and only when that has succeeded does it make the new place the library's location: it opens the clone, so the app reads from a working copy of the new place from then on, and the recent libraries and the saved session refer to it.
 
