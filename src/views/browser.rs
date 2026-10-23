@@ -1,6 +1,7 @@
 //! The open library as the user sees it: a playlist tree on the left and the
 //! tracks of the chosen playlist on the right.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -48,6 +49,35 @@ pub enum Source {
     Collection,
     /// An index into `Library::playlists`.
     Playlist(usize),
+}
+
+/// What the track list can be sorted by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Column(Column),
+    /// The file's location, the last column.
+    Location,
+    /// The number of the track in its playlist: only to put the list back the other way
+    /// round, as it starts out in that order.
+    Number,
+}
+
+/// An order the shown list was put in by clicking a header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sort {
+    pub key: SortKey,
+    pub descending: bool,
+}
+
+/// What a track is compared by. Text is compared without regard to case.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Value {
+    Text(String),
+    Number(u64),
+}
+
+fn text_value(text: &str) -> Option<Value> {
+    (!text.is_empty()).then(|| Value::Text(text.to_lowercase()))
 }
 
 /// How the numbers of the playlists moved when one was added or deleted.
@@ -112,6 +142,19 @@ pub struct Browser {
     expanded: HashSet<usize>,
     scroll: f32,
     viewport_height: f32,
+    /// The order the user chose with a header, if any: the list is then `sorted`.
+    sort: Option<Sort>,
+    /// The shown list in that order (boxed to keep `Browser` small).
+    sorted: Box<Sorted>,
+}
+
+/// The shown list in the order of the sort, kept while a sort is on.
+#[derive(Default)]
+struct Sorted {
+    /// Indices into `Library::tracks`.
+    tracks: Vec<usize>,
+    /// For each row, the place the track has in the unsorted list.
+    positions: Vec<usize>,
 }
 
 impl Browser {
@@ -192,14 +235,143 @@ impl Browser {
             expanded: HashSet::new(),
             scroll: 0.0,
             viewport_height: MIN_VIEWPORT,
+            sort: None,
+            sorted: Box::default(),
+        }
+    }
+
+    /// The shown list as the library has it, before any sorting.
+    fn unsorted(&self) -> &[usize] {
+        match self.source {
+            Source::Collection => &self.all,
+            Source::Playlist(index) => &self.library.playlists[index].tracks,
         }
     }
 
     /// Indices into `Library::tracks` of the shown list, in order.
     pub fn tracks(&self) -> &[usize] {
+        if self.sort.is_some() {
+            &self.sorted.tracks
+        } else {
+            self.unsorted()
+        }
+    }
+
+    /// Where the track of `row` stands in the shown list when it is not sorted.
+    pub fn position(&self, row: usize) -> usize {
+        if self.sort.is_some() {
+            self.sorted.positions[row]
+        } else {
+            row
+        }
+    }
+
+    /// Whether the tracks of the shown list have a number: those of an ordinary playlist
+    /// do, as the order is the playlist's own. (A smart playlist's tracks come from its
+    /// rules, and all tracks have no order.)
+    pub fn numbered(&self) -> bool {
         match self.source {
-            Source::Collection => &self.all,
-            Source::Playlist(index) => &self.library.playlists[index].tracks,
+            Source::Collection => false,
+            Source::Playlist(index) => !self.library.playlists[index].is_smart,
+        }
+    }
+
+    pub fn sort(&self) -> Option<Sort> {
+        self.sort
+    }
+
+    /// What `track` is compared by when the list is sorted by `key`. Nothing sorts last,
+    /// whichever way round.
+    fn value(&self, key: SortKey, track: &Track, position: usize) -> Option<Value> {
+        let number = |number: u64| Some(Value::Number(number));
+        match key {
+            SortKey::Number => number(position as u64),
+            SortKey::Location if track.streaming => None,
+            SortKey::Location => text_value(&track.location),
+            SortKey::Column(column) => match column {
+                Column::Title => text_value(&track.title),
+                Column::Artist => text_value(&track.artist),
+                Column::Album => text_value(&track.album),
+                Column::Genre => text_value(&track.genre),
+                Column::Bpm => track
+                    .bpm
+                    .and_then(|bpm| number((bpm * 100.0).round() as u64)),
+                Column::Length => track.length.and_then(|length| number(length.into())),
+                Column::Rating => self
+                    .rating(track.id)
+                    .and_then(|rating| number(rating.into())),
+                Column::Cues => number(self.cue_count(track.id).into()),
+                Column::Loops => number(self.loop_count(track.id).into()),
+                Column::Lighting if track.streaming => None,
+                Column::Lighting => number(match track.lighting {
+                    Lighting::Rendered => 2,
+                    Lighting::Analysed => 1,
+                    Lighting::None => 0,
+                }),
+                Column::Stems if track.streaming => None,
+                Column::Stems => number(u64::from(track.has_stems)),
+                Column::Origin => self.origin(track).and_then(text_value),
+            },
+        }
+    }
+
+    /// Puts the shown list in the order of `sort` again (after the list, the sort or a
+    /// value it goes by changed). Tracks that compare the same keep the order they have in
+    /// the playlist.
+    fn resort(&mut self) {
+        let Some(sort) = self.sort else {
+            *self.sorted = Sorted::default();
+            return;
+        };
+        let list = self.unsorted();
+        let values: Vec<_> = list
+            .iter()
+            .enumerate()
+            .map(|(position, &track)| self.value(sort.key, &self.library.tracks[track], position))
+            .collect();
+        let mut positions: Vec<usize> = (0..list.len()).collect();
+        positions.sort_by(|&a, &b| match (&values[a], &values[b]) {
+            (Some(a), Some(b)) if sort.descending => b.cmp(a),
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        });
+        *self.sorted = Sorted {
+            tracks: positions.iter().map(|&position| list[position]).collect(),
+            positions,
+        };
+    }
+
+    /// A click on the header of `key`: sorts the list by it, then the other way round, then
+    /// puts it back as it was. (The number only goes back to the start: the list is in
+    /// that order already.) The row that was selected stays selected.
+    pub fn sort_by(&mut self, key: SortKey) -> iced::Task<Message> {
+        let selected = self.selected.map(|row| self.position(row));
+        self.sort = match self.sort {
+            Some(Sort {
+                key: current,
+                descending: false,
+            }) if current == key && key != SortKey::Number => Some(Sort {
+                key,
+                descending: true,
+            }),
+            Some(Sort { key: current, .. }) if current == key => None,
+            _ => Some(Sort {
+                key,
+                descending: key == SortKey::Number,
+            }),
+        };
+        self.resort();
+        self.selected = selected.and_then(|position| {
+            (0..self.tracks().len()).find(|&row| self.position(row) == position)
+        });
+        match self.selected {
+            Some(row) => self.reveal(row),
+            None => {
+                self.scroll = 0.0;
+                scroll_to_top()
+            }
         }
     }
 
@@ -233,6 +405,7 @@ impl Browser {
         self.source = source;
         self.selected = None;
         self.scroll = 0.0;
+        self.resort();
     }
 
     /// Opens the folders on the way down to the last playlist of `chain` (see
@@ -273,7 +446,10 @@ impl Browser {
                 }
                 self.show(shown);
             }
-            (None, Some(source)) => self.source = source,
+            (None, Some(source)) => {
+                self.source = source;
+                self.resort();
+            }
             (None, None) => self.show(Source::Collection),
         }
     }
@@ -457,6 +633,8 @@ impl canvas::Program<Message> for SmartIcon {
 
 /// The width of the marker column that shows which track is playing.
 const MARKER_WIDTH: f32 = 24.0;
+/// The width of the column with the number of a track in its playlist.
+const NUMBER_WIDTH: f32 = 36.0;
 /// The gap after every column. In the header it holds the handle to drag the column's
 /// width, in the rows it is empty, so that the columns line up.
 const GAP: f32 = 10.0;
@@ -464,22 +642,39 @@ const GAP: f32 = 10.0;
 /// easy to grab.
 const HANDLE_HEIGHT: f32 = 24.0;
 
-/// One line of the track list, the header or a track: the marker, the cover, the
-/// resizable columns and then the location, which takes the rest of the width.
-/// `gap` is what goes after each column (`None` for the marker and the cover).
+/// How the lines of the track list are laid out.
+#[derive(Clone, Copy)]
+struct Layout<'a> {
+    widths: &'a ColumnWidths,
+    /// What the library is made of, which decides the columns.
+    kind: Kind,
+}
+
+/// One line of the track list, the header or a track: the number (in an ordinary
+/// playlist), the marker, the cover, the resizable columns and then the location, which
+/// takes the rest of the width.
+/// `gap` is what goes after each column (`None` for the number, the marker and the cover).
 fn line<'a>(
+    number: Option<Element<'a, Message>>,
     marker: Element<'a, Message>,
     cover: Element<'a, Message>,
     cells: [Element<'a, Message>; Column::COUNT],
     location: Element<'a, Message>,
-    widths: &ColumnWidths,
-    kind: Kind,
+    layout: Layout<'_>,
     gap: impl Fn(Option<Column>) -> Element<'a, Message>,
 ) -> row::Row<'a, Message> {
-    let mut line = row![container(marker).width(MARKER_WIDTH), gap(None)]
-        .align_y(iced::Center)
-        .padding([0, 8]);
-    line = line.push(container(cover).width(THUMBNAIL)).push(gap(None));
+    let Layout { widths, kind } = layout;
+    let mut line = row![].align_y(iced::Center).padding([0, 8]);
+    if let Some(number) = number {
+        line = line
+            .push(container(number).width(NUMBER_WIDTH).clip(true))
+            .push(gap(None));
+    }
+    line = line
+        .push(container(marker).width(MARKER_WIDTH))
+        .push(gap(None))
+        .push(container(cover).width(THUMBNAIL))
+        .push(gap(None));
     for (column, cell) in Column::ALL.into_iter().zip(cells) {
         // A folder of music has no ratings, cues and so on to show.
         if kind == Kind::Folder && column.is_engine_only() {
@@ -523,31 +718,58 @@ fn cell<'a>(content: impl iced::widget::text::IntoFragment<'a>) -> text::Text<'a
 }
 
 /// The bar of column titles. Its height is that of its text and the handles in it,
-/// whatever the height of the window.
-fn header<'a>(language: Language, widths: &ColumnWidths, kind: Kind) -> Element<'a, Message> {
+/// whatever the height of the window. Clicking a title sorts the list by it; the one it is
+/// sorted by shows which way.
+fn header<'a>(
+    language: Language,
+    layout: Layout<'_>,
+    sort: Option<Sort>,
+    numbered: bool,
+) -> Element<'a, Message> {
     let strings = language.strings();
-    let heading_cell =
-        |label: &'a str| -> Element<'a, Message> { cell(label).style(text::secondary).into() };
+    let heading_cell = |label: &str, key: SortKey| -> Element<'a, Message> {
+        let sorted = sort.filter(|sort| sort.key == key);
+        let arrow = match sorted {
+            Some(Sort {
+                descending: true, ..
+            }) => " ▼",
+            Some(_) => " ▲",
+            None => "",
+        };
+        let label = cell(format!("{label}{arrow}"));
+        mouse_area(
+            container(if sorted.is_some() {
+                label
+            } else {
+                label.style(text::secondary)
+            })
+            .width(Fill),
+        )
+        .on_press(Message::SortBy(key))
+        .interaction(mouse::Interaction::Pointer)
+        .into()
+    };
+    let by = |column: Column, label: &str| heading_cell(label, SortKey::Column(column));
     container(line(
+        numbered.then(|| heading_cell("#", SortKey::Number)),
         Space::new().into(),
         Space::new().into(),
         [
-            heading_cell(&strings.col_title),
-            heading_cell(&strings.col_artist),
-            heading_cell(&strings.col_album),
-            heading_cell(&strings.col_genre),
-            heading_cell(&strings.col_bpm),
-            heading_cell(&strings.col_length),
-            heading_cell(&strings.col_rating),
-            heading_cell(&strings.col_cues),
-            heading_cell(&strings.col_loops),
-            heading_cell(&strings.col_lighting),
-            heading_cell(&strings.col_stems),
-            heading_cell(&strings.col_origin),
+            by(Column::Title, &strings.col_title),
+            by(Column::Artist, &strings.col_artist),
+            by(Column::Album, &strings.col_album),
+            by(Column::Genre, &strings.col_genre),
+            by(Column::Bpm, &strings.col_bpm),
+            by(Column::Length, &strings.col_length),
+            by(Column::Rating, &strings.col_rating),
+            by(Column::Cues, &strings.col_cues),
+            by(Column::Loops, &strings.col_loops),
+            by(Column::Lighting, &strings.col_lighting),
+            by(Column::Stems, &strings.col_stems),
+            by(Column::Origin, &strings.col_origin),
         ],
-        heading_cell(&strings.col_location),
-        widths,
-        kind,
+        heading_cell(&strings.col_location, SortKey::Location),
+        layout,
         handle,
     ))
     .padding([4, 0])
@@ -574,7 +796,12 @@ pub fn tracks<'a>(
     ))
     .size(20);
 
-    let header = header(language, widths, browser.library.kind);
+    let layout = Layout {
+        widths,
+        kind: browser.library.kind,
+    };
+    let numbered = browser.numbered();
+    let header = header(language, layout, browser.sort(), numbered);
 
     if list.is_empty() {
         return column![heading, header, text(&strings.no_tracks)]
@@ -606,10 +833,10 @@ pub fn tracks<'a>(
                 stars: stars_of(browser.rating(track.id)),
                 cues: browser.cue_count(track.id),
                 loops: browser.loop_count(track.id),
-                kind: browser.library.kind,
+                number: numbered.then(|| browser.position(row_index) + 1),
             },
             track.album_art.and_then(|id| covers.get(id)),
-            widths,
+            layout,
             language,
         ));
     }
@@ -842,8 +1069,8 @@ struct RowState<'a> {
     cues: u32,
     /// How many loops the track has saved.
     loops: u32,
-    /// What the track's library is made of, which decides the columns.
-    kind: Kind,
+    /// The number of the track in its playlist, if the list has numbers.
+    number: Option<usize>,
 }
 
 fn track_row<'a>(
@@ -851,7 +1078,7 @@ fn track_row<'a>(
     row_index: usize,
     state: RowState<'a>,
     cover: Option<&Handle>,
-    widths: &ColumnWidths,
+    layout: Layout<'_>,
     language: Language,
 ) -> Element<'a, Message> {
     let RowState {
@@ -863,8 +1090,9 @@ fn track_row<'a>(
         stars,
         cues,
         loops,
-        kind,
+        number,
     } = state;
+    let kind = layout.kind;
     // Streaming tracks have no file here, so they can be seen but not played.
     let style = |content: text::Text<'a>| -> Element<'a, Message> {
         if track.streaming {
@@ -898,6 +1126,7 @@ fn track_row<'a>(
     };
 
     let cells = line(
+        number.map(|number| cell(number.to_string()).style(text::secondary).into()),
         cell(if playing { "▶" } else { "" }).into(),
         thumbnail,
         [
@@ -915,8 +1144,7 @@ fn track_row<'a>(
             origin_cell(origin, origin_reachable, language),
         ],
         location,
-        widths,
-        kind,
+        layout,
         plain_gap,
     );
 
@@ -975,11 +1203,18 @@ mod tests {
         );
 
         for language in Language::ALL {
-            let header = header(language, &ColumnWidths::default(), Kind::Engine);
-            assert!(
-                height_of(&header).is_some(),
-                "the header must not fill the height"
-            );
+            let widths = ColumnWidths::default();
+            let layout = Layout {
+                widths: &widths,
+                kind: Kind::Engine,
+            };
+            for numbered in [false, true] {
+                let header = header(language, layout, None, numbered);
+                assert!(
+                    height_of(&header).is_some(),
+                    "the header must not fill the height"
+                );
+            }
         }
     }
 

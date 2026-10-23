@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use backend::{Backend, Control, WaveformSettings};
-use browser::{Browser, Change, Source};
+use browser::{Browser, Change, SortKey, Source};
 use clock::Clock;
 use columns::{Column, ColumnStore};
 use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, WaveformColors};
@@ -353,6 +353,8 @@ pub enum Message {
     ShowPlaylist(usize),
     ToggleFolder(usize),
     SelectTrack(usize),
+    /// A header of the track list was clicked: sort the list by it.
+    SortBy(SortKey),
     PlayTrack(usize),
     /// A star in the track list was clicked: give the track (by id) this many stars.
     SetStars {
@@ -892,7 +894,22 @@ impl State {
         if self.is_stopped() || self.play_source != Some(browser.source) {
             return None;
         }
-        self.status.queue_position.map(|position| position as usize)
+        let position = self.status.queue_position? as usize;
+        // The list may have been sorted since the queue was made from it: the playing track
+        // is where it is in the list now.
+        let Some(id) = self.status.track_id else {
+            return Some(position);
+        };
+        let list = browser.tracks();
+        let is_playing = |row: usize| {
+            list.get(row)
+                .is_some_and(|&track| browser.library.tracks[track].id == id)
+        };
+        if is_playing(position) {
+            Some(position)
+        } else {
+            (0..list.len()).find(|&row| is_playing(row))
+        }
     }
 
     /// Asks the backend for the covers of the rows in view and of the playing track
@@ -1250,6 +1267,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::SeekTo(..)
         | Message::SelectTrack(..)
         | Message::SetStars { .. }
+        | Message::SortBy(..)
         | Message::ShowCollection
         | Message::ShowPlaylist(..)
         | Message::ScratchBy(..)
@@ -1860,6 +1878,91 @@ mod tests {
 
     fn state_with_nothing() -> State {
         state()
+    }
+
+    fn sort_by(state: &mut State, key: SortKey) {
+        let _ = handle(state, Message::SortBy(key));
+    }
+
+    #[test]
+    fn a_header_click_sorts_the_list_then_reverses_it_then_puts_it_back() {
+        let mut state = state();
+        let title = SortKey::Column(Column::Title);
+        // Deep holds b and c, in that order.
+        let _ = handle(&mut state, Message::ShowPlaylist(1));
+        assert_eq!(browser(&state).tracks(), [1, 2]);
+        assert!(browser(&state).numbered());
+
+        sort_by(&mut state, title);
+        assert_eq!(browser(&state).tracks(), [1, 2]);
+        sort_by(&mut state, title);
+        assert_eq!(browser(&state).tracks(), [2, 1], "descending");
+        assert_eq!(
+            browser(&state).position(0),
+            1,
+            "c is second in the playlist"
+        );
+        sort_by(&mut state, title);
+        assert_eq!(browser(&state).sort(), None);
+        assert_eq!(browser(&state).tracks(), [1, 2]);
+    }
+
+    #[test]
+    fn sorting_keeps_the_selected_track_and_the_playing_marker_on_their_track() {
+        let mut state = state();
+        let _ = handle(&mut state, Message::ShowPlaylist(1));
+        let _ = handle(&mut state, Message::SelectTrack(0));
+        state.play_source = Some(Source::Playlist(1));
+        state.status = PlaybackStatus {
+            state: PlaybackState::Playing.into(),
+            queue_position: Some(0),
+            track_id: Some(1),
+            position_ms: 0,
+            error: None,
+            scratching: false,
+        };
+
+        let title = SortKey::Column(Column::Title);
+        sort_by(&mut state, title);
+        sort_by(&mut state, title);
+        let browser = browser(&state);
+        assert_eq!(browser.tracks(), [2, 1]);
+        assert_eq!(browser.selected, Some(1), "b moved down");
+        assert_eq!(state.playing_row(browser), Some(1));
+    }
+
+    #[test]
+    fn what_is_missing_sorts_last_whichever_way_round() {
+        let mut state = state();
+        if let LibraryState::Open(browser) = &mut state.library {
+            let mut library = library_at("/media/DRIVE/Engine Library");
+            library.tracks[1].bpm = Some(120.0);
+            library.tracks[2].bpm = Some(90.0);
+            *browser = Browser::new(Arc::new(library));
+        }
+        let bpm = SortKey::Column(Column::Bpm);
+        sort_by(&mut state, bpm);
+        assert_eq!(browser(&state).tracks(), [2, 1, 0]);
+        sort_by(&mut state, bpm);
+        assert_eq!(browser(&state).tracks(), [1, 2, 0]);
+    }
+
+    #[test]
+    fn only_ordinary_playlists_are_numbered() {
+        let mut state = state();
+        assert!(!browser(&state).numbered(), "all tracks");
+        let _ = handle(&mut state, Message::ShowPlaylist(2));
+        assert!(browser(&state).numbered());
+    }
+
+    #[test]
+    fn the_number_header_puts_a_playlist_back_to_front() {
+        let mut state = state();
+        let _ = handle(&mut state, Message::ShowPlaylist(1));
+        sort_by(&mut state, SortKey::Number);
+        assert_eq!(browser(&state).tracks(), [2, 1]);
+        sort_by(&mut state, SortKey::Number);
+        assert_eq!(browser(&state).tracks(), [1, 2]);
     }
 
     #[test]

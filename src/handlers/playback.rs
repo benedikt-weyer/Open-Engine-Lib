@@ -28,6 +28,11 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 browser.selected = Some(row);
             }
         }
+        Message::SortBy(key) => {
+            if let LibraryState::Open(browser) = &mut state.library {
+                return browser.sort_by(key);
+            }
+        }
         // The databases are being cloned: a rating set now might miss the clone.
         Message::SetStars { .. } if state.locked() => {}
         Message::SetStars { track, stars } => {
