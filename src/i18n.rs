@@ -17,6 +17,13 @@ use crate::config::Language;
 pub struct Strings {
     /// The language's name in that language, so it is recognizable from any UI language.
     pub native_name: String,
+    pub menu_file: String,
+    pub menu_open: String,
+    pub menu_save_as: String,
+    pub menu_exit: String,
+    pub save_as_title: String,
+    pub saving_library: String,
+    pub save_library_failed: String,
     pub nav_library: String,
     pub nav_settings: String,
     pub settings_title: String,

@@ -20,7 +20,8 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetWaveformRequest,
     ListPlaylistsRequest, ListTracksRequest, NextRequest, OpenLibraryRequest, PlayRequest,
-    PlaybackStatus, PreviousRequest, SeekRequest, StopRequest, TogglePauseRequest,
+    PlaybackStatus, PreviousRequest, SaveLibraryAsRequest, SeekRequest, StopRequest,
+    TogglePauseRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -198,7 +199,37 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
         .map_err(describe)?
         .into_inner();
 
-    let mut tracks = Vec::with_capacity(opened.track_count as usize);
+    load_library(
+        &mut backend,
+        opened.path,
+        opened.cache_path,
+        opened.track_count,
+    )
+    .await
+}
+
+/// Saves the open library to a new place, which becomes its location, and fetches it
+/// again: the tracks are the same but their paths now start from the new folder.
+pub async fn save_library_as(mut backend: Backend, path: PathBuf) -> Result<Arc<Library>, String> {
+    let saved = backend
+        .library
+        .save_library_as(SaveLibraryAsRequest {
+            path: path.display().to_string(),
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    load_library(&mut backend, saved.path, saved.cache_path, 0).await
+}
+
+/// Fetches the tracks and playlists of the library the backend has open.
+async fn load_library(
+    backend: &mut Backend,
+    path: String,
+    cache_path: String,
+    track_count: u32,
+) -> Result<Arc<Library>, String> {
+    let mut tracks = Vec::with_capacity(track_count as usize);
     let mut stream = backend
         .library
         .list_tracks(ListTracksRequest {})
@@ -219,7 +250,7 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
             location: if track.streaming {
                 String::new()
             } else {
-                crate::model::location(&opened.path, &track.path)
+                crate::model::location(&path, &track.path)
             },
             path: track.path,
         }));
@@ -250,12 +281,7 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
         })
         .collect();
 
-    Ok(Arc::new(Library::new(
-        opened.path,
-        opened.cache_path,
-        tracks,
-        playlists,
-    )))
+    Ok(Arc::new(Library::new(path, cache_path, tracks, playlists)))
 }
 
 /// Fetches a cover image: `None` if the backend has no image for it.

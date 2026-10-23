@@ -69,8 +69,8 @@ pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct SourceFile {
-    name: String,
+pub struct SourceFile {
+    pub name: String,
     size: u64,
     /// Nanoseconds since the Unix epoch.
     modified: u128,
@@ -79,7 +79,7 @@ struct SourceFile {
 /// The database files to copy: `*.db`, plus the journal/WAL files SQLite needs to
 /// recover a database that was in the middle of a write. Empty side files carry
 /// nothing and are skipped.
-fn database_files(dir: &Path) -> io::Result<Vec<SourceFile>> {
+pub fn database_files(dir: &Path) -> io::Result<Vec<SourceFile>> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;

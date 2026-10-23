@@ -13,6 +13,7 @@ mod cache;
 mod engine;
 mod library;
 mod player;
+mod save;
 mod service;
 mod waveform;
 

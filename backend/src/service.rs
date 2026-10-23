@@ -17,6 +17,7 @@ use tonic::{Request, Response, Status};
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, Library, OpenError};
 use crate::player::Start;
+use crate::save::{self, SaveError};
 use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 
 /// Tracks per message of `ListTracks`, to stay well below gRPC's message size limit.
@@ -123,6 +124,44 @@ impl LibraryService for Service {
             playlist_count: library.playlists.len() as u32,
         };
         *self.0.library.write().expect("library lock") = Some(Arc::new(library));
+        Ok(Response::new(response))
+    }
+
+    async fn save_library_as(
+        &self,
+        request: Request<api::SaveLibraryAsRequest>,
+    ) -> Result<Response<api::SaveLibraryAsResponse>, Status> {
+        let library = self.library()?;
+        let destination = PathBuf::from(request.into_inner().path);
+        let cache_root = self.0.cache_root.clone();
+
+        // Copying databases takes a moment and must not block the async threads.
+        let saved = tokio::task::spawn_blocking(move || {
+            let target = save::save_as(&library, &destination)?;
+            // Only once everything is copied is the new place made the library's location,
+            // by opening it. Were that to fail, the library would stay where it is.
+            match Library::open(&target, &cache_root) {
+                Ok(opened) => Ok(opened),
+                Err(error) => {
+                    save::discard(&target);
+                    Err(SaveError::Failed(error.to_string()))
+                }
+            }
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map_err(|error| match error {
+            SaveError::SameAsSource => Status::invalid_argument(error.to_string()),
+            SaveError::AlreadyExists(_) => Status::already_exists(error.to_string()),
+            SaveError::Failed(_) => Status::internal(error.to_string()),
+        })?;
+
+        let response = api::SaveLibraryAsResponse {
+            path: saved.dir.display().to_string(),
+            cache_path: saved.cache.display().to_string(),
+        };
+        // The tracks are the same files in the same order, so playback and every id carry on.
+        *self.0.library.write().expect("library lock") = Some(Arc::new(saved));
         Ok(Response::new(response))
     }
 

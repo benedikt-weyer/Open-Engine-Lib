@@ -1,4 +1,11 @@
 native_name: English
+menu_file: File
+menu_open: Open…
+menu_save_as: Save as…
+menu_exit: Exit
+save_as_title: Choose where to save the library
+saving_library: "Saving the library to {path}…"
+save_library_failed: "Could not save the library: {error}"
 nav_library: Library
 nav_settings: Settings
 settings_title: Settings

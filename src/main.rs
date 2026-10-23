@@ -9,6 +9,7 @@ mod config;
 mod covers;
 mod deck;
 mod i18n;
+mod menubar;
 mod model;
 mod navbar;
 mod player_bar;
@@ -31,6 +32,7 @@ use covers::Covers;
 use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
+use menubar::MenuItem;
 use model::Library;
 use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
 use recent::Recents;
@@ -119,6 +121,9 @@ struct State {
     backend_error: Option<String>,
     /// The waveform gain slider being dragged and where it is.
     gain_draft: Option<(WaveformBand, f32)>,
+    /// Where the library is being saved to, and why the last save failed.
+    saving: Option<PathBuf>,
+    save_error: Option<String>,
     /// How wide the user made the track list's columns.
     columns: ColumnStore,
     /// The column whose width is being dragged.
@@ -141,6 +146,11 @@ pub enum Message {
     /// The pointer moved, to this x, while a column was being resized.
     ResizeMoved(f32),
     ResizeEnded,
+
+    /// A File menu entry was picked.
+    MenuSelected(MenuItem),
+    SaveAsChosen(Option<PathBuf>),
+    LibrarySaved(Result<Arc<Library>, String>),
     ReopenLibraryToggled(bool),
     RestorePositionToggled(bool),
     CloseRequested(iced::window::Id),
@@ -217,6 +227,8 @@ impl State {
             seeking: None,
             backend_error: None,
             gain_draft: None,
+            saving: None,
+            save_error: None,
             columns: ColumnStore::discover(),
             resize: None,
         };
@@ -479,6 +491,12 @@ impl State {
         })
     }
 
+    /// Remembers what was open, then quits.
+    fn exit(&mut self) -> Task<Message> {
+        self.save_session(true);
+        iced::exit()
+    }
+
     fn is_stopped(&self) -> bool {
         !matches!(
             self.status.state(),
@@ -580,10 +598,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .err()
                 .map(|e| e.to_string());
         }
-        Message::CloseRequested(_) => {
-            state.save_session(true);
-            return iced::exit();
-        }
+        Message::CloseRequested(_) => return state.exit(),
         Message::ResetOverrides => {
             state.config_error = state.config.reset_overrides().err().map(|e| e.to_string());
         }
@@ -601,6 +616,61 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             return start_backend();
         }
 
+        Message::MenuSelected(item) => match item {
+            MenuItem::Open => return handle(state, Message::ChooseLibrary),
+            MenuItem::SaveAs => {
+                if state.saving.is_none() && matches!(state.library, LibraryState::Open(_)) {
+                    state.save_error = None;
+                    let strings = state.config.effective().language.strings();
+                    let title = strings.save_as_title.clone();
+                    return Task::perform(
+                        async move {
+                            rfd::AsyncFileDialog::new()
+                                .set_title(title)
+                                .pick_folder()
+                                .await
+                                .map(|folder| folder.path().to_path_buf())
+                        },
+                        Message::SaveAsChosen,
+                    );
+                }
+            }
+            MenuItem::Exit => return state.exit(),
+        },
+        Message::SaveAsChosen(Some(path)) => {
+            if let (Some(backend), LibraryState::Open(_), None) =
+                (state.backend(), &state.library, &state.saving)
+            {
+                state.saving = Some(path.clone());
+                return Task::perform(
+                    backend::save_library_as(backend, path),
+                    Message::LibrarySaved,
+                );
+            }
+        }
+        Message::SaveAsChosen(None) => {}
+        Message::LibrarySaved(result) => {
+            state.saving = None;
+            match result {
+                // The library is now at its new place. Everything else carries on as it
+                // was: the tracks and playlists are the same, in the same order, and the
+                // player was never interrupted.
+                Ok(saved) => {
+                    state.save_error = None;
+                    if let LibraryState::Open(browser) = &mut state.library {
+                        state.recents_error = state
+                            .recents
+                            .add(PathBuf::from(&saved.path))
+                            .err()
+                            .map(|error| error.to_string());
+                        browser.library = saved;
+                    }
+                }
+                Err(error) => state.save_error = Some(error),
+            }
+        }
+        Message::ChooseLibrary | Message::CloseLibrary | Message::OpenRecent(_)
+            if state.saving.is_some() => {}
         Message::ChooseLibrary => {
             let title = state
                 .config
@@ -620,6 +690,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 Message::LibraryChosen,
             );
         }
+        Message::LibraryChosen(Some(_)) if state.saving.is_some() => {}
         Message::LibraryChosen(Some(path)) => return state.open(path, None),
         Message::LibraryChosen(None) => {}
         Message::LibraryOpened(result) => {
@@ -775,6 +846,12 @@ fn view(state: &State) -> Element<'_, Message> {
     };
 
     column![
+        menubar::view(
+            language,
+            matches!(state.library, LibraryState::Open(_)),
+            state.saving.as_deref(),
+            state.save_error.as_deref(),
+        ),
         navbar::view(state.page, language),
         container(page).padding(20).width(Fill).height(Fill)
     ]
@@ -840,7 +917,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
             &state.recents,
             state.recents_error.as_deref(),
             browser.map(|browser| browser.library.path.as_str()),
-            !matches!(state.library, LibraryState::Opening(_)),
+            !matches!(state.library, LibraryState::Opening(_)) && state.saving.is_none(),
             language,
         ),
         content
@@ -878,7 +955,9 @@ fn open_library<'a>(
         ]
         .spacing(2)
         .width(Fill),
-        button(text(&strings.close_library)).on_press(Message::CloseLibrary),
+        // Not while the library is being saved: it is in the middle of moving.
+        button(text(&strings.close_library))
+            .on_press_maybe(state.saving.is_none().then_some(Message::CloseLibrary)),
     ]
     .spacing(10)
     .align_y(Center);
@@ -1008,12 +1087,10 @@ mod tests {
         }
     }
 
-    /// An app with a library open: tracks a, b, c; playlists House/Deep (b, c) and Pop (a).
-    fn state() -> State {
-        let temp =
-            std::env::temp_dir().join(format!("open-engine-lib-main-test-{}", std::process::id()));
-        let library = Library::new(
-            "/media/DRIVE/Engine Library".into(),
+    /// A library at `path`: tracks a, b, c; playlists House/Deep (b, c) and Pop (a).
+    fn library_at(path: &str) -> Library {
+        Library::new(
+            path.into(),
             "/cache".into(),
             vec![track(0), track(1), track(2)],
             vec![
@@ -1021,7 +1098,14 @@ mod tests {
                 playlist("Deep", 1, false, &[1, 2]),
                 playlist("Pop", 0, false, &[0]),
             ],
-        );
+        )
+    }
+
+    /// An app with a library open (see `library_at`).
+    fn state() -> State {
+        let temp =
+            std::env::temp_dir().join(format!("open-engine-lib-main-test-{}", std::process::id()));
+        let library = library_at("/media/DRIVE/Engine Library");
         State {
             page: Page::Library,
             config: ConfigStore::load(Locations {
@@ -1045,6 +1129,8 @@ mod tests {
             seeking: None,
             backend_error: None,
             gain_draft: None,
+            saving: None,
+            save_error: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
             resize: None,
         }
@@ -1154,6 +1240,105 @@ mod tests {
         assert_eq!(
             state.snapshot().unwrap(),
             session(&["House", "Deep"], Some("../Music/c.flac"), true, 61_250)
+        );
+    }
+
+    #[test]
+    fn a_saved_library_is_where_the_app_is_now_and_nothing_else_changes() {
+        let mut state = state();
+        if let LibraryState::Open(browser) = &mut state.library {
+            browser.show(Source::Playlist(1));
+            browser.selected = Some(1);
+        }
+        state.play_source = Some(Source::Playlist(1));
+        state.status = PlaybackStatus {
+            state: PlaybackState::Playing.into(),
+            queue_position: Some(1),
+            track_id: Some(2),
+            position_ms: 42_000,
+            error: None,
+        };
+        state.saving = Some("/media/NEW".into());
+
+        let _ = handle(
+            &mut state,
+            Message::LibrarySaved(Ok(Arc::new(library_at("/media/NEW/Engine Library")))),
+        );
+
+        assert!(state.saving.is_none() && state.save_error.is_none());
+        let browser = browser(&state);
+        assert_eq!(
+            browser.library.path, "/media/NEW/Engine Library",
+            "the new location"
+        );
+        // The list shown, the selection, and the song playing are all as they were.
+        assert_eq!(
+            (browser.source, browser.selected),
+            (Source::Playlist(1), Some(1))
+        );
+        assert_eq!(state.status.position_ms, 42_000);
+        assert_eq!(state.play_source, Some(Source::Playlist(1)));
+        // The session and the recent libraries refer to the new place.
+        assert_eq!(
+            state.recents.paths().first().map(|p| p.to_str().unwrap()),
+            Some("/media/NEW/Engine Library")
+        );
+        assert_eq!(
+            state
+                .snapshot()
+                .unwrap()
+                .library
+                .as_deref()
+                .and_then(|p| p.to_str()),
+            Some("/media/NEW/Engine Library")
+        );
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_library_where_it_was_and_says_why() {
+        let mut state = state();
+        state.saving = Some("/media/NEW".into());
+
+        let _ = handle(
+            &mut state,
+            Message::LibrarySaved(Err("there already is a library there".into())),
+        );
+
+        assert!(state.saving.is_none());
+        assert_eq!(
+            state.save_error.as_deref(),
+            Some("there already is a library there")
+        );
+        assert_eq!(browser(&state).library.path, "/media/DRIVE/Engine Library");
+        // Trying again clears the old message.
+        let _ = handle(&mut state, Message::MenuSelected(MenuItem::SaveAs));
+        assert!(state.save_error.is_none());
+    }
+
+    #[test]
+    fn the_library_cannot_be_closed_or_replaced_while_it_is_being_saved() {
+        let mut state = state();
+        state.saving = Some("/media/NEW".into());
+
+        for message in [
+            Message::CloseLibrary,
+            Message::ChooseLibrary,
+            Message::OpenRecent("/media/OTHER/Engine Library".into()),
+            Message::LibraryChosen(Some("/media/OTHER".into())),
+            Message::MenuSelected(MenuItem::Open),
+        ] {
+            let _ = handle(&mut state, message);
+            assert!(matches!(state.library, LibraryState::Open(_)), "still open");
+        }
+        assert_eq!(browser(&state).library.path, "/media/DRIVE/Engine Library");
+        // And a second save can't start on top of the first.
+        let _ = handle(
+            &mut state,
+            Message::SaveAsChosen(Some("/media/ELSE".into())),
+        );
+        assert_eq!(
+            state.saving.as_deref(),
+            Some(std::path::Path::new("/media/NEW"))
         );
     }
 

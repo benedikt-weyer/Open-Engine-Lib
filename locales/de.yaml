@@ -1,4 +1,11 @@
 native_name: Deutsch
+menu_file: Datei
+menu_open: Öffnen…
+menu_save_as: Speichern unter…
+menu_exit: Beenden
+save_as_title: Speicherort für die Bibliothek wählen
+saving_library: "Die Bibliothek wird nach {path} gespeichert…"
+save_library_failed: "Die Bibliothek konnte nicht gespeichert werden: {error}"
 nav_library: Bibliothek
 nav_settings: Einstellungen
 settings_title: Einstellungen

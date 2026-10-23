@@ -50,6 +50,18 @@ Versioning rules:
 
 The `.proto` files are compiled in pure Rust (`protox`), so building needs no `protoc`.
 
+## The menu bar: Open, Save as, Exit
+
+A **File** menu sits at the top of the window: **Open…** (the same as "Open library…"), **Save as…** (only while a library is open) and **Exit** (which saves the session first, like closing the window).
+
+**Save as…** asks for a folder and calls `SaveLibraryAs`. The backend clones the *working copy* of the databases (the cache, which is what the app reads) into a new `Engine Library` folder inside the chosen one (or into the chosen folder if it is called that), and only when that has succeeded does it make the new place the library's location: it opens the clone, so the app reads from a working copy of the new place from then on, and the recent libraries and the saved session refer to it.
+
+- The audio files are not copied, they stay where they are. The databases record each song's path relative to the library folder, so in the clone those paths are rewritten (in `m.db` and in the history in `hm.db`) to lead to the same files from the new folder (`../Music/a.flac` becomes `../../Music/a.flac` for a library one folder deeper). Streaming tracks have no file here and are left alone.
+- The `Artwork` folder is copied too, since some covers only exist there and it is small. `Stems` and `OverviewData` are not.
+- The clone is built in a temporary folder next to its place and renamed into it at the end, so the destination never holds a half-made library, even if the program is stopped half way. If anything fails, everything made is taken away again and the library keeps its old place. A destination that already holds a library is refused, as is one that is not empty, and so is the library's own place.
+- Playback is not interrupted and track and playlist ids don't change, so the list shown, the selection and the song playing carry on; the UI just fetches the tracks again to learn their new paths. While a save is running the library can't be closed or replaced.
+- The clone has the same database identity (UUID) as the original: it is a copy, not a new library.
+
 ## The track list
 
 Besides title, artist, album, genre, BPM and length, the list shows where each file is: the path the library records (relative to its `Engine Library` folder, usually starting with `..`) resolved against that folder, so it is a plain path such as `/run/media/you/DRIVE/House/track.flac`. It is worked out from the path alone, without asking the file system. Streaming tracks have no file here and say so. The location is the last column and takes the width the others leave; pointing at it shows the whole path, since a long one is cut off.

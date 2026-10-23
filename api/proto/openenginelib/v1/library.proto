@@ -11,6 +11,19 @@ service LibraryService {
   // from there.
   // Errors: NOT_FOUND if no Engine library is there, INTERNAL if it can't be read.
   rpc OpenLibrary(OpenLibraryRequest) returns (OpenLibraryResponse);
+  // Saves the open library to a new place and makes that its location from now on: the
+  // old location is no longer used. The working copy of the databases is cloned into a
+  // new `Engine Library` folder there (created inside `path`, unless `path` is itself
+  // called `Engine Library`), the audio files stay where they are, and the track paths in
+  // the clone are rewritten to lead to the same files from the new place. The covers that
+  // are files (`Artwork`) are copied too; the stems and overview data are not. Playback
+  // goes on undisturbed, and track and playlist ids stay the same, but the tracks' `path`
+  // changes (list the tracks again to see it). If anything fails nothing is left behind and
+  // the library keeps its old location.
+  // Errors: FAILED_PRECONDITION if no library is open, INVALID_ARGUMENT if `path` is the
+  // library's current location, ALREADY_EXISTS if there already is a library at `path`,
+  // INTERNAL if copying fails.
+  rpc SaveLibraryAs(SaveLibraryAsRequest) returns (SaveLibraryAsResponse);
   // Closes the library and stops playback. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
@@ -45,6 +58,18 @@ message OpenLibraryResponse {
   uint32 playlist_count = 3;
   // The backend's cached copy of the databases, which is what it reads.
   string cache_path = 4;
+}
+
+message SaveLibraryAsRequest {
+  // The folder to save into, or the `Engine Library` folder to make.
+  string path = 1;
+}
+
+message SaveLibraryAsResponse {
+  // The `Engine Library` folder that was made, the library's location now.
+  string path = 1;
+  // The backend's cached copy of the databases, which is what it reads now.
+  string cache_path = 2;
 }
 
 message CloseLibraryRequest {}

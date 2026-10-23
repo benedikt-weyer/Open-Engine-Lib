@@ -19,7 +19,7 @@ use crate::cache::{self, DATABASE_DIR};
 
 const DATABASE: &str = "Database2/m.db";
 const LIBRARY_DIR: &str = "Engine Library";
-const ARTWORK_DIR: &str = "Artwork";
+pub const ARTWORK_DIR: &str = "Artwork";
 
 #[derive(Debug)]
 pub enum OpenError {

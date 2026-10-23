@@ -13,7 +13,7 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetWaveformRequest,
     ListPlaylistsRequest, ListTracksRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind,
-    PlaybackState,
+    PlaybackState, SaveLibraryAsRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -1004,4 +1004,227 @@ async fn serves_waveforms_from_a_real_library() {
         }
     }
     println!("{done} waveforms ({with_grid} with a beatgrid), {missing} files not on the drive");
+}
+
+#[tokio::test]
+async fn saves_the_library_to_a_new_place_and_moves_there() {
+    let temp = TempDir::new("save-as");
+    let library_dir = fixture_library(&temp.0);
+    let source_before = std::fs::read(library_dir.join("Database2/m.db")).unwrap();
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+
+    let save = |path: &Path| SaveLibraryAsRequest {
+        path: path.display().to_string(),
+    };
+    let elsewhere = temp.0.join("elsewhere");
+    assert_eq!(
+        code(library.save_library_as(save(&elsewhere)).await),
+        Code::FailedPrecondition,
+        "nothing to save"
+    );
+
+    let opened = library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let track_path = |track: &open_engine_api::v1::Track| track.path.clone();
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let before: Vec<_> = stream
+        .message()
+        .await
+        .unwrap()
+        .unwrap()
+        .tracks
+        .iter()
+        .map(track_path)
+        .collect();
+    assert_eq!(before[0], "../Music/one.flac");
+
+    // Saving to the library's own place, or where one already is, is refused...
+    assert_eq!(
+        code(library.save_library_as(save(&temp.0)).await),
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        code(library.save_library_as(save(&library_dir)).await),
+        Code::InvalidArgument
+    );
+
+    // ...saving somewhere else clones it there and moves the library there.
+    let saved = library
+        .save_library_as(save(&elsewhere))
+        .await
+        .unwrap()
+        .into_inner();
+    let new_dir = elsewhere.join("Engine Library");
+    assert_eq!(Path::new(&saved.path), new_dir);
+    assert!(new_dir.join("Database2/m.db").is_file());
+    assert_ne!(
+        saved.cache_path, opened.cache_path,
+        "it is a new place, so a new working copy"
+    );
+    assert!(
+        Path::new(&saved.cache_path)
+            .join("Database2/m.db")
+            .is_file()
+    );
+
+    // The tracks are the same, in the same order, but their paths now start from the new
+    // folder and lead to the same files.
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let after: Vec<_> = stream
+        .message()
+        .await
+        .unwrap()
+        .unwrap()
+        .tracks
+        .iter()
+        .map(track_path)
+        .collect();
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after[0], "../../Music/one.flac");
+    assert_eq!(after[1], "../../Music/two.mp3");
+    assert_eq!(after[2], before[2], "a streaming track keeps its path");
+
+    // The old place was only read from.
+    assert_eq!(
+        std::fs::read(library_dir.join("Database2/m.db")).unwrap(),
+        source_before
+    );
+
+    // Where the library is now can't be saved to again, nor can any place with a library.
+    assert_eq!(
+        code(library.save_library_as(save(&elsewhere)).await),
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        code(library.save_library_as(save(&new_dir)).await),
+        Code::InvalidArgument
+    );
+    let again = library
+        .save_library_as(save(&temp.0.join("third")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(Path::new(&again.path), temp.0.join("third/Engine Library"));
+    assert_eq!(
+        code(library.save_library_as(save(&elsewhere)).await),
+        Code::AlreadyExists
+    );
+}
+
+/// Saves a real library to a temporary place and checks that the tracks of the copy lead to
+/// the same files: `OPEN_ENGINE_TEST_LIBRARY=... cargo test -p open-engine-backend --test
+/// grpc saves_a_real -- --ignored --nocapture`. Only reads the real library.
+#[tokio::test]
+#[ignore = "needs a real library (OPEN_ENGINE_TEST_LIBRARY)"]
+async fn saves_a_real_library() {
+    let path = std::env::var("OPEN_ENGINE_TEST_LIBRARY").expect("OPEN_ENGINE_TEST_LIBRARY");
+    let temp = TempDir::new("save-real");
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+
+    let opened = library
+        .open_library(OpenLibraryRequest { path })
+        .await
+        .unwrap()
+        .into_inner();
+    let list = |mut stream: tonic::Streaming<open_engine_api::v1::TrackBatch>| async move {
+        let mut tracks = Vec::new();
+        while let Some(batch) = stream.message().await.unwrap() {
+            tracks.extend(batch.tracks);
+        }
+        tracks
+    };
+    let before = list(
+        library
+            .list_tracks(ListTracksRequest {})
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+
+    let started = Instant::now();
+    let saved = library
+        .save_library_as(SaveLibraryAsRequest {
+            path: temp.0.join("clone").display().to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    println!(
+        "saved {} tracks to {} in {:?}",
+        before.len(),
+        saved.path,
+        started.elapsed()
+    );
+
+    let after = list(
+        library
+            .list_tracks(ListTracksRequest {})
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(before.len(), after.len());
+
+    // Each track of the copy leads, from the copy's folder, to the file the original did
+    // from the original folder.
+    let resolve = |dir: &str, relative: &str| {
+        let mut resolved = PathBuf::new();
+        for part in Path::new(dir).join(relative).components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => resolved.push(other.as_os_str()),
+            }
+        }
+        resolved
+    };
+    let (mut same, mut streaming) = (0, 0);
+    for (old, new) in before.iter().zip(&after) {
+        assert_eq!(
+            (old.id, &old.title),
+            (new.id, &new.title),
+            "same tracks in the same order"
+        );
+        if old.streaming {
+            assert_eq!(old.path, new.path);
+            streaming += 1;
+        } else {
+            assert_eq!(
+                resolve(&opened.path, &old.path),
+                resolve(&saved.path, &new.path),
+                "{}",
+                old.path
+            );
+            same += 1;
+        }
+    }
+    let artwork =
+        std::fs::read_dir(Path::new(&saved.path).join("Artwork")).map_or(0, |dir| dir.count());
+    println!(
+        "{same} tracks lead to the same file, {streaming} streaming tracks untouched, {artwork} cover files copied"
+    );
+    assert!(same > 0);
 }
