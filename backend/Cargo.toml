@@ -15,6 +15,7 @@ name = "open-engine-audio"
 path = "src/audio/main.rs"
 
 [dependencies]
+crc32fast = "1.5.2"
 dirs = "7.0.0"
 flate2 = "1.1.10"
 getrandom = "0.4.3"

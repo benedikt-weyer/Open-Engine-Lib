@@ -6,10 +6,13 @@
 //! and overview data) are far too big to copy and stay where they are.
 //!
 //! The copy is reused as long as the source databases keep the same size and
-//! modification time, so reopening an unchanged library is instant.
+//! modification time, so reopening an unchanged library is instant. A file whose
+//! modification time differs but whose content is what was copied counts as unchanged
+//! too: the time a file system reports is not always what it was set to (network and
+//! FUSE mounts such as rclone's show the old one for a while after a file was replaced).
 
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -40,13 +43,12 @@ pub fn default_root() -> PathBuf {
 /// contains `Database2`).
 pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
     let cache = cache_root.join(cache_name(source));
-    let files = database_files(&source.join(DATABASE_DIR))?;
-    let manifest = render_manifest(&files);
+    let mut files = database_files(&source.join(DATABASE_DIR))?;
 
-    let up_to_date = fs::read_to_string(cache.join(MANIFEST)).is_ok_and(|saved| saved == manifest)
-        && files
-            .iter()
-            .all(|file| cache.join(DATABASE_DIR).join(&file.name).is_file());
+    let up_to_date = files
+        .iter()
+        .all(|file| cache.join(DATABASE_DIR).join(&file.name).is_file())
+        && compare(&source.join(DATABASE_DIR), &cache, &files).is_ok_and(|found| found.unchanged());
     if up_to_date {
         return Ok(cache);
     }
@@ -71,7 +73,11 @@ pub fn sync(source: &Path, cache_root: &Path) -> io::Result<PathBuf> {
             cache.join(DATABASE_DIR).join(&file.name),
         )?;
     }
-    fs::write(cache.join(MANIFEST), manifest)?;
+    // (Of the copy, which is what was read from the source.)
+    for file in &mut files {
+        file.checksum = Some(checksum(&cache.join(DATABASE_DIR).join(&file.name))?);
+    }
+    fs::write(cache.join(MANIFEST), render_manifest(&files))?;
     Ok(cache)
 }
 
@@ -100,15 +106,25 @@ pub fn mark_edited(cache: &Path) -> io::Result<()> {
 /// Whether the databases at `source` are no longer as they were when the working copy in
 /// `cache` (a folder `sync` returned) was made from them: something else changed them.
 pub fn source_changed(source: &Path, cache: &Path) -> io::Result<bool> {
-    let now = render_manifest(&database_files(&source.join(DATABASE_DIR))?);
-    Ok(fs::read_to_string(cache.join(MANIFEST)).map_or(true, |recorded| recorded != now))
+    let files = database_files(&source.join(DATABASE_DIR))?;
+    Ok(!compare(&source.join(DATABASE_DIR), cache, &files).is_ok_and(|found| found.unchanged()))
 }
 
 /// Notes that the working copy in `cache` matches the databases at `source` as they are
 /// now, e.g. after the working copy was written to the source.
 pub fn record_source(source: &Path, cache: &Path) -> io::Result<()> {
-    let manifest = render_manifest(&database_files(&source.join(DATABASE_DIR))?);
-    fs::write(cache.join(MANIFEST), manifest)?;
+    let mut files = database_files(&source.join(DATABASE_DIR))?;
+    for file in &mut files {
+        // The working copy is the source's content now, and is read faster than the source.
+        let copy = cache.join(DATABASE_DIR).join(&file.name);
+        let path = if copy.is_file() {
+            copy
+        } else {
+            source.join(DATABASE_DIR).join(&file.name)
+        };
+        file.checksum = Some(checksum(&path)?);
+    }
+    fs::write(cache.join(MANIFEST), render_manifest(&files))?;
     match fs::remove_file(cache.join(EDITED)) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
@@ -121,6 +137,9 @@ pub struct SourceFile {
     size: u64,
     /// Nanoseconds since the Unix epoch.
     modified: u128,
+    /// The CRC-32 of the content, once it is known (it is only worked out for what is
+    /// recorded, and a manifest from an older version does not have it).
+    checksum: Option<u32>,
 }
 
 /// The database files to copy: `*.db`, plus the journal/WAL files SQLite needs to
@@ -148,6 +167,7 @@ pub fn database_files(dir: &Path) -> io::Result<Vec<SourceFile>> {
                 .modified()?
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos()),
+            checksum: None,
         });
     }
     files.sort_by(|a, b| a.name.cmp(&b.name));
@@ -157,8 +177,102 @@ pub fn database_files(dir: &Path) -> io::Result<Vec<SourceFile>> {
 fn render_manifest(files: &[SourceFile]) -> String {
     files
         .iter()
-        .map(|file| format!("{}\t{}\t{}\n", file.name, file.size, file.modified))
+        .map(|file| match file.checksum {
+            Some(checksum) => format!(
+                "{}\t{}\t{}\t{checksum:08x}\n",
+                file.name, file.size, file.modified
+            ),
+            None => format!("{}\t{}\t{}\n", file.name, file.size, file.modified),
+        })
         .collect()
+}
+
+/// What `render_manifest` wrote, or `None` if it is not that.
+fn parse_manifest(text: &str) -> Option<Vec<SourceFile>> {
+    text.lines()
+        .map(|line| {
+            let mut parts = line.split('\t');
+            Some(SourceFile {
+                name: parts.next()?.to_string(),
+                size: parts.next()?.parse().ok()?,
+                modified: parts.next()?.parse().ok()?,
+                checksum: match parts.next() {
+                    Some(checksum) => Some(u32::from_str_radix(checksum, 16).ok()?),
+                    None => None,
+                },
+            })
+        })
+        .collect()
+}
+
+/// The CRC-32 of a file's content.
+fn checksum(path: &Path) -> io::Result<u32> {
+    let mut file = File::open(path)?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(hasher.finalize());
+        }
+        hasher.update(&buffer[..read]);
+    }
+}
+
+/// How the databases at `dir` (listed as `files`) are compared with what the working copy
+/// in `cache` was made from.
+enum Comparison {
+    /// The same files with the same sizes and times.
+    Same,
+    /// The same files with the same sizes and content, but some modification time is not
+    /// what was recorded. The manifest has been brought up to date.
+    SameContent,
+    Different,
+}
+
+impl Comparison {
+    fn unchanged(&self) -> bool {
+        !matches!(self, Comparison::Different)
+    }
+}
+
+fn compare(dir: &Path, cache: &Path, files: &[SourceFile]) -> io::Result<Comparison> {
+    let Some(recorded) = parse_manifest(&fs::read_to_string(cache.join(MANIFEST))?) else {
+        return Ok(Comparison::Different);
+    };
+    let same_files = recorded.len() == files.len()
+        && recorded
+            .iter()
+            .zip(files)
+            .all(|(before, now)| before.name == now.name && before.size == now.size);
+    if !same_files {
+        return Ok(Comparison::Different);
+    }
+    // The content is only read for a file whose time differs, and only if what was
+    // copied is known: the time alone says too little where it can't be trusted.
+    let mut touched = false;
+    let mut now_recorded = Vec::new();
+    for (before, now) in recorded.iter().zip(files) {
+        if before.modified != now.modified {
+            match before.checksum {
+                Some(known) if checksum(&dir.join(&now.name))? == known => touched = true,
+                _ => return Ok(Comparison::Different),
+            }
+        }
+        now_recorded.push(SourceFile {
+            name: now.name.clone(),
+            size: now.size,
+            modified: now.modified,
+            checksum: before.checksum,
+        });
+    }
+    if !touched {
+        return Ok(Comparison::Same);
+    }
+    // So that the content is not read again at the next look. (Failing to say so only
+    // means that it is.)
+    let _ = fs::write(cache.join(MANIFEST), render_manifest(&now_recorded));
+    Ok(Comparison::SameContent)
 }
 
 /// A folder name for the cache of the library at `source`: its name for humans and
@@ -293,6 +407,71 @@ mod tests {
 
         // After the working copy has been written to the source, they match again.
         record_source(&source, &cache).unwrap();
+        assert!(!source_changed(&source, &cache).unwrap());
+    }
+
+    /// Sets the modification time of `path` to `seconds` after the epoch.
+    fn set_modified(path: &Path, seconds: u64) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_time_that_is_not_to_be_trusted_does_not_make_the_source_look_changed() {
+        let temp = TempDir::new("touched");
+        let source = source_library(&temp.0);
+        let root = temp.0.join("cache");
+        let cache = sync(&source, &root).unwrap();
+        let recorded = fs::read_to_string(cache.join(MANIFEST)).unwrap();
+        assert!(recorded.lines().all(|line| line.split('\t').count() == 4));
+
+        // The file system says another time for a file that is the same (as a mounted
+        // network share can after a file was replaced): the copy is still the source.
+        set_modified(&source.join("Database2/m.db"), 1_000_000);
+        assert!(!source_changed(&source, &cache).unwrap());
+        // That was noted, so the next look does not read the file again.
+        assert_ne!(fs::read_to_string(cache.join(MANIFEST)).unwrap(), recorded);
+        assert!(!source_changed(&source, &cache).unwrap());
+
+        // Opening the library keeps the copy, with what was done to it.
+        fs::write(cache.join("Database2/m.db"), b"marked").unwrap();
+        set_modified(&source.join("Database2/m.db"), 2_000_000);
+        assert_eq!(sync(&source, &root).unwrap(), cache);
+        assert_eq!(fs::read(cache.join("Database2/m.db")).unwrap(), b"marked");
+
+        // But another time with other content (here the size is the same) is a change.
+        fs::write(source.join("Database2/m.db"), b"MAIN").unwrap();
+        set_modified(&source.join("Database2/m.db"), 3_000_000);
+        assert_eq!(
+            fs::metadata(source.join("Database2/m.db")).unwrap().len(),
+            4
+        );
+        assert!(source_changed(&source, &cache).unwrap());
+    }
+
+    #[test]
+    fn a_manifest_without_checksums_trusts_the_time_alone() {
+        let temp = TempDir::new("old-manifest");
+        let source = source_library(&temp.0);
+        let cache = sync(&source, &temp.0.join("cache")).unwrap();
+        // What earlier versions wrote.
+        let old: String = fs::read_to_string(cache.join(MANIFEST))
+            .unwrap()
+            .lines()
+            .map(|line| format!("{}\n", line.rsplit_once('\t').unwrap().0))
+            .collect();
+        fs::write(cache.join(MANIFEST), old).unwrap();
+        assert!(!source_changed(&source, &cache).unwrap());
+
+        set_modified(&source.join("Database2/m.db"), 1_000_000);
+        assert!(source_changed(&source, &cache).unwrap());
+        // Recording the source brings in the checksums.
+        record_source(&source, &cache).unwrap();
+        set_modified(&source.join("Database2/m.db"), 2_000_000);
         assert!(!source_changed(&source, &cache).unwrap());
     }
 
