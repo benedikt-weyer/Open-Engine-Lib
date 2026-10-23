@@ -12,10 +12,10 @@ use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, CreateSmartPlaylistRequest, Cue, GetAlbumArtRequest, GetCuesRequest,
-    GetInfoRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest,
-    ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, OpenLibraryRequest,
+    GetInfoRequest, GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest,
+    ListPlaylistsRequest, ListTracksRequest, Loop, MigrateOriginsRequest, OpenLibraryRequest,
     PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest, SaveLibraryAsRequest,
-    SetCuesRequest, SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest,
+    SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest,
     UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
@@ -2289,6 +2289,277 @@ async fn reads_the_cues_of_a_real_library() {
                 cue.label,
                 cue.position_seconds,
                 cue.color_argb
+            );
+        }
+    }
+}
+
+/// `loops` with eight slots, the second one set (`Loop 2` from 20 s to 24 s). Not compressed.
+fn loops_blob() -> Vec<u8> {
+    let mut data = 8i64.to_le_bytes().to_vec();
+    for slot in 0..8 {
+        if slot == 1 {
+            data.push(6);
+            data.extend(b"Loop 2");
+            data.extend((44_100f64 * 20.0).to_le_bytes());
+            data.extend((44_100f64 * 24.0).to_le_bytes());
+            data.extend([1, 1]);
+            data.extend([0xff, 0xef, 0x81, 0x30]);
+        } else {
+            data.push(0);
+            data.extend((-1f64).to_le_bytes());
+            data.extend((-1f64).to_le_bytes());
+            data.extend([0, 0]);
+            data.extend([0; 4]);
+        }
+    }
+    data
+}
+
+#[tokio::test]
+async fn lists_and_edits_loops_in_the_working_copy_and_syncs_them_to_the_source() {
+    let temp = TempDir::new("loops");
+    let library_dir = fixture_library(&temp.0);
+    {
+        let db = rusqlite::Connection::open(library_dir.join("Database2/m.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB,
+                overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB);",
+        )
+        .unwrap();
+        // Track 1 (id 0) has a loop, track 2 (id 1) has analysis but no loops, track 3 has none.
+        db.execute(
+            "INSERT INTO PerformanceData (trackId, trackData, loops) VALUES (1, ?1, ?2), (2, ?1, NULL)",
+            (track_data_blob(), loops_blob()),
+        )
+        .unwrap();
+    }
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    let loops_of = |track_id| GetLoopsRequest { track_id };
+    assert_eq!(
+        code(library.get_loops(loops_of(0)).await),
+        Code::FailedPrecondition
+    );
+
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+    let counts = |tracks: Vec<open_engine_api::v1::Track>| {
+        tracks
+            .iter()
+            .map(|track| track.loop_count)
+            .collect::<Vec<_>>()
+    };
+    let list = |mut library: LibraryServiceClient<Connection>| async move {
+        let mut stream = library
+            .list_tracks(ListTracksRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        stream.message().await.unwrap().unwrap().tracks
+    };
+    assert_eq!(counts(list(library.clone()).await), [1, 0, 0]);
+
+    let loops = library
+        .get_loops(loops_of(0))
+        .await
+        .unwrap()
+        .into_inner()
+        .loops;
+    assert_eq!(loops.len(), 1);
+    assert_eq!((loops[0].slot, loops[0].label.as_str()), (1, "Loop 2"));
+    assert!((loops[0].start_seconds - 20.0).abs() < 1e-6);
+    assert!((loops[0].end_seconds - 24.0).abs() < 1e-6);
+    assert_eq!(loops[0].color_argb, 0xffef_8130);
+    assert_eq!(code(library.get_loops(loops_of(9)).await), Code::NotFound);
+
+    let saved = |slot, label: &str, start_seconds, end_seconds| Loop {
+        slot,
+        label: label.to_string(),
+        start_seconds,
+        end_seconds,
+        color_argb: 0xfff4_d338,
+    };
+    let set = |track_id, loops| SetLoopsRequest { track_id, loops };
+    let after = library
+        .set_loops(set(
+            0,
+            vec![saved(0, "Intro", 1.5, 3.0), saved(1, "Drop", 30.0, 38.0)],
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .loops;
+    assert_eq!(
+        after
+            .iter()
+            .map(|saved| saved.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Intro", "Drop"]
+    );
+    assert_eq!(
+        after,
+        library
+            .get_loops(loops_of(0))
+            .await
+            .unwrap()
+            .into_inner()
+            .loops
+    );
+    library
+        .set_loops(set(
+            1,
+            vec![saved(7, "", 0.0, 1.0), saved(3, "End", 190.0, 200.0)],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(counts(list(library.clone()).await), [2, 2, 0]);
+
+    for loops in [
+        vec![saved(8, "", 1.0, 2.0)],
+        vec![saved(0, "", 1.0, 2.0), saved(0, "", 3.0, 4.0)],
+        vec![saved(0, "", -1.0, 2.0)],
+        vec![saved(0, "", 1.0, f64::NAN)],
+        vec![saved(0, "", 2.0, 2.0)],
+        vec![saved(0, "", 3.0, 2.0)],
+        vec![saved(0, "", 199.0, 200.5)],
+        vec![saved(0, &"x".repeat(256), 1.0, 2.0)],
+    ] {
+        assert_eq!(
+            code(library.set_loops(set(1, loops)).await),
+            Code::InvalidArgument
+        );
+    }
+    assert_eq!(
+        code(
+            library
+                .set_loops(set(2, vec![saved(0, "", 1.0, 2.0)]))
+                .await
+        ),
+        Code::FailedPrecondition,
+        "track 3 has no analysis"
+    );
+    assert_eq!(
+        code(library.set_loops(set(9, vec![])).await),
+        Code::NotFound
+    );
+    assert_eq!(counts(list(library.clone()).await), [2, 2, 0]);
+
+    // Removing is sending fewer.
+    library
+        .set_loops(set(1, vec![saved(3, "End", 190.0, 200.0)]))
+        .await
+        .unwrap();
+    assert_eq!(counts(list(library.clone()).await), [2, 1, 0]);
+
+    // The source is untouched until syncing, which shows the change first.
+    let source_blob = |id: i64| -> Option<Vec<u8>> {
+        rusqlite::Connection::open(library_dir.join("Database2/m.db"))
+            .unwrap()
+            .query_row(
+                "SELECT loops FROM PerformanceData WHERE trackId = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(source_blob(1), Some(loops_blob()));
+    assert_eq!(source_blob(2), None);
+    let diff = library
+        .get_sync_diff(GetSyncDiffRequest::default())
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(diff.tracks_changed, 2);
+    assert!(
+        diff.changed_tracks
+            .iter()
+            .all(|change| change.fields.iter().any(|field| field.field == "loops"))
+    );
+
+    library
+        .sync_to_source(SyncToSourceRequest::default())
+        .await
+        .unwrap();
+    assert_ne!(source_blob(1), Some(loops_blob()));
+
+    // Reopening gives the same loops back.
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts(list(library.clone()).await), [2, 1, 0]);
+    let loops = library
+        .get_loops(loops_of(0))
+        .await
+        .unwrap()
+        .into_inner()
+        .loops;
+    assert_eq!(
+        (
+            loops[0].label.as_str(),
+            loops[0].start_seconds,
+            loops[0].end_seconds
+        ),
+        ("Intro", 1.5, 3.0)
+    );
+    assert_eq!(loops[1].start_seconds, 30.0);
+}
+
+/// The loops of a real library, counted:
+/// `OPEN_ENGINE_TEST_LIBRARY=... cargo test -p open-engine-backend --test grpc reads_the_loops -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs a real library (OPEN_ENGINE_TEST_LIBRARY)"]
+async fn reads_the_loops_of_a_real_library() {
+    let path = std::env::var("OPEN_ENGINE_TEST_LIBRARY").expect("OPEN_ENGINE_TEST_LIBRARY");
+    let temp = TempDir::new("real-loops");
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    library
+        .open_library(OpenLibraryRequest { path })
+        .await
+        .unwrap();
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let mut tracks = Vec::new();
+    while let Some(batch) = stream.message().await.unwrap() {
+        tracks.extend(batch.tracks);
+    }
+    let mut by_count = std::collections::BTreeMap::new();
+    for track in &tracks {
+        *by_count.entry(track.loop_count).or_insert(0) += 1;
+    }
+    println!("tracks by number of loops: {by_count:?}");
+    for track in tracks.iter().filter(|track| track.loop_count > 0).take(5) {
+        let loops = library
+            .get_loops(GetLoopsRequest { track_id: track.id })
+            .await
+            .unwrap()
+            .into_inner()
+            .loops;
+        assert_eq!(loops.len() as u32, track.loop_count);
+        println!("{} — {}:", track.title, track.length_seconds());
+        for saved in loops {
+            println!(
+                "  slot {} {:?} {:.2} s to {:.2} s, color {:08x}",
+                saved.slot + 1,
+                saved.label,
+                saved.start_seconds,
+                saved.end_seconds,
+                saved.color_argb
             );
         }
     }

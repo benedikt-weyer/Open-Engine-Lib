@@ -77,6 +77,14 @@ impl Change {
 }
 
 /// Origins saved since the library was fetched.
+/// How many cues and loops tracks have now, by track id, for the ones that changed since the
+/// library was fetched.
+#[derive(Default)]
+struct SavedCounts {
+    cues: HashMap<u32, u32>,
+    loops: HashMap<u32, u32>,
+}
+
 #[derive(Default)]
 struct SavedOrigins {
     /// By track id.
@@ -94,9 +102,9 @@ pub struct Browser {
     /// Ratings set since the library was fetched, by track id. (The library is shared
     /// and not changed; the backend has these too.)
     ratings: HashMap<u32, u32>,
-    /// How many cues tracks have now, by track id, for the ones that changed since the
-    /// library was fetched.
-    cue_counts: HashMap<u32, u32>,
+    /// The cue and loop counts changed since the library was fetched (boxed to keep
+    /// `Browser` small).
+    counts: Box<SavedCounts>,
     /// The origins saved since the library was fetched (boxed to keep `Browser` small).
     origins: Box<SavedOrigins>,
     /// Playlist folders that are opened up in the tree.
@@ -123,7 +131,7 @@ impl Browser {
 
     /// How many cues the track with `id` has set, as it is now.
     pub fn cue_count(&self, id: u32) -> u32 {
-        self.cue_counts.get(&id).copied().unwrap_or_else(|| {
+        self.counts.cues.get(&id).copied().unwrap_or_else(|| {
             self.library
                 .track_by_id(id)
                 .map_or(0, |track| track.cue_count)
@@ -131,7 +139,20 @@ impl Browser {
     }
 
     pub fn set_cue_count(&mut self, id: u32, count: u32) {
-        self.cue_counts.insert(id, count);
+        self.counts.cues.insert(id, count);
+    }
+
+    /// How many loops the track with `id` has saved, as it is now.
+    pub fn loop_count(&self, id: u32) -> u32 {
+        self.counts.loops.get(&id).copied().unwrap_or_else(|| {
+            self.library
+                .track_by_id(id)
+                .map_or(0, |track| track.loop_count)
+        })
+    }
+
+    pub fn set_loop_count(&mut self, id: u32, count: u32) {
+        self.counts.loops.insert(id, count);
     }
 
     /// Where the file of `track` was when its origin was saved.
@@ -165,7 +186,7 @@ impl Browser {
             selected: None,
             all,
             ratings: HashMap::new(),
-            cue_counts: HashMap::new(),
+            counts: Box::default(),
             origins: Box::default(),
             expanded: HashSet::new(),
             scroll: 0.0,
@@ -513,6 +534,7 @@ fn header<'a>(language: Language, widths: &ColumnWidths) -> Element<'a, Message>
             heading_cell(&strings.col_length),
             heading_cell(&strings.col_rating),
             heading_cell(&strings.col_cues),
+            heading_cell(&strings.col_loops),
             heading_cell(&strings.col_lighting),
             heading_cell(&strings.col_origin),
         ],
@@ -575,6 +597,7 @@ pub fn tracks<'a>(
                 playing: playing == Some(row_index),
                 stars: stars_of(browser.rating(track.id)),
                 cues: browser.cue_count(track.id),
+                loops: browser.loop_count(track.id),
             },
             track.album_art.and_then(|id| covers.get(id)),
             widths,
@@ -634,7 +657,7 @@ fn stars_cell<'a>(track: &Track, stars: u8, dim: bool) -> Element<'a, Message> {
     stars_row.into()
 }
 
-/// How many cues the track has set, a dash for none.
+/// How many cues (or loops) the track has set, a dash for none.
 fn cues_cell<'a>(count: u32) -> Element<'a, Message> {
     if count == 0 {
         cell("–").style(text::secondary).into()
@@ -779,6 +802,8 @@ struct RowState<'a> {
     stars: u8,
     /// How many cues the track has set.
     cues: u32,
+    /// How many loops the track has saved.
+    loops: u32,
 }
 
 fn track_row<'a>(
@@ -797,6 +822,7 @@ fn track_row<'a>(
         playing,
         stars,
         cues,
+        loops,
     } = state;
     // Streaming tracks have no file here, so they can be seen but not played.
     let style = |content: text::Text<'a>| -> Element<'a, Message> {
@@ -842,6 +868,7 @@ fn track_row<'a>(
             style(cell(length)),
             stars_cell(track, stars, track.streaming),
             cues_cell(cues),
+            cues_cell(loops),
             lighting_cell(track, language),
             origin_cell(origin, origin_reachable, language),
         ],

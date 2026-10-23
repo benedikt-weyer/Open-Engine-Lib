@@ -14,6 +14,9 @@ mod deck;
 mod drives;
 mod i18n;
 mod library_sync_view;
+mod loop_bar;
+mod loop_editor;
+mod loops;
 mod menubar;
 mod model;
 mod navbar;
@@ -45,6 +48,7 @@ use i18n::fill;
 use iced::widget::{button, column, container, row, scrollable, text, tooltip};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use library_sync_view::Stage as LibrarySyncStage;
+use loops::{Loop, TrackLoops};
 use menubar::MenuItem;
 use model::Library;
 use open_engine_api::v1::{PlaybackError, PlaybackErrorKind, PlaybackState, PlaybackStatus};
@@ -141,6 +145,9 @@ struct State {
     /// A change to cues is being written, so no other can be started: it would be made
     /// from cues that are about to be out of date.
     cues_busy: bool,
+    /// The saved loops of the tracks played, and whether a change to them is being written.
+    loops: TrackLoops,
+    loops_busy: bool,
     /// The list the queue was made from, so its playing row can be marked.
     play_source: Option<Source>,
     /// A failed request to the backend.
@@ -163,6 +170,8 @@ struct State {
     playlist_dialog: Option<playlist_dialog::Dialog>,
     /// The window for editing the cues of the playing track, while it is open.
     cue_editor: Option<cue_editor::Editor>,
+    /// The window for editing the saved loops of the playing track, while it is open.
+    loop_editor: Option<loop_editor::Editor>,
     /// Where the library is being saved to, and why the last save failed.
     saving: Option<PathBuf>,
     save_error: Option<String>,
@@ -313,6 +322,24 @@ pub enum Message {
     CueEditor(cue_editor::Event),
     CueEditorSave,
     CueEditorCancel,
+    /// A pad of the playing track was clicked: jump to the start of its loop.
+    LoopJump(usize),
+    /// An empty pad of the playing track was clicked: set a loop at the playhead.
+    LoopAdd(usize),
+    /// A pad of the playing track was right-clicked: remove its loop.
+    LoopRemove(usize),
+    LoopEditorOpen,
+    LoopEditor(loop_editor::Event),
+    LoopEditorSave,
+    LoopEditorCancel,
+    /// A fetched list of loops: the loops' generation it was asked in, the track id and the loops.
+    LoopsLoaded(u32, u32, Result<Vec<Loop>, String>),
+    /// The backend answered a change of a track's loops with the loops it has now.
+    LoopsEdited {
+        generation: u32,
+        track: u32,
+        result: Result<Vec<Loop>, String>,
+    },
     /// A fetched list of cues: the cues' generation it was asked in, the track id and the cues.
     CuesLoaded(u32, u32, Result<Vec<Cue>, String>),
     /// The backend answered a change of a track's cues with the cues it has now.
@@ -371,6 +398,8 @@ impl State {
             waveforms: Waveforms::default(),
             cues: TrackCues::default(),
             cues_busy: false,
+            loops: TrackLoops::default(),
+            loops_busy: false,
             play_source: None,
             backend_error: None,
             gain_draft: None,
@@ -382,6 +411,7 @@ impl State {
             smart: None,
             playlist_dialog: None,
             cue_editor: None,
+            loop_editor: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::discover(),
@@ -487,6 +517,7 @@ impl State {
             || self.smart.is_some()
             || self.playlist_dialog.is_some()
             || self.cue_editor.is_some()
+            || self.loop_editor.is_some()
     }
 
     /// Starts comparing the playlists of the open library with those of the library at
@@ -547,6 +578,7 @@ impl State {
         self.reachable.clear();
         self.waveforms.clear();
         self.cues.clear();
+        self.loops.clear();
         self.sync = None;
         self.library = LibraryState::Opening(path.clone());
         Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
@@ -768,12 +800,65 @@ impl State {
     /// Where the playhead of the waveform is, in seconds into the playing track: what is
     /// heard now (the waveform trails the player by the set delay, to line up with it).
     fn playhead(&self) -> f64 {
-        let duration = match self.playing_id().map(|id| self.waveforms.display(id)) {
-            Some(waveform::Display::Ready(waveform)) => waveform.duration,
-            _ => f64::INFINITY,
-        };
+        let duration = self.playing_duration().unwrap_or(f64::INFINITY);
         let delay = f64::from(self.config.effective().waveform_delay_ms) / 1000.0;
         self.clock.delayed(delay).position(Instant::now(), duration)
+    }
+
+    /// How long the playing track is, in seconds, once its waveform is known.
+    fn playing_duration(&self) -> Option<f64> {
+        match self.playing_id().map(|id| self.waveforms.display(id)) {
+            Some(waveform::Display::Ready(waveform)) => Some(waveform.duration),
+            _ => None,
+        }
+    }
+
+    /// How long a loop set from a pad of the playing track is: four beats at the tempo of
+    /// its beatgrid, else of the library.
+    fn new_loop_length(&self) -> f64 {
+        let id = self.playing_id();
+        let grid = match id.map(|id| self.waveforms.display(id)) {
+            Some(waveform::Display::Ready(waveform)) => waveform.grid.as_ref().map(|g| g.bpm()),
+            _ => None,
+        };
+        let library = || match (&self.library, id) {
+            (LibraryState::Open(browser), Some(id)) => {
+                browser.library.track_by_id(id).and_then(|track| track.bpm)
+            }
+            _ => None,
+        };
+        loops::default_length(grid.or_else(library))
+    }
+
+    /// Asks the backend for the saved loops of the track in the player, if it has not been
+    /// asked for yet.
+    fn fetch_loops(&mut self) -> Task<Message> {
+        let (Some(backend), Some(id)) = (self.backend(), self.playing_id()) else {
+            return Task::none();
+        };
+        if !matches!(self.library, LibraryState::Open(_)) || !self.loops.claim(id) {
+            return Task::none();
+        }
+        let generation = self.loops.generation();
+        Task::perform(backend::loops(backend, id), move |result| {
+            Message::LoopsLoaded(generation, id, result)
+        })
+    }
+
+    /// Asks the backend to make `loops` the saved loops of `track`.
+    fn save_loops(&mut self, track: u32, loops: Vec<Loop>) -> Task<Message> {
+        let Some(backend) = self.backend() else {
+            return Task::none();
+        };
+        self.loops_busy = true;
+        let generation = self.loops.generation();
+        Task::perform(backend::set_loops(backend, track, loops), move |result| {
+            Message::LoopsEdited {
+                generation,
+                track,
+                result,
+            }
+        })
     }
 
     /// Asks the backend for the cues of the track in the player, if it has not been asked
@@ -849,6 +934,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         state.fetch_covers(),
         state.fetch_waveform(),
         state.fetch_cues(),
+        state.fetch_loops(),
         state.check_paths(),
     ])
 }
@@ -974,7 +1060,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 || state.library_sync.is_some()
                 || state.smart.is_some()
                 || state.playlist_dialog.is_some()
-                || state.cue_editor.is_some();
+                || state.cue_editor.is_some()
+                || state.loop_editor.is_some();
             // (The button starts in the usual direction; "compare again" keeps it.)
             if !busy && state.sync.is_none() {
                 state.sync_reverse = false;
@@ -1079,6 +1166,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 state.reachable.clear();
                 // Pulling from the source can have replaced the cues.
                 state.cues.clear();
+                state.loops.clear();
                 state.library = LibraryState::Open(Browser::new(library));
                 if let Some(session) = session {
                     return state.restore_session(session);
@@ -1586,6 +1674,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.reachable.clear();
             state.waveforms.clear();
             state.cues.clear();
+            state.loops.clear();
             state.sync = None;
             state.library_sync = None;
             // Closing a library on purpose means the next start doesn't reopen it.
@@ -1792,6 +1881,153 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 state.cue_editor = None;
             }
         }
+        Message::LoopJump(slot) => {
+            let start = state
+                .playing_id()
+                .and_then(|id| state.loops.get(id))
+                .and_then(|loops| loops.iter().find(|saved| saved.slot == slot))
+                .map(|saved| saved.start);
+            if let Some(start) = start {
+                return handle(state, Message::SeekTo(start as f32));
+            }
+        }
+        // The databases are being cloned: a loop set now might miss the clone. And one
+        // change is written at a time.
+        Message::LoopAdd(_) | Message::LoopRemove(_) | Message::LoopEditorSave
+            if state.saving.is_some() || state.loops_busy => {}
+        Message::LoopEditorOpen if state.saving.is_some() || state.window_open() => {}
+        Message::LoopAdd(slot) => {
+            if let Some(id) = state.playing_id()
+                && let Some(loops) = state.loops.get(id)
+                && slot < cues::SLOTS
+                && loops.iter().all(|saved| saved.slot != slot)
+            {
+                let length = state.new_loop_length();
+                let mut start = state.playhead();
+                let mut end = start + length;
+                // A loop can't reach past the end of the track: it is moved back to fit.
+                if let Some(duration) = state.playing_duration()
+                    && end > duration
+                {
+                    end = duration;
+                    start = (duration - length).max(0.0);
+                }
+                if end > start {
+                    let loops = loops::with(loops, Loop::new(slot, start, end));
+                    return state.save_loops(id, loops);
+                }
+            }
+        }
+        Message::LoopRemove(slot) => {
+            if let Some(id) = state.playing_id()
+                && let Some(loops) = state.loops.get(id)
+                && loops.iter().any(|saved| saved.slot == slot)
+            {
+                let loops = loops::without(loops, slot);
+                return state.save_loops(id, loops);
+            }
+        }
+        Message::LoopEditorOpen => {
+            if let Some(id) = state.playing_id()
+                && let Some(loops) = state.loops.get(id)
+                && let LibraryState::Open(browser) = &state.library
+                && let Some(track) = browser.library.track_by_id(id)
+            {
+                state.loop_editor = Some(loop_editor::Editor::new(
+                    id,
+                    &track.title,
+                    loops,
+                    state.new_loop_length(),
+                ));
+            }
+        }
+        Message::LoopEditor(event) => {
+            let playhead = state.playhead();
+            if let loop_editor::Event::Go(slot) = &event {
+                let start = state
+                    .loop_editor
+                    .as_ref()
+                    .and_then(|editor| editor.start_of(*slot));
+                if let Some(start) = start {
+                    return handle(state, Message::SeekTo(start as f32));
+                }
+            } else if let Some(editor) = state.loop_editor.as_mut().filter(|editor| !editor.busy) {
+                editor.update(event, playhead);
+            }
+        }
+        Message::LoopEditorSave => {
+            let strings = state.config.effective().language.strings();
+            let Some(editor) = state.loop_editor.as_mut().filter(|editor| !editor.busy) else {
+                return Task::none();
+            };
+            match editor.loops() {
+                Err(loop_editor::Problem::BadPosition { slot, text }) => {
+                    editor.error = Some(fill(
+                        &strings.loop_bad_position,
+                        &[("number", &(slot + 1)), ("text", &text)],
+                    ));
+                }
+                Err(loop_editor::Problem::BadRange { slot }) => {
+                    editor.error = Some(fill(&strings.loop_bad_range, &[("number", &(slot + 1))]));
+                }
+                Ok(loops) => {
+                    let track = editor.track;
+                    editor.busy = true;
+                    return state.save_loops(track, loops);
+                }
+            }
+        }
+        Message::LoopEditorCancel => {
+            if state
+                .loop_editor
+                .as_ref()
+                .is_some_and(|editor| !editor.busy)
+            {
+                state.loop_editor = None;
+            }
+        }
+        Message::LoopsLoaded(generation, id, result) => match result {
+            Ok(loops) => state.loops.set(generation, id, loops),
+            Err(error) => {
+                // Not asked again (that would be a request after every message), so there
+                // are no pads for this track.
+                state.backend_error = Some(error);
+            }
+        },
+        Message::LoopsEdited {
+            generation,
+            track,
+            result,
+        } => {
+            state.loops_busy = false;
+            match result {
+                Ok(loops) => {
+                    state.backend_error = None;
+                    // (An answer about another library's track means nothing here.)
+                    if generation == state.loops.generation() {
+                        if let LibraryState::Open(browser) = &mut state.library {
+                            browser.set_loop_count(track, loops.len() as u32);
+                        }
+                        state.loops.set(generation, track, loops);
+                    }
+                    if state
+                        .loop_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.track == track)
+                    {
+                        state.loop_editor = None;
+                    }
+                }
+                Err(error) => match &mut state.loop_editor {
+                    Some(editor) => {
+                        let strings = state.config.effective().language.strings();
+                        editor.busy = false;
+                        editor.error = Some(fill(&strings.loop_failed, &[("error", &error)]));
+                    }
+                    None => state.backend_error = Some(error),
+                },
+            }
+        }
         Message::CuesLoaded(generation, id, result) => match result {
             Ok(cues) => state.cues.set(generation, id, cues),
             Err(error) => {
@@ -1935,6 +2171,9 @@ fn view(state: &State) -> Element<'_, Message> {
     if let Some(editor) = &state.cue_editor {
         return iced::widget::stack![window, cue_editor::modal(editor, language)].into();
     }
+    if let Some(editor) = &state.loop_editor {
+        return iced::widget::stack![window, loop_editor::modal(editor, language)].into();
+    }
     match (&state.playlist_dialog, &state.library) {
         (Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
             window,
@@ -2077,10 +2316,16 @@ fn open_library<'a>(
     let known_cues = now.as_ref().and_then(|now| state.cues.get(now.track.id));
     let cues_known = known_cues.is_some();
     let track_cues = known_cues.unwrap_or_default();
+    let known_loops = now.as_ref().and_then(|now| state.loops.get(now.track.id));
+    let loops_known = known_loops.is_some();
+    let track_loops = known_loops.unwrap_or_default();
     let deck = now.as_ref().map(|now| {
         deck::view(
             state.waveforms.display(now.track.id),
-            track_cues,
+            deck::Marks {
+                cues: track_cues,
+                loops: track_loops,
+            },
             // Trailing the player by the set delay, to line up with what is heard.
             state
                 .clock
@@ -2120,6 +2365,9 @@ fn open_library<'a>(
         // (Once the backend has said what the track's cues are.)
         if cues_known {
             page = page.push(cue_bar::view(track_cues, state.cues_busy, language));
+        }
+        if loops_known {
+            page = page.push(loop_bar::view(track_loops, state.loops_busy, language));
         }
     }
     page = page.push(bar);
@@ -2190,6 +2438,7 @@ mod tests {
             lighting: model::Lighting::None,
             lighting_projects: Vec::new(),
             cue_count: 0,
+            loop_count: 0,
             origin: None,
         }
     }
@@ -2248,6 +2497,8 @@ mod tests {
             waveforms: Waveforms::default(),
             cues: TrackCues::default(),
             cues_busy: false,
+            loops: TrackLoops::default(),
+            loops_busy: false,
             play_source: None,
             backend_error: None,
             gain_draft: None,
@@ -2259,6 +2510,7 @@ mod tests {
             smart: None,
             playlist_dialog: None,
             cue_editor: None,
+            loop_editor: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
@@ -3462,6 +3714,211 @@ mod tests {
         let _ = handle(&mut state, Message::CueEditor(cue_editor::Event::Add(0)));
         assert_eq!(
             state.cue_editor.as_ref().unwrap().cues().unwrap(),
+            [],
+            "no edits while it is being written"
+        );
+    }
+
+    /// A state that is playing track 1, whose saved loops have been fetched.
+    fn state_playing_with_loops(loops: Vec<Loop>) -> State {
+        let mut state = state();
+        state.status = PlaybackStatus {
+            state: PlaybackState::Playing.into(),
+            queue_position: Some(0),
+            track_id: Some(1),
+            position_ms: 10_000,
+            error: None,
+        };
+        assert!(state.loops.claim(1));
+        let generation = state.loops.generation();
+        let _ = handle(&mut state, Message::LoopsLoaded(generation, 1, Ok(loops)));
+        state
+    }
+
+    #[test]
+    fn the_loops_of_the_playing_track_are_kept_for_the_library_they_were_asked_in() {
+        let mut state = state_playing_with_loops(vec![Loop::new(2, 5.0, 7.0)]);
+        assert_eq!(state.loops.get(1).map(<[Loop]>::len), Some(1));
+        assert_eq!(
+            browser(&state).loop_count(1),
+            0,
+            "the list has what the library said"
+        );
+
+        let old = state.loops.generation();
+        state.loops.clear();
+        let _ = handle(
+            &mut state,
+            Message::LoopsLoaded(old, 1, Ok(vec![Loop::new(0, 1.0, 2.0)])),
+        );
+        assert_eq!(state.loops.get(1), None);
+
+        let generation = state.loops.generation();
+        let _ = handle(
+            &mut state,
+            Message::LoopsLoaded(generation, 1, Err("no".into())),
+        );
+        assert_eq!(state.backend_error.as_deref(), Some("no"));
+        assert_eq!(state.loops.get(1), None);
+    }
+
+    #[test]
+    fn a_loop_from_a_pad_is_four_beats_of_the_tempo_there_is() {
+        let state = state_playing_with_loops(vec![]);
+        // (The sample library has no tempo for the track and there is no waveform.)
+        assert_eq!(state.new_loop_length(), loops::FALLBACK_SECONDS);
+        assert_eq!(state.playing_duration(), None);
+    }
+
+    #[test]
+    fn the_loop_editor_opens_for_the_playing_track_and_closes_without_changes() {
+        let mut state = state_playing_with_loops(vec![Loop::new(2, 5.0, 7.0)]);
+        let _ = handle(&mut state, Message::LoopEditorOpen);
+        let editor = state.loop_editor.as_ref().expect("the editor is open");
+        assert_eq!(editor.track, 1);
+        assert_eq!(editor.loops().unwrap(), [Loop::new(2, 5.0, 7.0)]);
+
+        let _ = handle(
+            &mut state,
+            Message::LoopEditor(loop_editor::Event::Label(2, "Drop".into())),
+        );
+        let _ = handle(&mut state, Message::LoopEditorCancel);
+        assert!(state.loop_editor.is_none());
+        assert_eq!(state.loops.get(1).unwrap()[0].label, "Loop 3");
+
+        // Not while another window is open, nor for a track whose loops are not known.
+        state.smart = Some(smart_editor::Editor::new());
+        let _ = handle(&mut state, Message::LoopEditorOpen);
+        assert!(state.loop_editor.is_none());
+        state.smart = None;
+        state.cue_editor = Some(cue_editor::Editor::new(1, "x", &[]));
+        let _ = handle(&mut state, Message::LoopEditorOpen);
+        assert!(state.loop_editor.is_none());
+        state.cue_editor = None;
+        state.status.track_id = Some(2);
+        let _ = handle(&mut state, Message::LoopEditorOpen);
+        assert!(state.loop_editor.is_none());
+    }
+
+    #[test]
+    fn a_loop_that_can_not_be_saved_is_said_so_and_nothing_is_sent() {
+        let mut state = state_playing_with_loops(vec![Loop::new(2, 5.0, 7.0)]);
+        let _ = handle(&mut state, Message::LoopEditorOpen);
+        let _ = handle(
+            &mut state,
+            Message::LoopEditor(loop_editor::Event::End(2, "soon".into())),
+        );
+        let _ = handle(&mut state, Message::LoopEditorSave);
+        let editor = state.loop_editor.as_ref().unwrap();
+        assert!(!editor.busy && !state.loops_busy);
+        let error = editor.error.as_deref().unwrap();
+        assert!(error.contains('3') && error.contains("soon"), "{error}");
+
+        let _ = handle(
+            &mut state,
+            Message::LoopEditor(loop_editor::Event::End(2, "0:04".into())),
+        );
+        let _ = handle(&mut state, Message::LoopEditorSave);
+        let editor = state.loop_editor.as_ref().unwrap();
+        assert!(!editor.busy && !state.loops_busy);
+        assert!(editor.error.as_deref().unwrap().contains("end after"));
+    }
+
+    #[test]
+    fn saved_loops_replace_the_old_ones_and_update_the_count() {
+        let mut state = state_playing_with_loops(vec![Loop::new(2, 5.0, 7.0)]);
+        let _ = handle(&mut state, Message::LoopEditorOpen);
+        state.loops_busy = true;
+        state.loop_editor.as_mut().unwrap().busy = true;
+
+        let generation = state.loops.generation();
+        let saved = vec![Loop::new(0, 1.0, 2.0), Loop::new(2, 6.5, 8.0)];
+        let _ = handle(
+            &mut state,
+            Message::LoopsEdited {
+                generation,
+                track: 1,
+                result: Ok(saved.clone()),
+            },
+        );
+        assert!(!state.loops_busy && state.loop_editor.is_none());
+        assert_eq!(state.loops.get(1), Some(saved.as_slice()));
+        assert_eq!(browser(&state).loop_count(1), 2);
+        assert_eq!(
+            browser(&state).loop_count(0),
+            0,
+            "other tracks are as they were"
+        );
+        assert_eq!(browser(&state).cue_count(1), 0, "the cues are not loops");
+        assert_eq!(state.backend_error, None);
+
+        // An answer from before another library was opened is not for this one.
+        state.loops.clear();
+        let _ = handle(
+            &mut state,
+            Message::LoopsEdited {
+                generation,
+                track: 1,
+                result: Ok(vec![]),
+            },
+        );
+        assert_eq!(state.loops.get(1), None);
+        assert_eq!(browser(&state).loop_count(1), 2);
+    }
+
+    #[test]
+    fn loops_the_backend_refused_leave_the_old_ones_and_say_why() {
+        let mut state = state_playing_with_loops(vec![Loop::new(2, 5.0, 7.0)]);
+        let _ = handle(&mut state, Message::LoopEditorOpen);
+        state.loops_busy = true;
+        state.loop_editor.as_mut().unwrap().busy = true;
+        let generation = state.loops.generation();
+
+        let _ = handle(
+            &mut state,
+            Message::LoopsEdited {
+                generation,
+                track: 1,
+                result: Err("the track has not been analysed".into()),
+            },
+        );
+        // The window stays, so the edits are not lost, and can be tried again.
+        let editor = state.loop_editor.as_ref().unwrap();
+        assert!(!editor.busy && !state.loops_busy);
+        assert!(
+            editor
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("not been analysed")
+        );
+        assert_eq!(state.loops.get(1).unwrap().len(), 1);
+
+        // Without the window (a pad was clicked) it is shown on the page.
+        state.loop_editor = None;
+        state.loops_busy = true;
+        let _ = handle(
+            &mut state,
+            Message::LoopsEdited {
+                generation,
+                track: 1,
+                result: Err("full".into()),
+            },
+        );
+        assert_eq!(state.backend_error.as_deref(), Some("full"));
+        assert!(!state.loops_busy);
+    }
+
+    #[test]
+    fn the_loop_editor_is_not_closed_while_it_is_saving() {
+        let mut state = state_playing_with_loops(vec![]);
+        let _ = handle(&mut state, Message::LoopEditorOpen);
+        state.loop_editor.as_mut().unwrap().busy = true;
+        let _ = handle(&mut state, Message::LoopEditorCancel);
+        assert!(state.loop_editor.is_some());
+        let _ = handle(&mut state, Message::LoopEditor(loop_editor::Event::Add(0)));
+        assert_eq!(
+            state.loop_editor.as_ref().unwrap().loops().unwrap(),
             [],
             "no edits while it is being written"
         );

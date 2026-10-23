@@ -20,13 +20,14 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
     GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLibrarySyncDiffRequest,
-    GetLibrarySyncDiffResponse, GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse,
-    GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest,
-    MigrateOriginsResponse, NextRequest, OpenLibraryRequest, OperationProgress, PlayRequest,
-    PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
-    RenamePlaylistRequest, SaveLibraryAsRequest, SeekRequest, SetCuesRequest, SetRatingRequest,
-    SmartRules, SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
-    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
+    GetLibrarySyncDiffResponse, GetLoopsRequest, GetProgressRequest, GetSyncDiffRequest,
+    GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest,
+    MigrateOriginsRequest, MigrateOriginsResponse, NextRequest, OpenLibraryRequest,
+    OperationProgress, PlayRequest, PlaybackStatus, PreviousRequest, PullFromSourceRequest,
+    PullFromSourceResponse, RenamePlaylistRequest, SaveLibraryAsRequest, SeekRequest,
+    SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
+    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
+    TogglePauseRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -36,6 +37,7 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 
 use crate::cues::Cue;
+use crate::loops::Loop;
 use crate::model::{Library, Lighting, Playlist, Track};
 use crate::waveform::{BeatGrid, Marker, Waveform};
 
@@ -268,6 +270,7 @@ async fn load_library(
                 lighting,
                 lighting_projects: track.soundswitch_projects,
                 cue_count: track.cue_count,
+                loop_count: track.loop_count,
                 origin: track.origin,
                 path: track.path,
             }
@@ -576,6 +579,54 @@ pub async fn set_cues(
         .set_cues(SetCuesRequest { track_id, cues })
         .await
         .map(|response| cues_from(response.into_inner().cues))
+        .map_err(describe)
+}
+
+fn loops_from(loops: Vec<open_engine_api::v1::Loop>) -> Vec<Loop> {
+    loops
+        .into_iter()
+        .map(|saved| Loop {
+            slot: saved.slot as usize,
+            label: saved.label,
+            start: saved.start_seconds,
+            end: saved.end_seconds,
+            color: saved.color_argb,
+        })
+        .collect()
+}
+
+/// The saved loops of a track, in slot order.
+pub async fn loops(mut backend: Backend, track_id: u32) -> Result<Vec<Loop>, String> {
+    backend
+        .library
+        .get_loops(GetLoopsRequest { track_id })
+        .await
+        .map(|response| loops_from(response.into_inner().loops))
+        .map_err(describe)
+}
+
+/// Makes `loops` the saved loops of a track in the working copy, and gives back what the
+/// track has now.
+pub async fn set_loops(
+    mut backend: Backend,
+    track_id: u32,
+    loops: Vec<Loop>,
+) -> Result<Vec<Loop>, String> {
+    let loops = loops
+        .into_iter()
+        .map(|saved| open_engine_api::v1::Loop {
+            slot: saved.slot as u32,
+            label: saved.label,
+            start_seconds: saved.start,
+            end_seconds: saved.end,
+            color_argb: saved.color,
+        })
+        .collect();
+    backend
+        .library
+        .set_loops(SetLoopsRequest { track_id, loops })
+        .await
+        .map(|response| loops_from(response.into_inner().loops))
         .map_err(describe)
 }
 

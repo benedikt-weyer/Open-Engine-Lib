@@ -13,6 +13,7 @@ mod cache;
 mod cues;
 mod engine;
 mod library;
+mod loops;
 mod mirror;
 mod new_library;
 mod origins;

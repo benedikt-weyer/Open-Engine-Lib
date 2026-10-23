@@ -138,6 +138,17 @@ service LibraryService {
   // negative, not a number or after the end of the track, or a label of more than 255
   // bytes, INTERNAL if the database can't be written.
   rpc SetCues(SetCuesRequest) returns (CuesResponse);
+  // The saved loops of a track, in slot order. A track without any, or that has not been
+  // analysed, has an empty list. Errors as for `GetCues`.
+  rpc GetLoops(GetLoopsRequest) returns (LoopsResponse);
+  // Replaces the saved loops of a track in the working copy: the slots in the request are
+  // the ones the track has afterwards, and the loops that were in other slots are removed
+  // (a slot that is only half set is left alone). The source is not touched until
+  // `SyncToSource`, and `ListTracks` answers with the new `loop_count` from now on. The
+  // answer is the loops as they are now.
+  // Errors: as for `SetCues`, with INVALID_ARGUMENT also for a loop whose end is not after
+  // its start.
+  rpc SetLoops(SetLoopsRequest) returns (LoopsResponse);
 }
 
 message OpenLibraryRequest {
@@ -393,6 +404,8 @@ message Track {
   optional string origin = 14;
   // How many cue slots the track has set, as of now (`SetCues` changes it).
   uint32 cue_count = 15;
+  // How many loop slots the track has saved, as of now (`SetLoops` changes it).
+  uint32 loop_count = 16;
 }
 
 enum SoundSwitchState {
@@ -526,6 +539,32 @@ message Cue {
   double position_seconds = 3;
   // The color as 0xAARRGGBB.
   uint32 color_argb = 4;
+}
+
+message GetLoopsRequest {
+  uint32 track_id = 1;
+}
+
+message SetLoopsRequest {
+  uint32 track_id = 1;
+  repeated Loop loops = 2;
+}
+
+message LoopsResponse {
+  // In slot order.
+  repeated Loop loops = 1;
+}
+
+// A saved loop of a track: one of the eight loop pads.
+message Loop {
+  // The pad, from 0 to 7 (Engine shows them as 1 to 8).
+  uint32 slot = 1;
+  string label = 2;
+  // Where the loop starts and ends, in seconds from the start of the track.
+  double start_seconds = 3;
+  double end_seconds = 4;
+  // The color as 0xAARRGGBB.
+  uint32 color_argb = 5;
 }
 
 message GetSyncDiffRequest {

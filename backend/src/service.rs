@@ -17,6 +17,7 @@ use tonic::{Request, Response, Status};
 use crate::cues::Cue;
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, EditError, Library, OpenError};
+use crate::loops::Loop;
 use crate::mirror::{self, MirrorError};
 use crate::player::Start;
 use crate::progress::{Phase, Progress};
@@ -502,6 +503,7 @@ impl LibraryService for Service {
                             track,
                             library.rating(id),
                             library.cue_count(id),
+                            library.loop_count(id),
                             origin,
                         )
                     })
@@ -668,6 +670,63 @@ impl LibraryService for Service {
             .map_err(edit_status)?;
         Ok(Response::new(cues_message(cues)))
     }
+
+    async fn get_loops(
+        &self,
+        request: Request<api::GetLoopsRequest>,
+    ) -> Result<Response<api::LoopsResponse>, Status> {
+        let library = self.library()?;
+        let id = request.into_inner().track_id;
+        if library.tracks.get(id as usize).is_none() {
+            return Err(Status::not_found(format!("unknown track id {id}")));
+        }
+        let loops = tokio::task::spawn_blocking(move || library.loops(id as usize))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(|error| Status::internal(error.to_string()))?;
+        Ok(Response::new(loops_message(loops)))
+    }
+
+    async fn set_loops(
+        &self,
+        request: Request<api::SetLoopsRequest>,
+    ) -> Result<Response<api::LoopsResponse>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        let id = request.track_id;
+        let loops = request
+            .loops
+            .into_iter()
+            .map(|saved| Loop {
+                slot: saved.slot as usize,
+                label: saved.label,
+                start_seconds: saved.start_seconds,
+                end_seconds: saved.end_seconds,
+                color: saved.color_argb,
+            })
+            .collect::<Vec<_>>();
+        // Reads and writes the database: not on the async threads.
+        let loops = tokio::task::spawn_blocking(move || library.set_loops(id as usize, &loops))
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .map_err(edit_status)?;
+        Ok(Response::new(loops_message(loops)))
+    }
+}
+
+fn loops_message(loops: Vec<Loop>) -> api::LoopsResponse {
+    api::LoopsResponse {
+        loops: loops
+            .into_iter()
+            .map(|saved| api::Loop {
+                slot: saved.slot as u32,
+                label: saved.label,
+                start_seconds: saved.start_seconds,
+                end_seconds: saved.end_seconds,
+                color_argb: saved.color,
+            })
+            .collect(),
+    }
 }
 
 fn cues_message(cues: Vec<Cue>) -> api::CuesResponse {
@@ -796,13 +855,16 @@ fn mirror_status(error: MirrorError) -> Status {
 fn edit_status(error: EditError) -> Status {
     match error {
         EditError::NoSuchTrack | EditError::NoSuchPlaylist => Status::not_found(error.to_string()),
-        EditError::NotSmart | EditError::IsSmart | EditError::EmptyTitle | EditError::BadCue(_) => {
-            Status::invalid_argument(error.to_string())
-        }
+        EditError::NotSmart
+        | EditError::IsSmart
+        | EditError::EmptyTitle
+        | EditError::BadCue(_)
+        | EditError::BadLoop(_) => Status::invalid_argument(error.to_string()),
         EditError::TitleTaken => Status::already_exists(error.to_string()),
-        EditError::NoSmartlists | EditError::NoAnalysis | EditError::UnreadableCues => {
-            Status::failed_precondition(error.to_string())
-        }
+        EditError::NoSmartlists
+        | EditError::NoAnalysis
+        | EditError::UnreadableCues
+        | EditError::UnreadableLoops => Status::failed_precondition(error.to_string()),
         EditError::Cache(_) | EditError::Database(_) => Status::internal(error.to_string()),
     }
 }
@@ -812,6 +874,7 @@ fn track_message(
     track: &library::Track,
     rating: Option<u32>,
     cue_count: u32,
+    loop_count: u32,
     origin: Option<String>,
 ) -> api::Track {
     api::Track {
@@ -830,6 +893,7 @@ fn track_message(
         path: track.relative_path.clone(),
         origin,
         cue_count,
+        loop_count,
     }
 }
 

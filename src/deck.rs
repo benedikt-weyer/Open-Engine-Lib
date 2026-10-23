@@ -1,6 +1,6 @@
 //! The waveform display of the track in the player, like a DJ deck's: a zoomed,
-//! scrolling waveform around the playhead with the beatgrid and the cues drawn over it,
-//! and the whole track below it (with the cues too) to see where you are and to jump to
+//! scrolling waveform around the playhead with the beatgrid, the loops and the cues drawn
+//! over it, and the whole track below it (with them too) to see where you are and to jump to
 //! somewhere else.
 //!
 //! How the waveform is colored is a setting (`WaveformColors`) that can also be changed
@@ -29,6 +29,7 @@ use crate::colors::{self, STACKED_LAYERS};
 use crate::config::{Language, WaveformColors};
 use crate::cues::{self, Cue};
 use crate::i18n::fill;
+use crate::loops::{self, Loop};
 use crate::waveform::{Bands, Display, Serial, Waveform};
 
 /// How much of the track the zoomed waveform shows.
@@ -72,9 +73,16 @@ fn scheme_choice(language: Language, colors: WaveformColors) -> SchemeChoice {
     }
 }
 
+/// What is marked on the track: its cues and saved loops.
+#[derive(Clone, Copy)]
+pub struct Marks<'a> {
+    pub cues: &'a [Cue],
+    pub loops: &'a [Loop],
+}
+
 pub fn view<'a>(
     display: Display<'a>,
-    cues: &'a [Cue],
+    marks: Marks<'a>,
     clock: Clock,
     colors: WaveformColors,
     language: Language,
@@ -117,13 +125,13 @@ pub fn view<'a>(
     column![
         Element::from(ScrollingWaveform {
             waveform,
-            cues,
+            marks,
             clock,
             colors
         }),
         canvas(Overview {
             waveform,
-            cues,
+            marks,
             clock,
             colors
         })
@@ -293,7 +301,7 @@ struct ZoomState {
 /// with the renderer's translation, which costs nothing (the triangles stay on the GPU).
 struct ScrollingWaveform<'a> {
     waveform: &'a Waveform,
-    cues: &'a [Cue],
+    marks: Marks<'a>,
     clock: Clock,
     colors: WaveformColors,
 }
@@ -417,7 +425,16 @@ impl<'a> Widget<Message, Theme, Renderer> for ScrollingWaveform<'a> {
         renderer.with_layer(bounds, |renderer| {
             let mut frame = Frame::new(renderer, bounds.size());
             let mut any = false;
-            for cue in self.cues {
+            for saved in self.marks.loops {
+                let from = ((saved.start - start) * pixels_per_second) as f32;
+                let to = ((saved.end - start) * pixels_per_second) as f32;
+                // (The flag reaches to the right of the loop's start, like a cue's.)
+                if to > 0.0 && from < bounds.width {
+                    paint_loop(&mut frame, saved, from, to, bounds.size());
+                    any = true;
+                }
+            }
+            for cue in self.marks.cues {
                 let x = ((cue.position - start) * pixels_per_second) as f32;
                 // (A flag reaches to the right of its line, so a cue just off the left edge
                 // can still show.)
@@ -550,10 +567,56 @@ fn paint_cue(frame: &mut Frame, cue: &Cue, x: f32, height: f32) {
     });
 }
 
+/// A loop on the zoomed waveform: the stretch it covers tinted in its color, a line at each
+/// end, and above the cues' flags one with "L" and the pad's number and the name (left out
+/// when it is Engine's default `Loop N`). `from` and `to` are the ends' horizontal positions,
+/// which can be off to either side.
+fn paint_loop(frame: &mut Frame, saved: &Loop, from: f32, to: f32, size: Size) {
+    let color = saved.color();
+    let left = from.max(0.0);
+    let right = to.min(size.width);
+    frame.fill_rectangle(
+        Point::new(left, 0.0),
+        Size::new((right - left).max(0.0), size.height),
+        Color { a: 0.22, ..color },
+    );
+    for (x, visible) in [(from, from >= 0.0), (to, to <= size.width)] {
+        if visible {
+            frame.fill_rectangle(
+                Point::new(x - 1.0, 0.0),
+                Size::new(2.0, size.height),
+                Color { a: 0.9, ..color },
+            );
+        }
+    }
+
+    let name = if saved.label == loops::default_label(saved.slot) {
+        String::new()
+    } else {
+        saved.label.clone()
+    };
+    let label = if name.is_empty() {
+        format!("L{}", saved.slot + 1)
+    } else {
+        format!("L{} {name}", saved.slot + 1)
+    };
+    let text_size = 12.0;
+    let width = (label.chars().count() as f32 * text_size * 0.6 + 8.0).min(CUE_FLAG_REACH);
+    let origin = Point::new(left + 1.0, size.height - 2.0 * (text_size + 8.0));
+    frame.fill_rectangle(origin, Size::new(width, text_size + 6.0), color);
+    frame.fill_text(Text {
+        content: label,
+        position: Point::new(origin.x + 4.0, origin.y + 3.0),
+        color: cues::text_on(color),
+        size: Pixels(text_size),
+        ..Text::default()
+    });
+}
+
 /// The whole track, with what has been played dimmed. Clicking jumps there.
 struct Overview<'a> {
     waveform: &'a Waveform,
-    cues: &'a [Cue],
+    marks: Marks<'a>,
     clock: Clock,
     colors: WaveformColors,
 }
@@ -633,8 +696,25 @@ impl canvas::Program<Message> for Overview<'_> {
                 ..BACKGROUND
             },
         );
+        // The loops: the stretch tinted, with a bar along the bottom, in the pad's color.
+        let duration = waveform.duration.max(f64::EPSILON);
+        for saved in self.marks.loops {
+            let from = ((saved.start / duration) as f32 * width).clamp(0.0, width);
+            let to = ((saved.end / duration) as f32 * width).clamp(0.0, width);
+            let color = saved.color();
+            frame.fill_rectangle(
+                Point::new(from, 0.0),
+                Size::new((to - from).max(2.0), height),
+                Color { a: 0.28, ..color },
+            );
+            frame.fill_rectangle(
+                Point::new(from, height - 4.0),
+                Size::new((to - from).max(2.0), 4.0),
+                color,
+            );
+        }
         // The cues: a line with a small square at the top, in the pad's color.
-        for cue in self.cues {
+        for cue in self.marks.cues {
             let x = (cue.position / waveform.duration.max(f64::EPSILON)) as f32 * width;
             let color = cue.color();
             frame.fill_rectangle(

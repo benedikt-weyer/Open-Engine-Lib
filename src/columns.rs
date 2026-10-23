@@ -27,13 +27,14 @@ pub enum Column {
     Length,
     Rating,
     Cues,
+    Loops,
     Lighting,
     Origin,
 }
 
 impl Column {
     /// How many there are.
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 11;
     /// In the order they are shown.
     pub const ALL: [Column; Column::COUNT] = [
         Column::Title,
@@ -44,6 +45,7 @@ impl Column {
         Column::Length,
         Column::Rating,
         Column::Cues,
+        Column::Loops,
         Column::Lighting,
         Column::Origin,
     ];
@@ -61,6 +63,7 @@ pub struct ColumnWidths {
     length: f32,
     rating: f32,
     cues: f32,
+    loops: f32,
     lighting: f32,
     origin: f32,
 }
@@ -76,6 +79,7 @@ impl Default for ColumnWidths {
             length: 64.0,
             rating: 80.0,
             cues: 56.0,
+            loops: 56.0,
             lighting: 72.0,
             origin: 260.0,
         }
@@ -93,6 +97,7 @@ impl ColumnWidths {
             Column::Length => self.length,
             Column::Rating => self.rating,
             Column::Cues => self.cues,
+            Column::Loops => self.loops,
             Column::Lighting => self.lighting,
             Column::Origin => self.origin,
         }
@@ -110,6 +115,7 @@ impl ColumnWidths {
             Column::Length => self.length = width,
             Column::Rating => self.rating = width,
             Column::Cues => self.cues = width,
+            Column::Loops => self.loops = width,
             Column::Lighting => self.lighting = width,
             Column::Origin => self.origin = width,
         }

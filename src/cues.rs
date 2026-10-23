@@ -124,18 +124,27 @@ pub fn parse_position(text: &str) -> Option<f64> {
     Some(seconds)
 }
 
-/// The cues fetched for the tracks played.
-#[derive(Default)]
-pub struct TrackCues {
-    entries: HashMap<u32, Vec<Cue>>,
-    /// Tracks whose cues were asked for.
+/// What was fetched for the tracks played (their cues, their loops): a list per track.
+pub struct Fetched<T> {
+    entries: HashMap<u32, Vec<T>>,
+    /// Tracks that were asked for.
     asked: HashSet<u32>,
     /// Changes with the library, so a late answer about another library's track (whose id
     /// means another track now) is told apart and dropped.
     generation: u32,
 }
 
-impl TrackCues {
+impl<T> Default for Fetched<T> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            asked: HashSet::new(),
+            generation: 0,
+        }
+    }
+}
+
+impl<T> Fetched<T> {
     pub fn generation(&self) -> u32 {
         self.generation
     }
@@ -146,24 +155,27 @@ impl TrackCues {
         self.generation += 1;
     }
 
-    /// The cues of track `id`, once known.
-    pub fn get(&self, id: u32) -> Option<&[Cue]> {
+    /// The list of track `id`, once known.
+    pub fn get(&self, id: u32) -> Option<&[T]> {
         self.entries.get(&id).map(Vec::as_slice)
     }
 
-    /// Whether the cues of `id` have not been asked for yet. If so they count as being
+    /// Whether the list of `id` has not been asked for yet. If so it counts as being
     /// loaded from now on.
     pub fn claim(&mut self, id: u32) -> bool {
         self.asked.insert(id)
     }
 
     /// Stores what the backend said for `id`. Answers for an earlier library are ignored.
-    pub fn set(&mut self, generation: u32, id: u32, cues: Vec<Cue>) {
+    pub fn set(&mut self, generation: u32, id: u32, list: Vec<T>) {
         if generation == self.generation {
-            self.entries.insert(id, cues);
+            self.entries.insert(id, list);
         }
     }
 }
+
+/// The cues fetched for the tracks played.
+pub type TrackCues = Fetched<Cue>;
 
 #[cfg(test)]
 mod tests {
