@@ -125,8 +125,6 @@ struct State {
     waveforms: Waveforms,
     /// The list the queue was made from, so its playing row can be marked.
     play_source: Option<Source>,
-    /// Where the user is dragging the seek slider to, in seconds.
-    seeking: Option<f32>,
     /// A failed request to the backend.
     backend_error: Option<String>,
     /// The waveform gain slider being dragged and where it is.
@@ -216,8 +214,6 @@ pub enum Message {
     Next,
     Previous,
     Tick,
-    SeekDragged(f32),
-    SeekReleased,
     /// Jump to a point of the track, in seconds (from clicking the waveform overview).
     SeekTo(f32),
     Status(Result<PlaybackStatus, String>),
@@ -262,7 +258,6 @@ impl State {
             clock: Clock::new(Instant::now()),
             waveforms: Waveforms::default(),
             play_source: None,
-            seeking: None,
             backend_error: None,
             gain_draft: None,
             sync: None,
@@ -344,7 +339,6 @@ impl State {
     fn reset_playback(&mut self) {
         self.status = PlaybackStatus::default();
         self.play_source = None;
-        self.seeking = None;
     }
 
     /// Starts the shown list at `row`.
@@ -958,18 +952,10 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::Next => return state.control(Control::Next),
         Message::Previous => return state.control(Control::Previous),
         Message::Tick => return state.control(Control::Poll),
-        Message::SeekDragged(seconds) => state.seeking = Some(seconds),
         Message::SeekTo(seconds) => {
             return state.control(Control::Seek {
                 position_ms: (seconds.max(0.0) * 1000.0) as u64,
             });
-        }
-        Message::SeekReleased => {
-            if let Some(seconds) = state.seeking.take() {
-                return state.control(Control::Seek {
-                    position_ms: (seconds * 1000.0) as u64,
-                });
-            }
         }
         Message::Status(Ok(status)) => {
             state.status = status;
@@ -1145,9 +1131,7 @@ fn open_library<'a>(
         .and_then(|id| library.track_by_id(id))
         .map(|track| player_bar::NowPlaying {
             track,
-            position: state
-                .seeking
-                .unwrap_or(state.status.position_ms as f32 / 1000.0),
+            position: state.status.position_ms as f32 / 1000.0,
             paused: state.status.state() == PlaybackState::Paused,
         });
     // The waveform of the track in the player, with the playhead where the player is.
@@ -1308,7 +1292,6 @@ mod tests {
             clock: Clock::new(Instant::now()),
             waveforms: Waveforms::default(),
             play_source: None,
-            seeking: None,
             backend_error: None,
             gain_draft: None,
             sync: None,

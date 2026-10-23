@@ -2,7 +2,7 @@
 
 use iced::widget::canvas::{Frame, Geometry, Path};
 use iced::widget::image::Handle;
-use iced::widget::{button, canvas, container, image, row, slider, text, tooltip};
+use iced::widget::{button, canvas, container, image, row, text, tooltip};
 use iced::{Color, Element, Fill, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use crate::Message;
@@ -17,7 +17,7 @@ const ICON: f32 = 22.0;
 
 pub struct NowPlaying<'a> {
     pub track: &'a Track,
-    /// Seconds into the track, or where the user is dragging the slider to.
+    /// Seconds into the track.
     pub position: f32,
     pub paused: bool,
 }
@@ -97,15 +97,11 @@ pub fn view<'a>(language: Language, bar: Bar<'a>) -> Element<'a, Message> {
         control(Icon::Stop, &strings.stop, Message::Stop, playing),
         control(Icon::Next, &strings.next, Message::Next, playing),
         text(title).width(Fill),
-        text(format_time(position as u32)),
-        slider(
-            0.0..=length.max(position).max(1.0),
-            position,
-            Message::SeekDragged
-        )
-        .on_release(Message::SeekReleased)
-        .width(Fill),
-        text(format_time(length as u32)),
+        text(format!(
+            "{} / {}",
+            format_time(position as u32),
+            format_time(length as u32)
+        )),
     ]
     .spacing(10)
     .align_y(iced::Center)
