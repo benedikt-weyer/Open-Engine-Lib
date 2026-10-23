@@ -213,6 +213,11 @@ playlist_delete_note: "Its tracks stay in the library. The source is only change
 playlist_failed: "Could not change the playlists: {error}"
 col_origin: Origin
 origin_migrate: Save locations as origins
+streaming_remove: "Remove {count} streaming songs"
+streaming_remove_confirm: "Click again to remove {count} streaming songs"
+streaming_remove_cancel: Cancel
+streaming_remove_tip: "Removes every streaming song (TIDAL and so on) from the library and from its playlists; they have no file here. The change is made in the working copy and playback is stopped; “Sync with the source” writes it to the library."
+streaming_removed: "Removed {tracks} streaming songs and {entries} playlist entries."
 origin_migrate_tip: "Saves where each track's file is now as its origin, for tracks that have none yet. Origins are kept in Open Engine Lib's own database, not in the Engine library."
 origin_migrated: "Origins saved: {saved} new, {kept} already known, {skipped} without a file here."
 origin_prefix_button: Change origin folder…

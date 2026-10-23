@@ -173,6 +173,8 @@ struct State {
     /// Whether the library is being read from the disk again, and how the last time went
     /// (what to say, and whether it failed).
     reloading: bool,
+    /// The button that removes the streaming songs was pressed once and waits for a second.
+    streaming_confirm: bool,
     reload_result: Option<(String, bool)>,
     /// How wide the user made the track list's columns.
     columns: ColumnStore,
@@ -274,6 +276,10 @@ pub enum Message {
     /// The button that saves the location of every track as its origin.
     MigrateOrigins,
     OriginsMigrated(Result<open_engine_api::v1::MigrateOriginsResponse, String>),
+    /// The button that removes the streaming songs: the first press asks to be pressed again.
+    RemoveStreaming,
+    RemoveStreamingCancel,
+    StreamingRemoved(Result<open_engine_api::v1::RemoveStreamingTracksResponse, String>),
     /// The button that opens the window for changing the folder the origins start with.
     OriginPrefixOpen,
     OriginPrefixLoaded(Result<open_engine_api::v1::GetOriginPrefixResponse, String>),
@@ -466,6 +472,7 @@ impl State {
             saving: None,
             save_error: None,
             reloading: false,
+            streaming_confirm: false,
             reload_result: None,
             columns: ColumnStore::discover(),
             resize: None,
@@ -707,6 +714,7 @@ impl State {
         self.loops.clear();
         self.sync = None;
         self.reload_result = None;
+        self.streaming_confirm = false;
         self.progress = None;
         self.library = LibraryState::Opening(path.clone());
         match kind {
@@ -1105,6 +1113,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 | Message::SmartNew
                 | Message::SmartEdit(_)
                 | Message::MigrateOrigins
+                | Message::RemoveStreaming
                 | Message::OriginPrefixOpen
                 | Message::SetStars { .. }
                 | Message::MenuSelected(MenuItem::SaveAs)
@@ -1163,6 +1172,9 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::OriginPrefixPicked(..) => handlers::origin_prefix::handle(state, message),
         Message::MigrateOrigins
         | Message::OriginsMigrated(..)
+        | Message::RemoveStreaming
+        | Message::RemoveStreamingCancel
+        | Message::StreamingRemoved(..)
         | Message::PlaylistCancel
         | Message::PlaylistConfirm
         | Message::PlaylistDelete(..)
@@ -1453,6 +1465,42 @@ fn open_library<'a>(
             )
             .style(container::rounded_box),
         );
+        // Takes the streaming songs out (they have no file here); asks twice.
+        let streaming = library
+            .tracks
+            .iter()
+            .filter(|track| track.streaming)
+            .count();
+        if streaming > 0 {
+            let armed = state.streaming_confirm;
+            header = header.push(
+                tooltip(
+                    button(text(fill(
+                        if armed {
+                            &strings.streaming_remove_confirm
+                        } else {
+                            &strings.streaming_remove
+                        },
+                        &[("count", &streaming)],
+                    )))
+                    .style(if armed {
+                        button::danger
+                    } else {
+                        button::secondary
+                    })
+                    .on_press_maybe((!state.locked()).then_some(Message::RemoveStreaming)),
+                    text(&strings.streaming_remove_tip).size(13),
+                    tooltip::Position::Bottom,
+                )
+                .style(container::rounded_box),
+            );
+            if armed {
+                header = header.push(
+                    button(text(&strings.streaming_remove_cancel))
+                        .on_press(Message::RemoveStreamingCancel),
+                );
+            }
+        }
         // Changes the folder the saved origins start with (the music moved).
         header = header.push(
             tooltip(
@@ -1710,6 +1758,7 @@ mod tests {
             saving: None,
             save_error: None,
             reloading: false,
+            streaming_confirm: false,
             reload_result: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
             resize: None,
@@ -2358,6 +2407,100 @@ mod tests {
             Message::OriginsMigrated(Err("no database".into())),
         );
         assert_eq!(state.backend_error.as_deref(), Some("no database"));
+    }
+
+    /// An app whose library has a streaming song (its second track).
+    fn state_with_a_streaming_song() -> State {
+        let mut state = state();
+        let mut streaming = track(1);
+        streaming.streaming = true;
+        let library = Library::new(
+            "/media/DRIVE/Engine Library".into(),
+            "/cache".into(),
+            vec![track(0), streaming, track(2)],
+            vec![playlist("House", 0, false, &[0, 1, 2])],
+        );
+        state.library = LibraryState::Open(Browser::new(Arc::new(library)));
+        state
+    }
+
+    #[test]
+    fn the_streaming_songs_are_removed_on_the_second_press_and_the_library_is_read_again() {
+        use open_engine_api::v1::RemoveStreamingTracksResponse;
+        let mut state = state_with_a_streaming_song();
+
+        // The first press only asks; cancelling takes it back.
+        let _ = handle(&mut state, Message::RemoveStreaming);
+        assert!(state.streaming_confirm && !state.reloading);
+        let _ = handle(&mut state, Message::RemoveStreamingCancel);
+        assert!(!state.streaming_confirm);
+
+        // A library that is being read again is not pressed on.
+        state.reloading = true;
+        let _ = handle(&mut state, Message::RemoveStreaming);
+        assert!(!state.streaming_confirm);
+
+        // The answer is told, and the library is fetched again (there is no backend here to
+        // do it).
+        let _ = handle(
+            &mut state,
+            Message::StreamingRemoved(Ok(RemoveStreamingTracksResponse {
+                removed: 1,
+                playlist_entries: 2,
+            })),
+        );
+        assert_eq!(
+            state.reload_result,
+            Some((
+                "Removed 1 streaming songs and 2 playlist entries.".to_owned(),
+                false
+            ))
+        );
+
+        // Nothing removed (it was already gone) just unlocks, and a failure is shown.
+        state.reloading = true;
+        let _ = handle(
+            &mut state,
+            Message::StreamingRemoved(Ok(RemoveStreamingTracksResponse::default())),
+        );
+        assert!(!state.reloading);
+        state.reloading = true;
+        let _ = handle(
+            &mut state,
+            Message::StreamingRemoved(Err("could not write".into())),
+        );
+        assert!(!state.reloading);
+        assert_eq!(state.backend_error.as_deref(), Some("could not write"));
+    }
+
+    #[test]
+    fn there_is_nothing_to_ask_about_without_streaming_songs_or_in_a_folder_of_music() {
+        let mut state = state();
+        let _ = handle(&mut state, Message::RemoveStreaming);
+        assert!(!state.streaming_confirm, "no streaming songs here");
+
+        // (Nor in a folder of music, which has nothing to remove them from.)
+        let mut folder = state_with_a_streaming_song();
+        if let LibraryState::Open(browser) = &folder.library {
+            let library = Library::new(
+                "/home/me/Music".into(),
+                String::new(),
+                browser.library.tracks.clone(),
+                Vec::new(),
+            )
+            .of_kind(model::Kind::Folder);
+            folder.library = LibraryState::Open(Browser::new(Arc::new(library)));
+        }
+        assert!(
+            browser(&folder)
+                .library
+                .tracks
+                .iter()
+                .any(|track| track.streaming),
+            "the folder has a streaming song to be left alone"
+        );
+        let _ = handle(&mut folder, Message::RemoveStreaming);
+        assert!(!folder.streaming_confirm);
     }
 
     #[test]

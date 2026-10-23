@@ -28,12 +28,12 @@ use open_engine_api::v1::{
     ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
     MoveScratchRequest, NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress,
     PlayRequest, PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
-    RenamePlaylistRequest, RenameProfileRequest, ReplaceOriginPrefixRequest,
-    ReplaceOriginPrefixResponse, SaveLibraryAsRequest, SeekRequest, SelectProfileRequest,
-    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules,
-    SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
-    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
-    WatchControllerRequest,
+    RemoveStreamingTracksRequest, RemoveStreamingTracksResponse, RenamePlaylistRequest,
+    RenameProfileRequest, ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse,
+    SaveLibraryAsRequest, SeekRequest, SelectProfileRequest, SetControllerEnabledRequest,
+    SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
+    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
+    TogglePauseRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -674,6 +674,18 @@ pub async fn migrate_origins(mut backend: Backend) -> Result<MigrateOriginsRespo
     backend
         .library
         .migrate_origins(MigrateOriginsRequest {})
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Takes every streaming track out of the working copy of the open library.
+pub async fn remove_streaming_tracks(
+    mut backend: Backend,
+) -> Result<RemoveStreamingTracksResponse, String> {
+    backend
+        .library
+        .remove_streaming_tracks(RemoveStreamingTracksRequest {})
         .await
         .map(|response| response.into_inner())
         .map_err(describe)

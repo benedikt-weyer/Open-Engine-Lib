@@ -6,7 +6,7 @@
 //! read; the analysis BLOBs are left alone. Track paths point at the original audio
 //! files, which are not copied.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -71,6 +71,13 @@ impl fmt::Display for OpenError {
             OpenError::Database(error) => write!(f, "{error}"),
         }
     }
+}
+
+/// What `Library::remove_streaming_tracks` took out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamingRemoved {
+    pub tracks: usize,
+    pub playlist_entries: usize,
 }
 
 #[derive(Debug)]
@@ -883,6 +890,65 @@ impl Library {
             .get(&index)
             .copied();
         set.or_else(|| self.tracks.get(index).and_then(|track| track.rating))
+    }
+
+    /// Takes every streaming track out of the working copy: its row, its analysis and its
+    /// entries in playlists (the neighbours of an entry are linked up again by the database's
+    /// trigger, as when a track is taken out of a playlist). The playlists stay, with a new
+    /// edit time when they lost entries. Covers are left alone. The source only gets this when
+    /// the working copy is written to it.
+    ///
+    /// The tracks of this `Library` are as they were: its indices no longer match the database,
+    /// so the caller has to read the working copy again.
+    pub fn remove_streaming_tracks(&self) -> Result<StreamingRemoved, EditError> {
+        if self.folder {
+            return Err(EditError::NotEngine);
+        }
+        let streaming: Vec<&Track> = self.tracks.iter().filter(|track| track.streaming).collect();
+        if streaming.is_empty() {
+            return Ok(StreamingRemoved::default());
+        }
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        let transaction = connection.unchecked_transaction()?;
+
+        let mut entries = 0;
+        let mut lists = BTreeSet::new();
+        for track in &streaming {
+            // An entry names its track by the track's origin.
+            if let Some((uuid, id)) = &track.origin_key {
+                let found: Vec<(i64, i64)> = {
+                    let mut statement = transaction.prepare(
+                        "SELECT id, listId FROM PlaylistEntity \
+                         WHERE databaseUuid = ?1 AND trackId = ?2",
+                    )?;
+                    statement
+                        .query_map((uuid, id), |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<rusqlite::Result<_>>()?
+                };
+                for (entity, list) in found {
+                    transaction.execute("DELETE FROM PlaylistEntity WHERE id = ?1", [entity])?;
+                    entries += 1;
+                    lists.insert(list);
+                }
+            }
+            transaction.execute(
+                "DELETE FROM PerformanceData WHERE trackId = ?1",
+                [track.db_id],
+            )?;
+            transaction.execute("DELETE FROM Track WHERE id = ?1", [track.db_id])?;
+        }
+        for list in &lists {
+            transaction.execute(
+                "UPDATE Playlist SET lastEditTime = datetime('now') WHERE id = ?1",
+                [list],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(StreamingRemoved {
+            tracks: streaming.len(),
+            playlist_entries: entries,
+        })
     }
 
     /// Sets the rating (0 to 100) of the track at `index` in `tracks` in the working copy.
@@ -1737,6 +1803,100 @@ mod tests {
             Err(EditError::NoSuchTrack)
         ));
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn streaming_tracks_are_taken_out_of_the_library_and_the_playlists() {
+        let (library, cache) = engine_library("remove-streaming");
+        {
+            let connection = library.connection.lock().unwrap();
+            // The parts of a real library the fixture lacks: the analysis, and the trigger
+            // that links the neighbours of a deleted entry. Track 3 (streaming, origin
+            // 'other' 7) heads Beta's chain (3 -> 1 -> 2) and stands in the middle of
+            // Alpha's (1 -> 3 -> 2).
+            connection
+                .execute_batch(
+                    "CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, beatData BLOB);
+                     INSERT INTO PerformanceData (trackId) VALUES (1), (2), (3);
+                     CREATE TRIGGER trigger_before_delete_PlaylistEntity
+                     BEFORE DELETE ON PlaylistEntity WHEN OLD.trackId > 0 BEGIN
+                        UPDATE PlaylistEntity SET nextEntityId = OLD.nextEntityId
+                        WHERE nextEntityId = OLD.id AND listId = OLD.listId;
+                     END;
+                     INSERT INTO PlaylistEntity VALUES
+                        (21, 1, 1, 'db', 20), (20, 1, 7, 'other', 22), (22, 1, 2, 'db', 0);",
+                )
+                .unwrap();
+        }
+
+        let removed = library.remove_streaming_tracks().unwrap();
+        assert_eq!(
+            removed,
+            StreamingRemoved {
+                tracks: 1,
+                playlist_entries: 2
+            }
+        );
+        assert!(cache.join("edited").exists(), "noted for the cache");
+
+        let connection = library.connection.lock().unwrap();
+        let ids = |sql: &str| -> Vec<i64> {
+            let mut statement = connection.prepare(sql).unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(ids("SELECT id FROM Track ORDER BY id"), [1, 2]);
+        assert_eq!(
+            ids("SELECT trackId FROM PerformanceData ORDER BY trackId"),
+            [1, 2]
+        );
+        // The chains close up where an entry went: Beta 1 -> 2 (10 -> 11), Alpha 1 -> 2
+        // (21 -> 22).
+        assert_eq!(
+            ids("SELECT id FROM PlaylistEntity ORDER BY id"),
+            [10, 11, 13, 21, 22]
+        );
+        assert_eq!(
+            ids("SELECT nextEntityId FROM PlaylistEntity WHERE id = 10"),
+            [11]
+        );
+        assert_eq!(
+            ids("SELECT nextEntityId FROM PlaylistEntity WHERE id = 21"),
+            [22]
+        );
+        // Both lists are marked as edited; covers and the playlists themselves stay.
+        assert_eq!(
+            ids("SELECT COUNT(*) FROM Playlist WHERE lastEditTime IS NOT NULL AND id IN (1, 2)"),
+            [2]
+        );
+        assert_eq!(ids("SELECT COUNT(*) FROM Playlist"), [3]);
+        assert_eq!(ids("SELECT COUNT(*) FROM AlbumArt"), [4]);
+        drop(connection);
+
+        // This library still has the tracks it read; a library with none is left alone.
+        let (none, none_cache) = editable_library("remove-streaming-none");
+        none.connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE Track SET streamingSource = NULL", [])
+            .unwrap();
+        let none = Library::load(
+            none.connection.into_inner().unwrap(),
+            PathBuf::from("/lib"),
+            none_cache.clone(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(none_cache.join("edited"));
+        assert_eq!(
+            none.remove_streaming_tracks().unwrap(),
+            StreamingRemoved::default()
+        );
+        assert!(!none_cache.join("edited").exists(), "nothing was edited");
+        let _ = std::fs::remove_dir_all(&cache);
+        let _ = std::fs::remove_dir_all(&none_cache);
     }
 
     #[test]

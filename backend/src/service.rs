@@ -394,6 +394,34 @@ impl LibraryService for Service {
         .map(Response::new)
     }
 
+    async fn remove_streaming_tracks(
+        &self,
+        _: Request<api::RemoveStreamingTracksRequest>,
+    ) -> Result<Response<api::RemoveStreamingTracksResponse>, Status> {
+        let library = self.engine_library()?;
+        let dir = library.dir.clone();
+        // Writes the database: not on the async threads.
+        let removed = {
+            let library = Arc::clone(&library);
+            tokio::task::spawn_blocking(move || library.remove_streaming_tracks())
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+                .map_err(edit_status)?
+        };
+        if removed.tracks > 0 {
+            // The tracks after the first one removed have other ids now: read the working
+            // copy again, and stop what plays (its queue has the old ids).
+            self.reopen(dir).await?;
+            if let Ok(mut audio) = self.audio() {
+                let _ = audio.stop(api::StopRequest {}).await;
+            }
+        }
+        Ok(Response::new(api::RemoveStreamingTracksResponse {
+            removed: removed.tracks as u32,
+            playlist_entries: removed.playlist_entries as u32,
+        }))
+    }
+
     async fn get_origin_prefix(
         &self,
         _: Request<api::GetOriginPrefixRequest>,

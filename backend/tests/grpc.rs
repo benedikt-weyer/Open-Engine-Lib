@@ -17,10 +17,11 @@ use open_engine_api::v1::{
     GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLoopsRequest, GetOriginPrefixRequest,
     GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest, LearnRequest, ListPlaylistsRequest,
     ListTracksRequest, Loop, MigrateOriginsRequest, OpenLibraryRequest, OpenLocalFolderRequest,
-    PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest, RenameProfileRequest,
-    ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
-    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule,
-    SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
+    PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest,
+    RemoveStreamingTracksRequest, RenameProfileRequest, ReplaceOriginPrefixRequest,
+    SaveLibraryAsRequest, SelectProfileRequest, SetControllerEnabledRequest, SetCuesRequest,
+    SetLoopsRequest, SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest,
+    UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -359,6 +360,84 @@ async fn serves_the_api_over_grpc() {
         .unwrap()
         .into_inner();
     assert_eq!(reopened.cache_path, opened.cache_path);
+}
+
+#[tokio::test]
+async fn removes_the_streaming_tracks_from_the_working_copy_only() {
+    let temp = TempDir::new("remove-streaming");
+    let library_dir = fixture_library(&temp.0);
+    let source = library_dir.join("Database2/m.db");
+    rusqlite::Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, beatData BLOB);
+             INSERT INTO PerformanceData (trackId) VALUES (1), (2), (3);
+             ALTER TABLE Playlist ADD COLUMN lastEditTime DATETIME;",
+        )
+        .unwrap();
+    let source_before = std::fs::read(&source).unwrap();
+    let running = start(&temp.0.join("cache"));
+    let mut library = LibraryServiceClient::new(InterceptedService::new(
+        channel(&running).await,
+        with_token as fn(_) -> _,
+    ));
+    assert_eq!(
+        code(
+            library
+                .remove_streaming_tracks(RemoveStreamingTracksRequest {})
+                .await
+        ),
+        Code::FailedPrecondition,
+        "no library is open"
+    );
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Track 3 is the TIDAL one, and heads the playlist Beta.
+    let done = library
+        .remove_streaming_tracks(RemoveStreamingTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((done.removed, done.playlist_entries), (1, 1));
+
+    // The backend reads the working copy again: two tracks, and Beta has the one left.
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let mut tracks = Vec::new();
+    while let Some(batch) = stream.message().await.unwrap() {
+        tracks.extend(batch.tracks);
+    }
+    assert_eq!(
+        tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+        ["One", "Two"]
+    );
+    assert!(tracks.iter().all(|track| !track.streaming));
+    let playlists = library
+        .list_playlists(ListPlaylistsRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .playlists;
+    let beta = playlists.iter().find(|list| list.title == "Beta").unwrap();
+    assert_eq!(beta.track_ids, [0]);
+
+    // Nothing is left to remove; the source keeps its track until the working copy is
+    // written to it.
+    let again = library
+        .remove_streaming_tracks(RemoveStreamingTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((again.removed, again.playlist_entries), (0, 0));
+    assert_eq!(std::fs::read(&source).unwrap(), source_before);
 }
 
 #[tokio::test]
