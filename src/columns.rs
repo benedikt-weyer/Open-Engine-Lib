@@ -25,17 +25,23 @@ pub enum Column {
     Genre,
     Bpm,
     Length,
+    Rating,
+    Lighting,
 }
 
 impl Column {
+    /// How many there are.
+    pub const COUNT: usize = 8;
     /// In the order they are shown.
-    pub const ALL: [Column; 6] = [
+    pub const ALL: [Column; Column::COUNT] = [
         Column::Title,
         Column::Artist,
         Column::Album,
         Column::Genre,
         Column::Bpm,
         Column::Length,
+        Column::Rating,
+        Column::Lighting,
     ];
 }
 
@@ -49,6 +55,8 @@ pub struct ColumnWidths {
     genre: f32,
     bpm: f32,
     length: f32,
+    rating: f32,
+    lighting: f32,
 }
 
 impl Default for ColumnWidths {
@@ -60,6 +68,8 @@ impl Default for ColumnWidths {
             genre: 120.0,
             bpm: 64.0,
             length: 64.0,
+            rating: 80.0,
+            lighting: 72.0,
         }
     }
 }
@@ -73,6 +83,8 @@ impl ColumnWidths {
             Column::Genre => self.genre,
             Column::Bpm => self.bpm,
             Column::Length => self.length,
+            Column::Rating => self.rating,
+            Column::Lighting => self.lighting,
         }
     }
 
@@ -86,6 +98,8 @@ impl ColumnWidths {
             Column::Genre => self.genre = width,
             Column::Bpm => self.bpm = width,
             Column::Length => self.length = width,
+            Column::Rating => self.rating = width,
+            Column::Lighting => self.lighting = width,
         }
     }
 

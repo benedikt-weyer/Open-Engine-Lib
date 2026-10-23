@@ -16,7 +16,7 @@ use crate::columns::{Column, ColumnWidths};
 use crate::config::Language;
 use crate::covers::Covers;
 use crate::i18n::fill;
-use crate::model::{Library, Track};
+use crate::model::{Library, Lighting, Track};
 
 /// Height of one track row. Fixed, so only the rows in view have to be built.
 const ROW_HEIGHT: f32 = 32.0;
@@ -218,7 +218,7 @@ const HANDLE_HEIGHT: f32 = 24.0;
 fn line<'a>(
     marker: Element<'a, Message>,
     cover: Element<'a, Message>,
-    cells: [Element<'a, Message>; 6],
+    cells: [Element<'a, Message>; Column::COUNT],
     location: Element<'a, Message>,
     widths: &ColumnWidths,
     gap: impl Fn(Option<Column>) -> Element<'a, Message>,
@@ -281,6 +281,8 @@ fn header<'a>(language: Language, widths: &ColumnWidths) -> Element<'a, Message>
             heading_cell(&strings.col_genre),
             heading_cell(&strings.col_bpm),
             heading_cell(&strings.col_length),
+            heading_cell(&strings.col_rating),
+            heading_cell(&strings.col_lighting),
         ],
         heading_cell(&strings.col_location),
         widths,
@@ -367,6 +369,41 @@ fn scroll_to(y: f32) -> iced::Task<Message> {
     )
 }
 
+/// The rating as five stars, filled for the ones the track has.
+fn stars(track: &Track) -> String {
+    let filled = usize::from(track.stars());
+    format!("{}{}", "★".repeat(filled), "☆".repeat(5 - filled))
+}
+
+/// Whether SoundSwitch has lighting for the track: a filled dot for rendered, a ring for
+/// analysed only, a dash for neither. Pointing at it says in words, with the projects.
+/// (Streaming tracks have no file for SoundSwitch to know, so they get no mark.)
+fn lighting_cell<'a>(track: &'a Track, language: Language) -> Element<'a, Message> {
+    if track.streaming {
+        return Space::new().into();
+    }
+    let strings = language.strings();
+    let (mark, style, tip): (&str, fn(&Theme) -> text::Style, String) = match track.lighting {
+        Lighting::Rendered => (
+            "●",
+            text::success,
+            fill(
+                &strings.lighting_rendered,
+                &[("projects", &track.lighting_projects.join(", "))],
+            ),
+        ),
+        Lighting::Analysed => ("○", text::secondary, strings.lighting_analysed.clone()),
+        Lighting::None => ("–", text::secondary, strings.lighting_none.clone()),
+    };
+    tooltip(
+        cell(mark).style(style),
+        text(tip).size(13),
+        tooltip::Position::FollowCursor,
+    )
+    .style(container::rounded_box)
+    .into()
+}
+
 fn track_row<'a>(
     track: &'a Track,
     row_index: usize,
@@ -424,6 +461,8 @@ fn track_row<'a>(
             style(cell(&track.genre)),
             style(cell(bpm)),
             style(cell(length)),
+            style(cell(stars(track))),
+            lighting_cell(track, language),
         ],
         location,
         widths,

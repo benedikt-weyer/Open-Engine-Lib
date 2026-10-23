@@ -1443,3 +1443,178 @@ async fn diffs_a_real_library() {
         "the source itself was not touched"
     );
 }
+
+/// Ratings and SoundSwitch lighting of a real library's tracks, counted:
+/// `OPEN_ENGINE_TEST_LIBRARY=... cargo test -p open-engine-backend --test grpc ratings -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs a real library (OPEN_ENGINE_TEST_LIBRARY)"]
+async fn reads_ratings_and_soundswitch_lighting_from_a_real_library() {
+    use open_engine_api::v1::SoundSwitchState;
+    let path = std::env::var("OPEN_ENGINE_TEST_LIBRARY").expect("OPEN_ENGINE_TEST_LIBRARY");
+    let temp = TempDir::new("ratings");
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    library
+        .open_library(OpenLibraryRequest { path })
+        .await
+        .unwrap();
+
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let mut tracks = Vec::new();
+    while let Some(batch) = stream.message().await.unwrap() {
+        tracks.extend(batch.tracks);
+    }
+
+    let mut stars = std::collections::BTreeMap::new();
+    for track in &tracks {
+        *stars
+            .entry(track.rating.map(|r| (r + 10) / 20))
+            .or_insert(0) += 1;
+    }
+    println!("stars (None = no rating): {stars:?}");
+
+    let local: Vec<_> = tracks.iter().filter(|track| !track.streaming).collect();
+    let count = |state: SoundSwitchState| local.iter().filter(|t| t.soundswitch() == state).count();
+    println!(
+        "{} local tracks: lighting rendered {}, analysed only {}, not in SoundSwitch {}; streaming tracks with a state: {}",
+        local.len(),
+        count(SoundSwitchState::Rendered),
+        count(SoundSwitchState::Analysed),
+        count(SoundSwitchState::Unspecified),
+        tracks
+            .iter()
+            .filter(|t| t.streaming && t.soundswitch() != SoundSwitchState::Unspecified)
+            .count(),
+    );
+    let projects: std::collections::BTreeSet<_> = local
+        .iter()
+        .flat_map(|t| t.soundswitch_projects.iter().cloned())
+        .collect();
+    println!("projects with lighting: {projects:?}");
+    for track in local
+        .iter()
+        .filter(|t| t.soundswitch() == SoundSwitchState::Rendered)
+        .take(3)
+    {
+        println!(
+            "  rendered: {} — {} ({})",
+            track.title, track.artist, track.path
+        );
+    }
+    for track in local
+        .iter()
+        .filter(|t| t.soundswitch() == SoundSwitchState::Unspecified)
+        .take(3)
+    {
+        println!(
+            "  not in SoundSwitch: {} — {} ({})",
+            track.title, track.artist, track.path
+        );
+    }
+}
+
+/// A SoundSwitch track map record: the path, then the marker and GUID of the track's data.
+fn soundswitch_record(path: &str, guid: [u8; 16]) -> Vec<u8> {
+    let mut record = vec![1, 0, 0, 0];
+    record.extend((path.encode_utf16().count() as u32 + 1).to_le_bytes());
+    record.extend(path.encode_utf16().flat_map(u16::to_le_bytes));
+    record.extend([0, 0]);
+    record.extend([
+        0x80, 0, 0, 0, 0xf8, 0x18, 3, 0, 1, 2, 0, 0, 0, 1, 1, 0, 0, 0, 0x40, 0xe4,
+    ]);
+    record.extend([4, 0, 0, 0, 1]);
+    record.extend(guid);
+    record.extend([1, 0, 0, 0]);
+    record
+}
+
+#[tokio::test]
+async fn serves_ratings_and_whether_soundswitch_has_lighting_for_a_track() {
+    use open_engine_api::v1::SoundSwitchState;
+
+    let temp = TempDir::new("soundswitch");
+    let library_dir = fixture_library(&temp.0);
+    // Stars: three for the first track, a value from another system for the second.
+    {
+        let db = rusqlite::Connection::open(library_dir.join("Database2/m.db")).unwrap();
+        db.execute_batch(
+            "ALTER TABLE Track ADD COLUMN rating INTEGER;
+             UPDATE Track SET rating = 60 WHERE id = 1;
+             UPDATE Track SET rating = 27 WHERE id = 2;",
+        )
+        .unwrap();
+    }
+    // SoundSwitch has the drive's first track with lighting, the second only analysed.
+    let project = temp.0.join("SoundSwitch/Venue.ssproj");
+    std::fs::create_dir_all(&project).unwrap();
+    let (lit, analysed) = (
+        [
+            0x0f, 0x1b, 0x5f, 0x4c, 0xab, 0x59, 0x15, 0x47, 0xbe, 0xcc, 0x9c, 0x49, 0x87, 0x27,
+            0xc9, 0xdd,
+        ],
+        [
+            0x00, 0x47, 0xa4, 0xc0, 0xb3, 0x0f, 0x7c, 0x40, 0x87, 0x64, 0xb9, 0x76, 0xc5, 0x25,
+            0x98, 0x16,
+        ],
+    );
+    let mut map = vec![0xaa, 0xaa, 0x09, 0x55, 3, 0, 0, 0];
+    // As SoundSwitch on Windows knows the files: by drive letter and backslashes.
+    map.extend(soundswitch_record(r"F:\Music\one.flac", lit));
+    map.extend(soundswitch_record(
+        r"D:\Engine Library\..\Music\two.mp3",
+        analysed,
+    ));
+    std::fs::write(project.join("SoundSwitchTrackMap.bin"), map).unwrap();
+    std::fs::write(
+        project.join("{4C5F1B0F-59AB-4715-BECC-9C498727C9DD}.ssfile"),
+        b"x",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("{4C5F1B0F-59AB-4715-BECC-9C498727C9DD}.ssa"),
+        b"x",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("{C0A44700-0FB3-407C-8764-B976C5259816}.ssfile"),
+        b"x",
+    )
+    .unwrap();
+
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let tracks = stream.message().await.unwrap().unwrap().tracks;
+
+    assert_eq!(tracks[0].rating, Some(60));
+    assert_eq!(tracks[1].rating, Some(27));
+    assert_eq!(tracks[2].rating, None);
+
+    assert_eq!(tracks[0].soundswitch(), SoundSwitchState::Rendered);
+    assert_eq!(tracks[0].soundswitch_projects, ["Venue"]);
+    assert_eq!(tracks[1].soundswitch(), SoundSwitchState::Analysed);
+    assert!(tracks[1].soundswitch_projects.is_empty());
+    assert_eq!(
+        tracks[2].soundswitch(),
+        SoundSwitchState::Unspecified,
+        "not in SoundSwitch"
+    );
+}

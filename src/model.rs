@@ -24,6 +24,32 @@ pub struct Track {
     /// Where the audio file is on this machine: `path` resolved against the library's
     /// folder. Empty for streaming tracks, which have no file here.
     pub location: String,
+    /// The star rating, 0 to 100 with 20 to the star, if the library has one.
+    pub rating: Option<u32>,
+    /// What SoundSwitch has for the track.
+    pub lighting: Lighting,
+    /// The SoundSwitch projects that have lighting for the track.
+    pub lighting_projects: Vec<String>,
+}
+
+/// Whether SoundSwitch, the lighting software, has lighting for a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lighting {
+    /// Not in SoundSwitch, or there is no SoundSwitch data to say.
+    #[default]
+    None,
+    /// SoundSwitch analysed the track but rendered no lighting for it.
+    Analysed,
+    Rendered,
+}
+
+impl Track {
+    /// The rating as 0 to 5 stars. A rating that is not a multiple of 20 (libraries that
+    /// were imported can have any) is rounded to the nearest star.
+    pub fn stars(&self) -> u8 {
+        self.rating
+            .map_or(0, |rating| ((rating + 10) / 20).min(5) as u8)
+    }
 }
 
 /// Where a track's audio file is: the path the library records, relative to the
@@ -188,6 +214,53 @@ mod tests {
     }
 
     #[test]
+    fn a_rating_is_shown_as_stars() {
+        let stars = |rating| {
+            let mut track = Track {
+                rating,
+                ..sample_track()
+            };
+            track.rating = rating;
+            track.stars()
+        };
+        assert_eq!(stars(None), 0);
+        assert_eq!(stars(Some(0)), 0);
+        assert_eq!(stars(Some(20)), 1);
+        assert_eq!(stars(Some(60)), 3);
+        assert_eq!(stars(Some(100)), 5);
+        // Ratings from elsewhere are rounded to the nearest star, and never go past five.
+        assert_eq!(
+            [
+                stars(Some(9)),
+                stars(Some(10)),
+                stars(Some(29)),
+                stars(Some(30))
+            ],
+            [0, 1, 1, 2]
+        );
+        assert_eq!(stars(Some(255)), 5);
+    }
+
+    fn sample_track() -> Track {
+        Track {
+            id: 1,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            bpm: None,
+            length: None,
+            streaming: false,
+            album_art: None,
+            path: String::new(),
+            location: String::new(),
+            rating: None,
+            lighting: Lighting::None,
+            lighting_projects: Vec::new(),
+        }
+    }
+
+    #[test]
     fn a_tracks_location_is_its_path_resolved_against_the_library() {
         let library = "/run/media/me/DRIVE/Engine Library";
         // The usual case: the music sits next to the library folder.
@@ -223,6 +296,9 @@ mod tests {
             album_art: None,
             path: format!("../Music/{id}.flac"),
             location: String::new(),
+            rating: None,
+            lighting: Lighting::None,
+            lighting_projects: Vec::new(),
         };
         let library = Library::new(
             "/lib".into(),

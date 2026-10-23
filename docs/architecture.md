@@ -84,6 +84,23 @@ Lists are cut at 200 entries (the counts are complete). Matching is by Engine's 
 
 **Limitation:** the app does not yet change the working copy itself, so today the comparison mostly shows what someone else did to the source while the library was open. It is the way back for edits the app will make. Opening a library re-copies the working copy when the source has changed since (see "The library cache"), which would discard unsynced edits, so editing needs to decide what to do then before it is added.
 
+## Ratings and SoundSwitch lighting
+
+Two more columns in the track list.
+
+**Rating** is the track's star rating from the library: 0 to 100, 20 to the star, shown as five stars (`★★★☆☆`). Libraries that were imported from elsewhere can hold other values (14, 27, 53 ...), which are rounded to the nearest star.
+
+**Lighting** says whether SoundSwitch, the lighting software, has lighting for the track: a filled dot if it was rendered, a ring if SoundSwitch only analysed the track, a dash if the track isn't in SoundSwitch. Pointing at it says so in words and names the projects. Streaming tracks have no mark.
+
+SoundSwitch's files are not documented, so how this is read was worked out from the files on a real drive, and the central step is an **inference**:
+
+- SoundSwitch keeps projects in `<drive>/SoundSwitch/<name>.ssproj` folders. `SoundSwitchTrackMap.bin` in each lists the tracks it knows by the path of their audio file as Windows saw it (`F:\Music\a.flac`, or through `D:\Engine Library\..\Music\a.flac`), as UTF-16. After the path of an analysed track comes a marker and a GUID.
+- That GUID names the track's data in the project folder: `{GUID}.ssfile` exists for every analysed track (checked: every `.ssfile` of the real projects is named in its map).
+- Most also have `{GUID}.ssa`. These are small and compressed or encrypted, so their contents could not be read. They are **taken to be the rendered lighting** (SoundSwitch's "autoscript"), because they are made in the same moment as the `.ssfile` of a track that was given lighting and a project whose tracks were only analysed has none. If that is wrong, the dot means something else.
+- A track is matched to the library's by the path of its file relative to the drive, compared without the drive letter, with `\` read as `/`, `..` worked out and upper and lower case treated alike. Every project in the folder counts; a track has lighting if any project has an `.ssa` for it.
+
+On the drive I developed this with, 283 of 3,123 local tracks came out as rendered (all from one project), 229 as analysed only and 2,611 as not in SoundSwitch. SoundSwitch is read when a library is opened; reopen it to see changes.
+
 ## The track list
 
 Besides title, artist, album, genre, BPM and length, the list shows where each file is: the path the library records (relative to its `Engine Library` folder, usually starting with `..`) resolved against that folder, so it is a plain path such as `/run/media/you/DRIVE/House/track.flac`. It is worked out from the path alone, without asking the file system. Streaming tracks have no file here and say so. The location is the last column and takes the width the others leave; pointing at it shows the whole path, since a long one is cut off.

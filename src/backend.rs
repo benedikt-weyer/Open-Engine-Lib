@@ -21,7 +21,8 @@ use open_engine_api::v1::{
     CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest,
     GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, NextRequest,
     OpenLibraryRequest, PlayRequest, PlaybackStatus, PreviousRequest, SaveLibraryAsRequest,
-    SeekRequest, StopRequest, SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest,
+    SeekRequest, SoundSwitchState, StopRequest, SyncToSourceRequest, SyncToSourceResponse,
+    TogglePauseRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -30,7 +31,7 @@ use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 
-use crate::model::{Library, Playlist, Track};
+use crate::model::{Library, Lighting, Playlist, Track};
 use crate::waveform::{BeatGrid, Marker, Waveform};
 
 /// Overrides where to find the backend executable.
@@ -237,22 +238,32 @@ async fn load_library(
         .map_err(describe)?
         .into_inner();
     while let Some(batch) = stream.message().await.map_err(describe)? {
-        tracks.extend(batch.tracks.into_iter().map(|track| Track {
-            id: track.id,
-            title: track.title,
-            artist: track.artist,
-            album: track.album,
-            genre: track.genre,
-            bpm: track.bpm,
-            length: track.length_seconds,
-            streaming: track.streaming,
-            album_art: track.album_art_id,
-            location: if track.streaming {
-                String::new()
-            } else {
-                crate::model::location(&path, &track.path)
-            },
-            path: track.path,
+        tracks.extend(batch.tracks.into_iter().map(|track| {
+            let lighting = match track.soundswitch() {
+                SoundSwitchState::Rendered => Lighting::Rendered,
+                SoundSwitchState::Analysed => Lighting::Analysed,
+                SoundSwitchState::Unspecified => Lighting::None,
+            };
+            Track {
+                id: track.id,
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                genre: track.genre,
+                bpm: track.bpm,
+                length: track.length_seconds,
+                streaming: track.streaming,
+                album_art: track.album_art_id,
+                location: if track.streaming {
+                    String::new()
+                } else {
+                    crate::model::location(&path, &track.path)
+                },
+                rating: track.rating,
+                lighting,
+                lighting_projects: track.soundswitch_projects,
+                path: track.path,
+            }
         }));
     }
 

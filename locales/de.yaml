@@ -93,6 +93,11 @@ col_album: Album
 col_genre: Genre
 col_bpm: BPM
 col_length: Länge
+col_rating: Bewertung
+col_lighting: Licht
+lighting_rendered: "SoundSwitch-Lichtshow ist berechnet ({projects})"
+lighting_analysed: "In SoundSwitch analysiert, aber keine Lichtshow berechnet"
+lighting_none: "Nicht in SoundSwitch"
 col_location: Speicherort
 location_streaming: Streaming (keine Datei hier)
 play: Abspielen

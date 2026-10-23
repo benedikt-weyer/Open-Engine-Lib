@@ -16,6 +16,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::beatgrid::{self, Marker};
 use crate::cache::{self, DATABASE_DIR};
+use crate::soundswitch::{Lighting, SoundSwitch};
 
 const DATABASE: &str = "Database2/m.db";
 const LIBRARY_DIR: &str = "Engine Library";
@@ -74,6 +75,10 @@ pub struct Track {
     pub streaming: bool,
     /// `AlbumArt.id` of the track's cover, for `Library::album_art`.
     pub album_art: Option<u32>,
+    /// The star rating, 0 to 100 with 20 to the star, if the library has one.
+    pub rating: Option<u32>,
+    /// What SoundSwitch has for the track.
+    pub lighting: Lighting,
 }
 
 /// A playlist or playlist folder. The playlists are stored depth first in display
@@ -241,11 +246,23 @@ fn load_tracks(
     connection: &Connection,
     dir: &Path,
 ) -> rusqlite::Result<(Vec<Track>, TrackIds, TrackOrigins)> {
-    let mut statement = connection.prepare(
+    // (A library from an older version may have no ratings.)
+    let has_rating = connection
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('Track') WHERE name = 'rating'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    let rating = if has_rating { "rating" } else { "NULL" };
+    let mut statement = connection.prepare(&format!(
         "SELECT id, title, artist, album, genre, bpmAnalyzed, bpm, length, path, \
-                streamingSource, originDatabaseUuid, originTrackId, albumArtId \
-         FROM Track ORDER BY id",
-    )?;
+                streamingSource, originDatabaseUuid, originTrackId, albumArtId, {rating} \
+         FROM Track ORDER BY id"
+    ))?;
+    // SoundSwitch keeps its projects next to the library folder, on the drive.
+    let drive = dir.parent().map(Path::to_path_buf);
+    let soundswitch = drive.as_deref().map(SoundSwitch::scan);
     let mut rows = statement.query([])?;
 
     let mut tracks = Vec::new();
@@ -275,6 +292,12 @@ fn load_tracks(
             by_origin.insert((uuid, origin_id as i64), tracks.len());
         }
 
+        let file = dir.join(&relative);
+        let lighting = match (&soundswitch, &drive) {
+            (Some(soundswitch), Some(drive)) => soundswitch.lighting(drive, &file),
+            _ => Lighting::default(),
+        };
+
         tracks.push(Track {
             db_id: id,
             title,
@@ -285,12 +308,16 @@ fn load_tracks(
             length: number(7)?
                 .filter(|length| *length >= 0.0)
                 .map(|length| length as u32),
-            path: dir.join(&relative),
+            path: file,
             relative_path: relative,
             streaming: row
                 .get::<_, Option<String>>(9)?
                 .is_some_and(|source| !source.is_empty()),
             album_art: number(12)?.filter(|id| *id > 0.0).map(|id| id as u32),
+            rating: number(13)?
+                .filter(|rating| *rating >= 0.0)
+                .map(|rating| rating as u32),
+            lighting,
         });
     }
 

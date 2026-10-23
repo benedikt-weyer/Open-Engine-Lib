@@ -93,6 +93,11 @@ col_album: Album
 col_genre: Genre
 col_bpm: BPM
 col_length: Length
+col_rating: Rating
+col_lighting: Lighting
+lighting_rendered: "SoundSwitch lighting is rendered ({projects})"
+lighting_analysed: "Analysed in SoundSwitch, but no lighting is rendered"
+lighting_none: "Not in SoundSwitch"
 col_location: Location
 location_streaming: Streaming (no file here)
 play: Play

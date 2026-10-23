@@ -363,6 +363,9 @@ fn track_message(id: u32, track: &library::Track) -> api::Track {
         length_seconds: track.length,
         streaming: track.streaming,
         album_art_id: track.album_art,
+        rating: track.rating,
+        soundswitch: track.lighting.state.into(),
+        soundswitch_projects: track.lighting.projects.clone(),
         path: track.relative_path.clone(),
     }
 }

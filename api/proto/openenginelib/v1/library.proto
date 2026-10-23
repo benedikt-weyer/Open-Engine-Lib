@@ -112,10 +112,28 @@ message Track {
   // share the id. Unset if the track has none. The image may still turn out not to be
   // available, see GetAlbumArt.
   optional uint32 album_art_id = 9;
+  // The track's star rating from 0 to 100, 20 per star (so 60 is three stars). Other
+  // values are possible: libraries that were imported can have any.
+  optional uint32 rating = 11;
+  // What SoundSwitch (the lighting software, which keeps projects in the drive's
+  // `SoundSwitch` folder) has for the track. Not set if there is no SoundSwitch data for
+  // the drive or the track is not in it.
+  SoundSwitchState soundswitch = 12;
+  // The SoundSwitch projects that have lighting for the track, when it is rendered.
+  repeated string soundswitch_projects = 13;
   // The audio file as the library records it, relative to the `Engine Library`
   // folder. Unlike `id`, it stays the same across opens, so it identifies the track
   // between sessions (the library keeps it unique).
   string path = 10;
+}
+
+enum SoundSwitchState {
+  // Not in SoundSwitch, or there is no SoundSwitch data to tell.
+  SOUND_SWITCH_STATE_UNSPECIFIED = 0;
+  // SoundSwitch analysed the track but has no lighting for it.
+  SOUND_SWITCH_STATE_ANALYSED = 1;
+  // Lighting was rendered for the track.
+  SOUND_SWITCH_STATE_RENDERED = 2;
 }
 
 message GetAlbumArtRequest {

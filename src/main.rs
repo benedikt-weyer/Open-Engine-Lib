@@ -1165,6 +1165,9 @@ mod tests {
             album_art: None,
             path: format!("../Music/{}.flac", ["a", "b", "c"][id as usize]),
             location: String::new(),
+            rating: None,
+            lighting: model::Lighting::None,
+            lighting_projects: Vec::new(),
         }
     }
 
