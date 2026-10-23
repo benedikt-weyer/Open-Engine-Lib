@@ -248,7 +248,7 @@ fn changed_origins(working: &Path, source: &Path) -> u32 {
 }
 
 /// A `file:` URI for opening `path` read-only and immutable.
-fn source_uri(path: &Path) -> String {
+pub fn source_uri(path: &Path) -> String {
     let mut uri = String::from("file:");
     for byte in path.to_string_lossy().bytes() {
         match byte {

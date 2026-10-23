@@ -206,6 +206,17 @@ message GetLibrarySyncDiffRequest {
   string target_path = 1;
   // Also delete playlists and smart playlists that only the other library has.
   bool remove_missing = 2;
+  // The other library's star ratings become those of the open library, for the tracks
+  // both have.
+  bool sync_stars = 3;
+  // The other library's track paths become the open library's, as written (so they
+  // only lead to the files if both libraries are laid out the same).
+  bool sync_locations = 4;
+  // The audio files of the open library's tracks are copied to an `Engine-Tracks` folder
+  // beside the other library's `Engine Library` folder, as `Artist/Album/File` with names
+  // that exFAT accepts, and the tracks' paths there lead to the copies. Tracks the other
+  // library lacks are added to it. Replaces `sync_locations`.
+  bool copy_tracks = 5;
 }
 // Lists are cut at 200 entries, the counts are complete.
 message GetLibrarySyncDiffResponse {
@@ -219,10 +230,27 @@ message GetLibrarySyncDiffResponse {
   // Tracks of the other library whose saved origin is new or different from the open
   // library's, which replaces it.
   uint32 origins_changed = 6;
+  // Tracks that would be added to the other library (`copy_tracks`).
+  uint32 tracks_added = 7;
+  repeated TrackRef added_tracks = 8;
+  // Tracks of the other library that would change (stars, path); in the fields of a
+  // change `source_value` is what the other library has and `working_value` what it gets.
+  uint32 tracks_changed = 9;
+  repeated TrackChange changed_tracks = 10;
+  // Files that would be copied, and their size.
+  uint32 files_to_copy = 11;
+  uint64 bytes_to_copy = 12;
+  // Tracks of the open library whose file could not be found, so it is not copied.
+  uint32 files_missing = 13;
+  // Tracks whose new path another track of the other library already has: left alone.
+  uint32 location_conflicts = 14;
 }
 message SyncToLibraryRequest {
   string target_path = 1;
   bool remove_missing = 2;
+  bool sync_stars = 3;
+  bool sync_locations = 4;
+  bool copy_tracks = 5;
 }
 message SyncToLibraryResponse {
   string target_path = 1;
@@ -231,6 +259,9 @@ message SyncToLibraryResponse {
   // Where the replaced database was kept; empty if nothing needed to be written.
   string backup_path = 4;
   uint32 origins_changed = 5;
+  uint32 tracks_added = 6;
+  uint32 tracks_changed = 7;
+  uint32 files_copied = 8;
 }
 
 message CloseLibraryRequest {}

@@ -20,6 +20,7 @@ mod service;
 mod smartlist;
 mod soundswitch;
 mod sync;
+mod track_sync;
 mod waveform;
 
 use std::io::{Read, Write};

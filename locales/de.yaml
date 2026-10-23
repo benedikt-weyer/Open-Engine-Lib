@@ -178,14 +178,22 @@ libsync_failed: "Die Bibliotheken konnten nicht verglichen werden: {error}"
 libsync_back: Andere Bibliothek wählen
 libsync_summary: "Playlists: {count} würden sich ändern"
 libsync_nothing: Die Playlists sind bereits gleich.
-libsync_hint: "Die andere Bibliothek bekommt die Playlists und Smart-Playlists der geöffneten. Titel werden über ihre Herkunft zugeordnet oder über einen Dateinamen, den nur ein Titel hat. Titel und Audiodateien werden nie kopiert: Titel, die die andere Bibliothek nicht hat, fehlen in ihren Playlists."
+libsync_hint: "Die andere Bibliothek bekommt die Playlists und Smart-Playlists der geöffneten. Titel werden über ihre Herkunft zugeordnet oder über einen Dateinamen, den nur ein Titel hat. Titel, die die andere Bibliothek nicht hat, fehlen in ihren Playlists, außer die Titel werden kopiert."
 libsync_remove: Auch Playlists löschen, die nur die andere Bibliothek hat
 libsync_missing: "Titel, die die andere Bibliothek nicht hat: {count}"
 libsync_run: Playlists abgleichen
 libsync_writing: Playlists werden geschrieben…
 libsync_run_failed: "Der Abgleich ist fehlgeschlagen: {error}"
-libsync_done: "Fertig: {count} Playlists und {origins} Herkünfte geändert. Was ersetzt wurde, liegt in {backup}"
+libsync_done: "Fertig: {count} Playlists, {tracks} Titel und {origins} Herkünfte geändert, {files} Dateien kopiert. Was ersetzt wurde, liegt in {backup}"
 libsync_none_written: Es musste nichts geschrieben werden.
 path_unreachable: "Nicht erreichbar. Ist das Laufwerk angeschlossen?"
 sync_origins_summary: "Herkunft: {count} neu oder geändert"
 libsync_origins: "Herkünfte, die geschrieben werden: {count}"
+libsync_stars: Die Sterne auf die der geöffneten Bibliothek setzen
+libsync_locations: Die Orte (Pfade) mit denen der geöffneten Bibliothek überschreiben
+libsync_copy: "Die Titel in einen Ordner Engine-Tracks (Interpret/Album) neben der Bibliothek kopieren und fehlende hinzufügen"
+libsync_tracks_summary: "Titel: {added} hinzuzufügen, {changed} zu ändern"
+libsync_files: "Zu kopierende Dateien: {count} ({size})"
+libsync_files_missing: "Dateien der geöffneten Bibliothek, die nicht gefunden werden und deshalb nicht kopiert werden: {count}"
+libsync_conflicts: "Orte, die bleiben, weil ein anderer Titel den Pfad hat: {count}"
+libsync_new_track: neuer Titel

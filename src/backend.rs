@@ -546,13 +546,16 @@ pub async fn migrate_origins(mut backend: Backend) -> Result<MigrateOriginsRespo
 pub async fn library_sync_diff(
     mut backend: Backend,
     target: PathBuf,
-    remove_missing: bool,
+    options: crate::library_sync_view::Options,
 ) -> Result<Arc<GetLibrarySyncDiffResponse>, String> {
     backend
         .library
         .get_library_sync_diff(GetLibrarySyncDiffRequest {
             target_path: target.display().to_string(),
-            remove_missing,
+            remove_missing: options.remove_missing,
+            sync_stars: options.stars,
+            sync_locations: options.locations,
+            copy_tracks: options.copy_tracks,
         })
         .await
         .map(|response| Arc::new(response.into_inner()))
@@ -563,13 +566,16 @@ pub async fn library_sync_diff(
 pub async fn sync_to_library(
     mut backend: Backend,
     target: PathBuf,
-    remove_missing: bool,
+    options: crate::library_sync_view::Options,
 ) -> Result<SyncToLibraryResponse, String> {
     backend
         .library
         .sync_to_library(SyncToLibraryRequest {
             target_path: target.display().to_string(),
-            remove_missing,
+            remove_missing: options.remove_missing,
+            sync_stars: options.stars,
+            sync_locations: options.locations,
+            copy_tracks: options.copy_tracks,
         })
         .await
         .map(|response| response.into_inner())

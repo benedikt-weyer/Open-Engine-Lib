@@ -341,7 +341,12 @@ impl LibraryService for Service {
                 &library,
                 std::path::Path::new(&request.target_path),
                 &scratch,
-                request.remove_missing,
+                mirror_options(
+                    request.remove_missing,
+                    request.sync_stars,
+                    request.sync_locations,
+                    request.copy_tracks,
+                ),
             )
         })
         .await
@@ -362,7 +367,12 @@ impl LibraryService for Service {
                 &library,
                 std::path::Path::new(&request.target_path),
                 &scratch,
-                request.remove_missing,
+                mirror_options(
+                    request.remove_missing,
+                    request.sync_stars,
+                    request.sync_locations,
+                    request.copy_tracks,
+                ),
             )
         })
         .await
@@ -612,13 +622,31 @@ async fn playlists_edited(
     .map_err(edit_status)
 }
 
+fn mirror_options(
+    remove_missing: bool,
+    stars: bool,
+    locations: bool,
+    copy_tracks: bool,
+) -> mirror::Options {
+    mirror::Options {
+        remove_missing,
+        tracks: crate::track_sync::Options {
+            stars,
+            locations,
+            copy_tracks,
+        },
+    }
+}
+
 fn mirror_status(error: MirrorError) -> Status {
     match error {
         MirrorError::NotALibrary(_) => Status::not_found(error.to_string()),
         MirrorError::SameLibrary => Status::invalid_argument(error.to_string()),
         MirrorError::Busy => Status::failed_precondition(error.to_string()),
         MirrorError::Edit(error) => edit_status(error),
-        MirrorError::Io(_) | MirrorError::Open(_) => Status::internal(error.to_string()),
+        MirrorError::Io(_) | MirrorError::Open(_) | MirrorError::Database(_) => {
+            Status::internal(error.to_string())
+        }
     }
 }
 

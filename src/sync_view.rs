@@ -211,7 +211,7 @@ fn summary<'a>(diff: &'a GetSyncDiffResponse, language: Language) -> Element<'a,
 }
 
 /// "Title — Artist", or the path for a track without either.
-fn describe(track: &TrackRef) -> String {
+pub fn describe(track: &TrackRef) -> String {
     match (track.title.is_empty(), track.artist.is_empty()) {
         (false, false) => format!("{} — {}", track.title, track.artist),
         (false, true) => track.title.clone(),
@@ -268,7 +268,7 @@ fn changes<'a>(diff: &'a GetSyncDiffResponse, language: Language) -> Element<'a,
         .into()
 }
 
-fn track_change<'a>(change: &'a TrackChange) -> Element<'a, Message> {
+pub fn track_change<'a>(change: &'a TrackChange) -> Element<'a, Message> {
     let mut lines = column![
         text(format!(
             "~  {}",

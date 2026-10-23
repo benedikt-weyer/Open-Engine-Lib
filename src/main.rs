@@ -196,11 +196,11 @@ pub enum Message {
     LibrarySyncTarget(PathBuf),
     LibrarySyncDiffLoaded {
         target: PathBuf,
-        remove_missing: bool,
+        options: library_sync_view::Options,
         result: Result<Arc<open_engine_api::v1::GetLibrarySyncDiffResponse>, String>,
     },
-    /// The tick that also deletes the playlists only the other library has.
-    LibrarySyncRemove(bool),
+    /// A tick of what to sync (and so what the comparison is about) was set or cleared.
+    LibrarySyncOption(library_sync_view::Setting, bool),
     LibrarySyncStart,
     LibrarySyncFinished(Result<open_engine_api::v1::SyncToLibraryResponse, String>),
     /// Back to choosing the library.
@@ -410,7 +410,11 @@ impl State {
 
     /// Starts comparing the playlists of the open library with those of the library at
     /// `target`, for the window that syncs them.
-    fn compare_libraries(&mut self, target: PathBuf, remove_missing: bool) -> Task<Message> {
+    fn compare_libraries(
+        &mut self,
+        target: PathBuf,
+        options: library_sync_view::Options,
+    ) -> Task<Message> {
         let Some(backend) = self.backend() else {
             return Task::none();
         };
@@ -422,14 +426,14 @@ impl State {
         }
         self.library_sync = Some(LibrarySyncStage::Loading {
             target: target.clone(),
-            remove_missing,
+            options,
         });
         let answered = target.clone();
         Task::perform(
-            backend::library_sync_diff(backend, target, remove_missing),
+            backend::library_sync_diff(backend, target, options),
             move |result| Message::LibrarySyncDiffLoaded {
                 target: answered.clone(),
-                remove_missing,
+                options,
                 result,
             },
         )
@@ -1013,25 +1017,27 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             return handle(state, Message::LibrarySyncTarget(path));
         }
         Message::LibrarySyncAdded(None) => {}
-        Message::LibrarySyncTarget(target) => return state.compare_libraries(target, false),
-        Message::LibrarySyncRemove(remove_missing) => {
-            if let Some(LibrarySyncStage::Ready { target, .. }) = &state.library_sync {
-                let target = target.clone();
-                return state.compare_libraries(target, remove_missing);
+        Message::LibrarySyncTarget(target) => {
+            return state.compare_libraries(target, library_sync_view::Options::default());
+        }
+        Message::LibrarySyncOption(setting, on) => {
+            if let Some(LibrarySyncStage::Ready {
+                target, options, ..
+            }) = &state.library_sync
+            {
+                let (target, options) = (target.clone(), options.with(setting, on));
+                return state.compare_libraries(target, options);
             }
         }
         Message::LibrarySyncDiffLoaded {
             target: loaded,
-            remove_missing: loaded_remove,
+            options: loaded_options,
             result,
         } => {
             // (An answer to a comparison that was given up on is not wanted.)
-            if let Some(LibrarySyncStage::Loading {
-                target,
-                remove_missing,
-            }) = &state.library_sync
+            if let Some(LibrarySyncStage::Loading { target, options }) = &state.library_sync
                 && *target == loaded
-                && *remove_missing == loaded_remove
+                && *options == loaded_options
             {
                 state.library_sync = Some(match result {
                     Ok(diff) => {
@@ -1043,7 +1049,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                             .map(|error| error.to_string());
                         LibrarySyncStage::Ready {
                             target: loaded,
-                            remove_missing: loaded_remove,
+                            options: loaded_options,
                             diff,
                             error: None,
                         }
@@ -1058,22 +1064,21 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::LibrarySyncStart => {
             if let Some(LibrarySyncStage::Ready {
                 target,
-                remove_missing,
+                options,
                 diff,
                 ..
             }) = &state.library_sync
-                && (diff.playlists_changed > 0 || diff.origins_changed > 0)
+                && library_sync_view::has_changes(diff)
                 && let Some(backend) = state.backend()
             {
-                let (target, remove_missing, diff) =
-                    (target.clone(), *remove_missing, diff.clone());
+                let (target, options, diff) = (target.clone(), *options, diff.clone());
                 state.library_sync = Some(LibrarySyncStage::Syncing {
                     target: target.clone(),
-                    remove_missing,
+                    options,
                     diff,
                 });
                 return Task::perform(
-                    backend::sync_to_library(backend, target, remove_missing),
+                    backend::sync_to_library(backend, target, options),
                     Message::LibrarySyncFinished,
                 );
             }
@@ -1081,7 +1086,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::LibrarySyncFinished(result) => {
             if let Some(LibrarySyncStage::Syncing {
                 target,
-                remove_missing,
+                options,
                 diff,
             }) = state.library_sync.take()
             {
@@ -1089,7 +1094,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                     Ok(done) => LibrarySyncStage::Done(done),
                     Err(error) => LibrarySyncStage::Ready {
                         target,
-                        remove_missing,
+                        options,
                         diff,
                         error: Some(error),
                     },
@@ -2464,7 +2469,7 @@ mod tests {
             &mut state,
             Message::LibrarySyncDiffLoaded {
                 target: target.clone(),
-                remove_missing: false,
+                options: library_sync_view::Options::default(),
                 result: Ok(library_diff(2)),
             },
         );
@@ -2473,13 +2478,16 @@ mod tests {
         // A comparison that is under way takes its own answer, and not another's.
         state.library_sync = Some(LibrarySyncStage::Loading {
             target: target.clone(),
-            remove_missing: false,
+            options: library_sync_view::Options::default(),
         });
         let _ = handle(
             &mut state,
             Message::LibrarySyncDiffLoaded {
                 target: target.clone(),
-                remove_missing: true,
+                options: library_sync_view::Options {
+                    remove_missing: true,
+                    ..Default::default()
+                },
                 result: Ok(library_diff(9)),
             },
         );
@@ -2491,7 +2499,7 @@ mod tests {
             &mut state,
             Message::LibrarySyncDiffLoaded {
                 target: target.clone(),
-                remove_missing: false,
+                options: library_sync_view::Options::default(),
                 result: Ok(library_diff(2)),
             },
         );
@@ -2508,7 +2516,7 @@ mod tests {
         // Writing can't be closed; when it fails the differences come back with the reason.
         state.library_sync = Some(LibrarySyncStage::Syncing {
             target: target.clone(),
-            remove_missing: false,
+            options: library_sync_view::Options::default(),
             diff: library_diff(2),
         });
         let _ = handle(&mut state, Message::LibrarySyncClose);
@@ -2529,13 +2537,13 @@ mod tests {
         // A comparison that failed leads back to the choice.
         state.library_sync = Some(LibrarySyncStage::Loading {
             target: target.clone(),
-            remove_missing: false,
+            options: library_sync_view::Options::default(),
         });
         let _ = handle(
             &mut state,
             Message::LibrarySyncDiffLoaded {
                 target,
-                remove_missing: false,
+                options: library_sync_view::Options::default(),
                 result: Err("not a library".into()),
             },
         );
