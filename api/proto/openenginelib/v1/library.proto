@@ -71,6 +71,13 @@ service LibraryService {
   // in it. Its tracks stay in the library. Playlist ids after it change. Errors as for
   // `RenamePlaylist`.
   rpc DeletePlaylist(DeletePlaylistRequest) returns (PlaylistsEdited);
+  // Saves the location of each track's file as its origin in Open Engine Lib's own
+  // database, for the tracks that have no origin saved yet (one that is saved is kept).
+  // Tracks without a file here (streaming) or that don't say where they came from are
+  // skipped. Nothing in the Engine library changes.
+  // Errors: FAILED_PRECONDITION if no library is open, INTERNAL if the database can't
+  // be opened or written.
+  rpc MigrateOrigins(MigrateOriginsRequest) returns (MigrateOriginsResponse);
   // Closes the library and stops playback. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
@@ -163,6 +170,23 @@ message PlaylistsEdited {
   repeated Playlist playlists = 2;
 }
 
+message MigrateOriginsRequest {}
+message MigrateOriginsResponse {
+  // Origins that were new.
+  uint32 saved = 1;
+  // Tracks that already had an origin, which was kept.
+  uint32 kept = 2;
+  // Tracks left out: streaming ones and ones that don't say where they came from.
+  uint32 skipped = 3;
+  // The origin of every track of the library that has one now, new or not.
+  repeated TrackOrigin origins = 4;
+}
+message TrackOrigin {
+  // `Track.id`.
+  uint32 track_id = 1;
+  string origin = 2;
+}
+
 message CloseLibraryRequest {}
 message CloseLibraryResponse {}
 
@@ -202,6 +226,10 @@ message Track {
   // folder. Unlike `id`, it stays the same across opens, so it identifies the track
   // between sessions (the library keeps it unique).
   string path = 10;
+  // Where the track's file was when its origin was saved (`MigrateOrigins`), kept in
+  // Open Engine Lib's own database and shared by all libraries the track is in. Not set
+  // if none was saved.
+  optional string origin = 14;
 }
 
 enum SoundSwitchState {

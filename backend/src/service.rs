@@ -16,6 +16,7 @@ use tonic::{Request, Response, Status};
 
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, EditError, Library, OpenError};
+use crate::origins::Origins;
 use crate::player::Start;
 use crate::save::{self, SaveError};
 use crate::smartlist::Rules;
@@ -57,14 +58,21 @@ struct Shared {
     engine: Engine,
     /// Where copies of the libraries' databases are kept.
     cache_root: PathBuf,
+    /// Open Engine Lib's own database of origins; `None` if it couldn't be opened (the
+    /// reason was printed), which leaves the origins out.
+    origins: Option<Origins>,
 }
 
 #[derive(Clone)]
 pub struct Service(Arc<Shared>);
 
 impl Service {
-    pub fn new(engine: Engine, cache_root: PathBuf) -> Self {
+    pub fn new(engine: Engine, cache_root: PathBuf, origins: PathBuf) -> Self {
+        let origins = Origins::open(&origins)
+            .map_err(|error| eprintln!("open-engine-backend: no origins: {error}"))
+            .ok();
         Self(Arc::new(Shared {
+            origins,
             library: RwLock::new(None),
             waveforms: Mutex::new(WaveformCache::default()),
             engine,
@@ -285,6 +293,54 @@ impl LibraryService for Service {
         .await
     }
 
+    async fn migrate_origins(
+        &self,
+        _: Request<api::MigrateOriginsRequest>,
+    ) -> Result<Response<api::MigrateOriginsResponse>, Status> {
+        let library = self.library()?;
+        let shared = Arc::clone(&self.0);
+        // Reads and writes a file: not on the async threads.
+        tokio::task::spawn_blocking(move || {
+            let origins = shared
+                .origins
+                .as_ref()
+                .ok_or_else(|| Status::internal("the origin database could not be opened"))?;
+            let internal = |error: rusqlite::Error| Status::internal(error.to_string());
+
+            let locations = library.locations();
+            let new = origins
+                .save_missing(
+                    &locations
+                        .iter()
+                        .map(|(_, key, location)| (key.clone(), location.clone()))
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(internal)?;
+            let saved = origins.all().map_err(internal)?;
+            let known: Vec<api::TrackOrigin> = library
+                .tracks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, track)| {
+                    let origin = saved.get(track.origin_key.as_ref()?)?;
+                    Some(api::TrackOrigin {
+                        track_id: index as u32,
+                        origin: origin.clone(),
+                    })
+                })
+                .collect();
+            Ok(api::MigrateOriginsResponse {
+                saved: new as u32,
+                kept: (locations.len() - new) as u32,
+                skipped: (library.tracks.len() - locations.len()) as u32,
+                origins: known,
+            })
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map(Response::new)
+    }
+
     async fn close_library(
         &self,
         _: Request<api::CloseLibraryRequest>,
@@ -301,8 +357,19 @@ impl LibraryService for Service {
     ) -> Result<Response<Self::ListTracksStream>, Status> {
         let library = self.library()?;
         let (sender, receiver) = mpsc::channel(4);
+        let shared = Arc::clone(&self.0);
 
         tokio::spawn(async move {
+            // (Read off the async threads; a database that can't be read just has none.)
+            let origins = tokio::task::spawn_blocking(move || {
+                shared
+                    .origins
+                    .as_ref()
+                    .and_then(|origins| origins.all().ok())
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
             for (batch, tracks) in library.tracks.chunks(TRACKS_PER_BATCH).enumerate() {
                 let first = batch * TRACKS_PER_BATCH;
                 let tracks = tracks
@@ -310,7 +377,12 @@ impl LibraryService for Service {
                     .enumerate()
                     .map(|(offset, track)| {
                         let id = first + offset;
-                        track_message(id as u32, track, library.rating(id))
+                        let origin = track
+                            .origin_key
+                            .as_ref()
+                            .and_then(|key| origins.get(key))
+                            .cloned();
+                        track_message(id as u32, track, library.rating(id), origin)
                     })
                     .collect();
                 if sender.send(Ok(api::TrackBatch { tracks })).await.is_err() {
@@ -526,7 +598,12 @@ fn edit_status(error: EditError) -> Status {
     }
 }
 
-fn track_message(id: u32, track: &library::Track, rating: Option<u32>) -> api::Track {
+fn track_message(
+    id: u32,
+    track: &library::Track,
+    rating: Option<u32>,
+    origin: Option<String>,
+) -> api::Track {
     api::Track {
         id,
         title: track.title.clone(),
@@ -541,6 +618,7 @@ fn track_message(id: u32, track: &library::Track, rating: Option<u32>) -> api::T
         soundswitch: track.lighting.state.into(),
         soundswitch_projects: track.lighting.projects.clone(),
         path: track.relative_path.clone(),
+        origin,
     }
 }
 

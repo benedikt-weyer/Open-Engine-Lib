@@ -35,7 +35,7 @@ use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, Waveform
 use covers::Covers;
 use drives::Drive;
 use i18n::fill;
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text, tooltip};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use menubar::MenuItem;
 use model::Library;
@@ -186,6 +186,10 @@ pub enum Message {
     SmartSave,
     SmartCancel,
     SmartSaved(Result<backend::SmartPlaylistEdited, String>),
+
+    /// The button that saves the location of every track as its origin.
+    MigrateOrigins,
+    OriginsMigrated(Result<open_engine_api::v1::MigrateOriginsResponse, String>),
 
     /// The button for a new playlist.
     PlaylistNew,
@@ -887,6 +891,32 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
         },
 
+        Message::MigrateOrigins => {
+            if matches!(state.library, LibraryState::Open(_))
+                && let Some(backend) = state.backend()
+            {
+                return Task::perform(backend::migrate_origins(backend), Message::OriginsMigrated);
+            }
+        }
+        Message::OriginsMigrated(result) => match result {
+            Ok(done) => {
+                state.backend_error = None;
+                let strings = state.config.effective().language.strings();
+                if let LibraryState::Open(browser) = &mut state.library {
+                    browser.set_origins(done.origins.into_iter().map(|o| (o.track_id, o.origin)));
+                    browser.set_origin_notice(fill(
+                        &strings.origin_migrated,
+                        &[
+                            ("saved", &done.saved),
+                            ("kept", &done.kept),
+                            ("skipped", &done.skipped),
+                        ],
+                    ));
+                }
+            }
+            Err(error) => state.backend_error = Some(error),
+        },
+
         Message::PlaylistNew => {
             if matches!(state.library, LibraryState::Open(_)) {
                 state.playlist_dialog = Some(playlist_dialog::Dialog::create());
@@ -1365,25 +1395,37 @@ fn open_library<'a>(
     let strings = language.strings();
     let library = &browser.library;
 
+    let mut summary = column![
+        text(fill(
+            &strings.library_summary,
+            &[
+                ("path", &library.path),
+                ("tracks", &library.tracks.len()),
+                ("playlists", &library.playlists.len()),
+            ],
+        )),
+        text(fill(
+            &strings.library_cache,
+            &[("path", &library.cache_path)],
+        ))
+        .size(14)
+        .style(text::secondary),
+    ]
+    .spacing(2)
+    .width(Fill);
+    if let Some(notice) = browser.origin_notice() {
+        summary = summary.push(text(notice).size(14).style(text::success));
+    }
+
     let header = row![
-        column![
-            text(fill(
-                &strings.library_summary,
-                &[
-                    ("path", &library.path),
-                    ("tracks", &library.tracks.len()),
-                    ("playlists", &library.playlists.len()),
-                ],
-            )),
-            text(fill(
-                &strings.library_cache,
-                &[("path", &library.cache_path)],
-            ))
-            .size(14)
-            .style(text::secondary),
-        ]
-        .spacing(2)
-        .width(Fill),
+        summary,
+        // Saves where each track's file is as its origin (only the origin database changes).
+        tooltip(
+            button(text(&strings.origin_migrate)).on_press(Message::MigrateOrigins),
+            text(&strings.origin_migrate_tip).size(13),
+            tooltip::Position::Bottom,
+        )
+        .style(container::rounded_box),
         // Not while the library is being saved: it is in the middle of moving.
         button(text(&strings.close_library))
             .on_press_maybe(state.saving.is_none().then_some(Message::CloseLibrary)),
@@ -1508,6 +1550,7 @@ mod tests {
             rating: None,
             lighting: model::Lighting::None,
             lighting_projects: Vec::new(),
+            origin: None,
         }
     }
 
@@ -2114,6 +2157,41 @@ mod tests {
             })),
         );
         assert_eq!(browser(&state).source, Source::Collection);
+    }
+
+    #[test]
+    fn saved_origins_are_shown_and_the_result_is_told() {
+        let mut state = state();
+        assert_eq!(
+            browser(&state).origin(&browser(&state).library.tracks[0]),
+            None
+        );
+
+        let _ = handle(
+            &mut state,
+            Message::OriginsMigrated(Ok(open_engine_api::v1::MigrateOriginsResponse {
+                saved: 2,
+                kept: 0,
+                skipped: 1,
+                origins: vec![open_engine_api::v1::TrackOrigin {
+                    track_id: 1,
+                    origin: "/music/b.flac".into(),
+                }],
+            })),
+        );
+        let open = browser(&state);
+        assert_eq!(open.origin(&open.library.tracks[1]), Some("/music/b.flac"));
+        assert_eq!(open.origin(&open.library.tracks[0]), None);
+        assert_eq!(
+            open.origin_notice(),
+            Some("Origins saved: 2 new, 0 already known, 1 without a file here.")
+        );
+
+        let _ = handle(
+            &mut state,
+            Message::OriginsMigrated(Err("no database".into())),
+        );
+        assert_eq!(state.backend_error.as_deref(), Some("no database"));
     }
 
     #[test]

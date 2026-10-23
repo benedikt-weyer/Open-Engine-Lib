@@ -161,3 +161,8 @@ playlist_delete_question: "Delete “{name}”?"
 playlist_delete_inside: "The playlists inside it are deleted too: {count}."
 playlist_delete_note: "Its tracks stay in the library. The source is only changed when you sync, and syncing keeps a backup."
 playlist_failed: "Could not change the playlists: {error}"
+col_origin: Origin
+origin_migrate: Save locations as origins
+origin_migrate_tip: "Saves where each track's file is now as its origin, for tracks that have none yet. Origins are kept in Open Engine Lib's own database, not in the Engine library."
+origin_migrated: "Origins saved: {saved} new, {kept} already known, {skipped} without a file here."
+origin_none: Not saved

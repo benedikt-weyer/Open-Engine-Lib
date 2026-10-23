@@ -20,10 +20,11 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
     GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest, GetSyncDiffResponse,
-    GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, NextRequest, OpenLibraryRequest,
-    PlayRequest, PlaybackStatus, PreviousRequest, RenamePlaylistRequest, SaveLibraryAsRequest,
-    SeekRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest, SyncToSourceRequest,
-    SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
+    GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest,
+    MigrateOriginsResponse, NextRequest, OpenLibraryRequest, PlayRequest, PlaybackStatus,
+    PreviousRequest, RenamePlaylistRequest, SaveLibraryAsRequest, SeekRequest, SetRatingRequest,
+    SmartRules, SoundSwitchState, StopRequest, SyncToSourceRequest, SyncToSourceResponse,
+    TogglePauseRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -263,6 +264,7 @@ async fn load_library(
                 rating: track.rating,
                 lighting,
                 lighting_projects: track.soundswitch_projects,
+                origin: track.origin,
                 path: track.path,
             }
         }));
@@ -525,6 +527,16 @@ pub async fn set_rating(mut backend: Backend, track_id: u32, rating: u32) -> Res
         .set_rating(SetRatingRequest { track_id, rating })
         .await
         .map(|_| ())
+        .map_err(describe)
+}
+
+/// Saves the location of each track's file as its origin, for the tracks that have none.
+pub async fn migrate_origins(mut backend: Backend) -> Result<MigrateOriginsResponse, String> {
+    backend
+        .library
+        .migrate_origins(MigrateOriginsRequest {})
+        .await
+        .map(|response| response.into_inner())
         .map_err(describe)
 }
 

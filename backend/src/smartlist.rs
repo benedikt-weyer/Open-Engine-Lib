@@ -402,6 +402,7 @@ mod tests {
             length: None,
             relative_path: String::new(),
             path: PathBuf::new(),
+            origin_key: None,
             streaming: false,
             album_art: None,
             rating: None,

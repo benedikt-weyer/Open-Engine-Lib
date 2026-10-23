@@ -162,3 +162,9 @@ The backend never works on a library in place: it may sit on a removable drive, 
 - `serves_waveforms_from_a_real_library` (ignored, silent) fetches the waveforms of a real library's first tracks and reports timings, the grid's tempo against the library's, and where the kick onsets fall relative to the beats.
 - `plays_from_a_real_library` in the same file is ignored by default. It opens a real library and plays a track through the real audio device (it is audible):
   `OPEN_ENGINE_TEST_LIBRARY=/run/media/you/DRIVE cargo test -p open-engine-backend --test grpc -- --ignored --nocapture`
+
+## Open Engine Lib's own database
+
+The Engine libraries are only edited in a working copy (and written back by syncing). Things that are Open Engine Lib's own live in `open-engine-lib.db`, a SQLite file in the user data dir (`$OPEN_ENGINE_LIB_DATA` overrides the folder), which only the backend opens. It has one table so far, `Origin(databaseUuid, trackId, origin, savedAt)`, with the key `(databaseUuid, trackId)` being the track's `(originDatabaseUuid, originTrackId)` in Engine's database. That pair is the same in every library a track was copied to, so an origin saved from the PC's library is shown for the same track on the stick (as long as Engine kept the pair when copying, which has not been checked).
+
+`MigrateOrigins` saves the location of the file of every track of the open library (streaming tracks and tracks without an origin pair are skipped) as its origin, but only for tracks that have none: a saved origin is never replaced. `ListTracks` gives each track's origin, and the track list shows it in its Origin column.

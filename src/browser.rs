@@ -73,6 +73,15 @@ impl Change {
     }
 }
 
+/// Origins saved since the library was fetched.
+#[derive(Default)]
+struct SavedOrigins {
+    /// By track id.
+    by_track: HashMap<u32, String>,
+    /// What the last saving did, in words.
+    notice: Option<String>,
+}
+
 pub struct Browser {
     pub library: Arc<Library>,
     pub source: Source,
@@ -82,6 +91,8 @@ pub struct Browser {
     /// Ratings set since the library was fetched, by track id. (The library is shared
     /// and not changed; the backend has these too.)
     ratings: HashMap<u32, u32>,
+    /// The origins saved since the library was fetched (boxed to keep `Browser` small).
+    origins: Box<SavedOrigins>,
     /// Playlist folders that are opened up in the tree.
     expanded: HashSet<usize>,
     scroll: f32,
@@ -104,6 +115,29 @@ impl Browser {
         };
     }
 
+    /// Where the file of `track` was when its origin was saved.
+    pub fn origin<'a>(&'a self, track: &'a Track) -> Option<&'a str> {
+        self.origins
+            .by_track
+            .get(&track.id)
+            .or(track.origin.as_ref())
+            .map(String::as_str)
+    }
+
+    /// Takes the origins the backend now has.
+    pub fn set_origins(&mut self, origins: impl IntoIterator<Item = (u32, String)>) {
+        self.origins.by_track.extend(origins);
+    }
+
+    /// What the last saving of origins did, in words.
+    pub fn origin_notice(&self) -> Option<&str> {
+        self.origins.notice.as_deref()
+    }
+
+    pub fn set_origin_notice(&mut self, notice: String) {
+        self.origins.notice = Some(notice);
+    }
+
     pub fn new(library: Arc<Library>) -> Self {
         let all = (0..library.tracks.len()).collect();
         Self {
@@ -112,6 +146,7 @@ impl Browser {
             selected: None,
             all,
             ratings: HashMap::new(),
+            origins: Box::default(),
             expanded: HashSet::new(),
             scroll: 0.0,
             viewport_height: MIN_VIEWPORT,
@@ -447,6 +482,7 @@ fn header<'a>(language: Language, widths: &ColumnWidths) -> Element<'a, Message>
             heading_cell(&strings.col_length),
             heading_cell(&strings.col_rating),
             heading_cell(&strings.col_lighting),
+            heading_cell(&strings.col_origin),
         ],
         heading_cell(&strings.col_location),
         widths,
@@ -498,6 +534,7 @@ pub fn tracks<'a>(
             row_index,
             RowState {
                 selected: browser.selected == Some(row_index),
+                origin: browser.origin(track),
                 playing: playing == Some(row_index),
                 stars: stars_of(browser.rating(track.id)),
             },
@@ -588,9 +625,27 @@ fn lighting_cell<'a>(track: &'a Track, language: Language) -> Element<'a, Messag
     .into()
 }
 
+/// Where the track came from, as saved; pointing at it shows all of a long path.
+fn origin_cell<'a>(origin: Option<&'a str>, language: Language) -> Element<'a, Message> {
+    match origin {
+        Some(origin) => tooltip(
+            cell(origin),
+            text(origin).size(13),
+            tooltip::Position::FollowCursor,
+        )
+        .style(container::rounded_box)
+        .into(),
+        None => cell(&language.strings().origin_none)
+            .style(text::secondary)
+            .into(),
+    }
+}
+
 /// What a row shows besides its track.
-struct RowState {
+struct RowState<'a> {
     selected: bool,
+    /// Where the track's file was when its origin was saved.
+    origin: Option<&'a str>,
     playing: bool,
     /// The track's rating as 0 to 5 stars.
     stars: u8,
@@ -599,13 +654,14 @@ struct RowState {
 fn track_row<'a>(
     track: &'a Track,
     row_index: usize,
-    state: RowState,
+    state: RowState<'a>,
     cover: Option<&Handle>,
     widths: &ColumnWidths,
     language: Language,
 ) -> Element<'a, Message> {
     let RowState {
         selected,
+        origin,
         playing,
         stars,
     } = state;
@@ -659,6 +715,7 @@ fn track_row<'a>(
             style(cell(length)),
             stars_cell(track, stars, track.streaming),
             lighting_cell(track, language),
+            origin_cell(origin, language),
         ],
         location,
         widths,

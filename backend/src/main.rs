@@ -12,6 +12,7 @@ mod beatgrid;
 mod cache;
 mod engine;
 mod library;
+mod origins;
 mod player;
 mod save;
 mod service;
@@ -84,7 +85,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
 
-    let service = service::Service::new(engine::Engine::spawn(), cache::default_root());
+    let service = service::Service::new(
+        engine::Engine::spawn(),
+        cache::default_root(),
+        origins::default_path(),
+    );
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
     // The UI holds our stdin open for as long as it lives.

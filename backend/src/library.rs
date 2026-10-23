@@ -117,6 +117,9 @@ pub struct Track {
     pub relative_path: String,
     /// Absolute-ish path to the audio file (the library's relative path joined onto its folder).
     pub path: PathBuf,
+    /// `(originDatabaseUuid, originTrackId)`: where the track came from, which is the same
+    /// in every library it was copied to. Not set if the library doesn't say.
+    pub origin_key: Option<(String, i64)>,
     /// Streaming tracks (e.g. TIDAL) only exist on the player, never as a file here.
     pub streaming: bool,
     /// `AlbumArt.id` of the track's cover, for `Library::album_art`.
@@ -489,6 +492,21 @@ impl Library {
         Ok(())
     }
 
+    /// For each track that has a file here and says where it came from: its index in
+    /// `tracks`, that origin and the file's location, as a plain path (`..` resolved without
+    /// asking the file system, so it also works for a drive that is gone).
+    pub fn locations(&self) -> Vec<(usize, (String, i64), String)> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| !track.streaming)
+            .filter_map(|(index, track)| {
+                let key = track.origin_key.clone()?;
+                Some((index, key, resolve(&track.path).display().to_string()))
+            })
+            .collect()
+    }
+
     /// The star rating of the track at `index` in `tracks`, 0 to 100, as it is now.
     pub fn rating(&self, index: usize) -> Option<u32> {
         let set = self
@@ -618,6 +636,22 @@ fn locate(path: &Path) -> Option<PathBuf> {
         .find(|dir| dir.join(DATABASE).is_file())
 }
 
+/// `path` with its `.` and `..` parts resolved by the text alone.
+fn resolve(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
+}
+
 type TrackIds = HashMap<i64, usize>;
 type TrackOrigins = HashMap<(String, i64), usize>;
 
@@ -667,8 +701,12 @@ fn load_tracks(
             .or(number(6)?.filter(|bpm| *bpm > 0.0));
 
         by_id.insert(id, tracks.len());
-        if let (Some(uuid), Some(origin_id)) = (row.get::<_, Option<String>>(10)?, number(11)?) {
-            by_origin.insert((uuid, origin_id as i64), tracks.len());
+        let origin_key = match (row.get::<_, Option<String>>(10)?, number(11)?) {
+            (Some(uuid), Some(origin_id)) if !uuid.is_empty() => Some((uuid, origin_id as i64)),
+            _ => None,
+        };
+        if let Some(key) = &origin_key {
+            by_origin.insert(key.clone(), tracks.len());
         }
 
         let file = dir.join(&relative);
@@ -689,6 +727,7 @@ fn load_tracks(
                 .map(|length| length as u32),
             path: file,
             relative_path: relative,
+            origin_key,
             streaming: row
                 .get::<_, Option<String>>(9)?
                 .is_some_and(|source| !source.is_empty()),
@@ -1105,6 +1144,24 @@ mod tests {
         let mut both = chain_order(&[(1, 0), (2, 0)]);
         both.sort();
         assert_eq!(both, [1, 2]);
+    }
+
+    #[test]
+    fn locations_are_the_files_with_their_origin() {
+        let library = Library::load(
+            database(),
+            PathBuf::from("/lib/Engine Library"),
+            PathBuf::from("/cache"),
+        )
+        .unwrap();
+        assert_eq!(
+            library.locations(),
+            [
+                (0, ("db".to_string(), 1), "/lib/Music/one.flac".to_string()),
+                (1, ("db".to_string(), 2), "/lib/Music/two.mp3".to_string()),
+            ],
+            "the streaming track has no file here"
+        );
     }
 
     #[test]

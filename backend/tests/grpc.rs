@@ -13,8 +13,9 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     CloseLibraryRequest, CreateSmartPlaylistRequest, GetAlbumArtRequest, GetInfoRequest,
     GetSyncDiffRequest, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest,
-    OpenLibraryRequest, PlayRequest, PlaybackErrorKind, PlaybackState, SaveLibraryAsRequest,
-    SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest,
+    MigrateOriginsRequest, OpenLibraryRequest, PlayRequest, PlaybackErrorKind, PlaybackState,
+    SaveLibraryAsRequest, SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest,
+    UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -79,6 +80,8 @@ fn start(cache: &Path) -> Running {
     let mut child = Command::new(env!("CARGO_BIN_EXE_open-engine-backend"))
         .env(TOKEN_ENV, TOKEN)
         .env("OPEN_ENGINE_LIB_CACHE", cache)
+        // Beside the cache, so that tests don't touch the user's own origins.
+        .env("OPEN_ENGINE_LIB_DATA", cache.with_file_name("origins-data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -480,6 +483,89 @@ async fn adds_and_changes_smart_playlists() {
         ),
         Code::NotFound
     );
+}
+
+#[tokio::test]
+async fn remembers_where_tracks_were_in_its_own_database() {
+    let temp = TempDir::new("origins");
+    let library_dir = fixture_library(&temp.0);
+    let running = start(&temp.0.join("cache"));
+    let first = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(first, with_token as fn(_) -> _));
+    assert_eq!(
+        code(library.migrate_origins(MigrateOriginsRequest {}).await),
+        Code::FailedPrecondition,
+        "no library is open"
+    );
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+
+    let origins = |tracks: Vec<open_engine_api::v1::Track>| -> Vec<Option<String>> {
+        tracks.into_iter().map(|track| track.origin).collect()
+    };
+    let list = |mut library: LibraryServiceClient<Connection>| async move {
+        let mut stream = library
+            .list_tracks(ListTracksRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        let mut tracks = Vec::new();
+        while let Some(batch) = stream.message().await.unwrap() {
+            tracks.extend(batch.tracks);
+        }
+        tracks
+    };
+    assert_eq!(origins(list(library.clone()).await), [None, None, None]);
+
+    // Tracks 1 and 2 have files here; 3 is a streaming track.
+    let done = library
+        .migrate_origins(MigrateOriginsRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((done.saved, done.kept, done.skipped), (2, 0, 1));
+    let music = library_dir.parent().unwrap().join("Music");
+    let one = music.join("one.flac").display().to_string();
+    let two = music.join("two.mp3").display().to_string();
+    assert_eq!(
+        done.origins
+            .iter()
+            .map(|origin| (origin.track_id, origin.origin.as_str()))
+            .collect::<Vec<_>>(),
+        [(0, one.as_str()), (1, two.as_str())]
+    );
+    assert_eq!(
+        origins(list(library.clone()).await),
+        [Some(one.clone()), Some(two.clone()), None]
+    );
+
+    // Again: nothing is new, and what is saved is kept.
+    let again = library
+        .migrate_origins(MigrateOriginsRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((again.saved, again.kept, again.skipped), (0, 2, 1));
+
+    // The backend can be restarted and still knows.
+    drop(library);
+    drop(running);
+    let running = start(&temp.0.join("cache"));
+    let second = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(second, with_token as fn(_) -> _));
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(origins(list(library).await), [Some(one), Some(two), None]);
 }
 
 #[tokio::test]

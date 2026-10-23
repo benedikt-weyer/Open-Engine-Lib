@@ -161,3 +161,8 @@ playlist_delete_question: "„{name}“ löschen?"
 playlist_delete_inside: "Die Playlists darin werden mit gelöscht: {count}."
 playlist_delete_note: "Die Titel bleiben in der Bibliothek. Die Quelle wird erst beim Abgleich geändert, und dabei wird eine Sicherung angelegt."
 playlist_failed: "Die Playlists konnten nicht geändert werden: {error}"
+col_origin: Herkunft
+origin_migrate: Orte als Herkunft speichern
+origin_migrate_tip: "Speichert den aktuellen Ort der Datei jedes Titels als Herkunft, wenn noch keine gespeichert ist. Die Herkunft liegt in der eigenen Datenbank von Open Engine Lib, nicht in der Engine-Bibliothek."
+origin_migrated: "Herkunft gespeichert: {saved} neu, {kept} schon bekannt, {skipped} ohne Datei hier."
+origin_none: Nicht gespeichert

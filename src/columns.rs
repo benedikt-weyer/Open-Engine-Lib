@@ -27,11 +27,12 @@ pub enum Column {
     Length,
     Rating,
     Lighting,
+    Origin,
 }
 
 impl Column {
     /// How many there are.
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
     /// In the order they are shown.
     pub const ALL: [Column; Column::COUNT] = [
         Column::Title,
@@ -42,6 +43,7 @@ impl Column {
         Column::Length,
         Column::Rating,
         Column::Lighting,
+        Column::Origin,
     ];
 }
 
@@ -57,6 +59,7 @@ pub struct ColumnWidths {
     length: f32,
     rating: f32,
     lighting: f32,
+    origin: f32,
 }
 
 impl Default for ColumnWidths {
@@ -70,6 +73,7 @@ impl Default for ColumnWidths {
             length: 64.0,
             rating: 80.0,
             lighting: 72.0,
+            origin: 260.0,
         }
     }
 }
@@ -85,6 +89,7 @@ impl ColumnWidths {
             Column::Length => self.length,
             Column::Rating => self.rating,
             Column::Lighting => self.lighting,
+            Column::Origin => self.origin,
         }
     }
 
@@ -100,6 +105,7 @@ impl ColumnWidths {
             Column::Length => self.length = width,
             Column::Rating => self.rating = width,
             Column::Lighting => self.lighting = width,
+            Column::Origin => self.origin = width,
         }
     }
 
