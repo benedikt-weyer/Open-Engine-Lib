@@ -17,7 +17,7 @@ use crate::columns::{Column, ColumnWidths};
 use crate::config::Language;
 use crate::covers::Covers;
 use crate::i18n::fill;
-use crate::model::{Library, Lighting, Track, stars_of};
+use crate::model::{Library, Lighting, Playlist, Track, stars_of};
 
 /// Height of one track row. Fixed, so only the rows in view have to be built.
 const ROW_HEIGHT: f32 = 32.0;
@@ -125,6 +125,29 @@ impl Browser {
         }
     }
 
+    /// Takes the playlists as they are after a smart playlist was added or changed, and
+    /// shows `show`, that one. The folders that were open stay open.
+    pub fn replace_playlists(&mut self, playlists: Vec<Playlist>, show: usize) {
+        let old = &self.library;
+        let open: Vec<Vec<String>> = self
+            .expanded
+            .iter()
+            .map(|&index| old.playlist_path(index))
+            .collect();
+        let library = Arc::new(old.with_playlists(playlists));
+        self.expanded = open
+            .iter()
+            .filter_map(|path| library.find_playlist(path))
+            .collect();
+        if show < library.playlists.len() {
+            self.expand(&library.playlist_chain(show));
+            self.show(Source::Playlist(show));
+        } else {
+            self.show(Source::Collection);
+        }
+        self.library = library;
+    }
+
     /// Scrolls the track list so that `row` is near its top.
     pub fn reveal(&mut self, row: usize) -> iced::Task<Message> {
         let y = row.saturating_sub(REVEAL_MARGIN) as f32 * ROW_HEIGHT;
@@ -215,21 +238,33 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
             );
         }
         label = label.push(text(&playlist.title));
-        list = list.push(
-            row![
-                Space::new().width(playlist.depth as f32 * INDENT),
-                toggle,
-                button(label)
-                    .width(Fill)
-                    .style(if selected {
-                        button::primary
-                    } else {
-                        button::text
-                    })
-                    .on_press(Message::ShowPlaylist(index)),
-            ]
-            .align_y(iced::Center),
-        );
+        let mut line = row![
+            Space::new().width(playlist.depth as f32 * INDENT),
+            toggle,
+            button(label)
+                .width(Fill)
+                .style(if selected {
+                    button::primary
+                } else {
+                    button::text
+                })
+                .on_press(Message::ShowPlaylist(index)),
+        ]
+        .align_y(iced::Center);
+        if playlist.is_smart {
+            line = line.push(
+                tooltip(
+                    button(text("✎"))
+                        .padding([4, 8])
+                        .style(button::text)
+                        .on_press(Message::SmartEdit(index)),
+                    text(&language.strings().smart_edit),
+                    tooltip::Position::Right,
+                )
+                .style(container::rounded_box),
+            );
+        }
+        list = list.push(line);
     }
 
     scrollable(list).width(Fill).height(Fill).into()

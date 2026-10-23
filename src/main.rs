@@ -18,6 +18,7 @@ mod recent;
 mod session;
 mod settings;
 mod sidebar;
+mod smart_editor;
 mod sync_view;
 mod waveform;
 
@@ -133,6 +134,8 @@ struct State {
     delay_draft: Option<i32>,
     /// The window comparing the working copy with the source, while it is open.
     sync: Option<SyncStage>,
+    /// The window for adding or changing a smart playlist, while it is open.
+    smart: Option<smart_editor::Editor>,
     /// Where the library is being saved to, and why the last save failed.
     saving: Option<PathBuf>,
     save_error: Option<String>,
@@ -171,6 +174,15 @@ pub enum Message {
     SyncStart,
     SyncFinished(Result<open_engine_api::v1::SyncToSourceResponse, String>),
     SyncClose,
+
+    /// The button for a new smart playlist.
+    SmartNew,
+    /// The edit button of the smart playlist at this index.
+    SmartEdit(usize),
+    SmartEditor(smart_editor::Event),
+    SmartSave,
+    SmartCancel,
+    SmartSaved(Result<backend::SmartPlaylistEdited, String>),
 
     /// A File menu entry was picked.
     MenuSelected(MenuItem),
@@ -268,6 +280,7 @@ impl State {
             gain_draft: None,
             delay_draft: None,
             sync: None,
+            smart: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::discover(),
@@ -756,6 +769,97 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 state.sync = None;
             }
         }
+        Message::SmartNew | Message::SmartEdit(_)
+            if state.saving.is_some() || state.sync.is_some() || state.smart.is_some() => {}
+        Message::SmartNew => {
+            if matches!(state.library, LibraryState::Open(_)) {
+                state.smart = Some(smart_editor::Editor::new());
+            }
+        }
+        Message::SmartEdit(index) => {
+            if let LibraryState::Open(browser) = &state.library
+                && let Some(playlist) = browser.library.playlists.get(index)
+                && playlist.is_smart
+            {
+                state.smart = Some(smart_editor::Editor::edit(
+                    index,
+                    &playlist.title,
+                    playlist.rules.as_ref(),
+                ));
+            }
+        }
+        Message::SmartEditor(event) => {
+            if let Some(editor) = state.smart.as_mut().filter(|editor| !editor.saving) {
+                editor.update(event);
+            }
+        }
+        Message::SmartSave => {
+            let strings = state.config.effective().language.strings();
+            let backend = state.backend();
+            if let (Some(editor), LibraryState::Open(browser)) =
+                (state.smart.as_mut(), &state.library)
+                && !editor.saving
+            {
+                match editor.finished(strings) {
+                    Err(error) => editor.error = Some(error),
+                    Ok((title, rules)) => {
+                        let Some(backend) = backend else {
+                            return Task::none();
+                        };
+                        editor.saving = true;
+                        let library = Arc::clone(&browser.library);
+                        return match editor.target {
+                            Some(index) => Task::perform(
+                                backend::update_smart_playlist(
+                                    backend, library, index, title, rules,
+                                ),
+                                Message::SmartSaved,
+                            ),
+                            None => Task::perform(
+                                backend::create_smart_playlist(backend, library, title, rules),
+                                Message::SmartSaved,
+                            ),
+                        };
+                    }
+                }
+            }
+        }
+        Message::SmartCancel => {
+            if state.smart.as_ref().is_some_and(|editor| !editor.saving) {
+                state.smart = None;
+            }
+        }
+        Message::SmartSaved(result) => match result {
+            Ok(edited) => {
+                state.smart = None;
+                state.backend_error = None;
+                if let LibraryState::Open(browser) = &mut state.library {
+                    // The playlists after a new one move down, and the list playing
+                    // (if it is one of them) is found again by its titles.
+                    let old = Arc::clone(&browser.library);
+                    let playing = match state.play_source {
+                        Some(Source::Playlist(index)) => Some(old.playlist_path(index)),
+                        _ => None,
+                    };
+                    browser.replace_playlists(edited.playlists, edited.playlist);
+                    if let Some(path) = playing {
+                        state.play_source = Some(
+                            browser
+                                .library
+                                .find_playlist(&path)
+                                .map_or(Source::Collection, Source::Playlist),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(editor) = &mut state.smart {
+                    let strings = state.config.effective().language.strings();
+                    editor.saving = false;
+                    editor.error = Some(fill(&strings.smart_save_failed, &[("error", &error)]));
+                }
+            }
+        },
         Message::MenuSelected(item) => match item {
             MenuItem::Open => return handle(state, Message::ChooseLibrary),
             MenuItem::SaveAs => {
@@ -1039,9 +1143,13 @@ fn view(state: &State) -> Element<'_, Message> {
     .height(Fill)
     .into();
     // The sync window lies over the whole app, which is dimmed and can't be used meanwhile.
-    match &state.sync {
-        Some(stage) => iced::widget::stack![window, sync_view::modal(stage, language)].into(),
-        None => window,
+    // So does the window for a smart playlist (the two are never open together).
+    match (&state.sync, &state.smart) {
+        (Some(stage), _) => iced::widget::stack![window, sync_view::modal(stage, language)].into(),
+        (None, Some(editor)) => {
+            iced::widget::stack![window, smart_editor::modal(editor, language)].into()
+        }
+        (None, None) => window,
     }
 }
 
@@ -1277,6 +1385,7 @@ mod tests {
             depth,
             has_children,
             is_smart: false,
+            rules: None,
             tracks: tracks.to_vec(),
         }
     }
@@ -1326,6 +1435,7 @@ mod tests {
             gain_draft: None,
             delay_draft: None,
             sync: None,
+            smart: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
@@ -1693,6 +1803,102 @@ mod tests {
         let _ = handle(&mut state, Message::ResizeMoved(900.0));
         let _ = handle(&mut state, Message::ResizeEnded);
         assert_eq!(state.columns.widths, before);
+    }
+
+    fn smart(title: &str, tracks: &[usize]) -> Playlist {
+        Playlist {
+            is_smart: true,
+            ..playlist(title, 0, false, tracks)
+        }
+    }
+
+    #[test]
+    fn a_new_smart_playlist_is_shown_and_the_playlists_after_it_are_found_again() {
+        let mut state = state();
+        let _ = handle(&mut state, Message::SmartNew);
+        assert!(
+            state
+                .smart
+                .as_ref()
+                .is_some_and(|editor| editor.target.is_none())
+        );
+
+        // Without a name nothing is sent.
+        let _ = handle(&mut state, Message::SmartSave);
+        let editor = state.smart.as_ref().unwrap();
+        assert!(!editor.saving);
+        assert_eq!(
+            editor.error.as_deref(),
+            Some(Language::English.strings().smart_name_missing.as_str())
+        );
+
+        // The backend refusing it keeps the window, with the reason.
+        let _ = handle(&mut state, Message::SmartSaved(Err("taken".into())));
+        let editor = state.smart.as_ref().unwrap();
+        assert!(!editor.saving);
+        assert!(
+            editor
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("taken"))
+        );
+
+        // Pop is playing and House is open; the new list lands between them.
+        let LibraryState::Open(open) = &mut state.library else {
+            unreachable!()
+        };
+        open.expand(&[0, 1]);
+        state.play_source = Some(Source::Playlist(2));
+        let _ = handle(
+            &mut state,
+            Message::SmartSaved(Ok(backend::SmartPlaylistEdited {
+                playlists: vec![
+                    playlist("House", 0, true, &[]),
+                    playlist("Deep", 1, false, &[1, 2]),
+                    smart("Mine", &[0, 1]),
+                    playlist("Pop", 0, false, &[0]),
+                ],
+                playlist: 2,
+            })),
+        );
+        assert!(state.smart.is_none());
+        assert_eq!(browser(&state).source, Source::Playlist(2));
+        assert_eq!(browser(&state).tracks(), [0, 1]);
+        assert!(browser(&state).is_expanded(0), "House is still open");
+        assert_eq!(state.play_source, Some(Source::Playlist(3)), "still Pop");
+    }
+
+    #[test]
+    fn a_smart_playlist_is_edited_from_its_own_rules() {
+        let mut state = state();
+        let LibraryState::Open(open) = &mut state.library else {
+            unreachable!()
+        };
+        let mut playlists = vec![smart("Mine", &[0])];
+        playlists[0].rules = Some(open_engine_api::v1::SmartRules {
+            match_all: false,
+            rules: vec![open_engine_api::v1::SmartRule {
+                column: "genre".into(),
+                condition: "LIKE".into(),
+                param: "%House%".into(),
+            }],
+        });
+        open.replace_playlists(playlists, 0);
+
+        // Only smart playlists can be edited.
+        let _ = handle(&mut state, Message::SmartEdit(5));
+        assert!(state.smart.is_none());
+        let _ = handle(&mut state, Message::SmartEdit(0));
+        let editor = state.smart.as_ref().unwrap();
+        assert_eq!(editor.target, Some(0));
+        assert_eq!(editor.name, "Mine");
+        assert!(!editor.match_all);
+
+        // No second window on top of it.
+        let _ = handle(&mut state, Message::SmartNew);
+        assert_eq!(state.smart.as_ref().unwrap().target, Some(0));
+        let _ = handle(&mut state, Message::SmartCancel);
+        assert!(state.smart.is_none());
     }
 
     #[test]

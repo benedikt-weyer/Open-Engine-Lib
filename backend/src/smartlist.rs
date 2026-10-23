@@ -59,6 +59,89 @@ impl Rules {
         Some(Self { all, rules })
     }
 
+    /// Rules from what an editor sends: whether all must match, and each rule's column,
+    /// condition and parameter as plain text (not an SQL literal). Errors say what is wrong.
+    pub fn from_parts(all: bool, parts: Vec<(String, String, String)>) -> Result<Self, String> {
+        if parts.is_empty() {
+            return Err("a smart playlist needs at least one rule".into());
+        }
+        let mut rules = Vec::with_capacity(parts.len());
+        for (column, condition, param) in parts {
+            let column = column.trim().to_string();
+            if column.is_empty()
+                || !column
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return Err(format!("{column:?} is not a column"));
+            }
+            let condition = condition
+                .to_ascii_uppercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if condition.is_empty()
+                || !condition
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || " =<>!".contains(c))
+            {
+                return Err(format!("{condition:?} is not a condition"));
+            }
+            let param = if column.eq_ignore_ascii_case("bpm") {
+                let number = param.trim();
+                if number.parse::<f64>().is_err() {
+                    return Err(format!("{number:?} is not a number"));
+                }
+                number.to_string()
+            } else {
+                format!("'{}'", param.replace('\'', "''"))
+            };
+            rules.push(Rule {
+                column,
+                condition,
+                param,
+            });
+        }
+        Ok(Self { all, rules })
+    }
+
+    /// Whether all rules have to match, rather than any one.
+    pub fn match_all(&self) -> bool {
+        self.all
+    }
+
+    /// Each rule's column, condition and parameter as plain text, see `from_parts`.
+    pub fn parts(&self) -> impl Iterator<Item = (&str, &str, String)> {
+        self.rules.iter().map(|rule| {
+            (
+                rule.column.as_str(),
+                rule.condition.as_str(),
+                unquote(&rule.param),
+            )
+        })
+    }
+
+    /// The JSON text Engine keeps in the `rules` column.
+    pub fn to_json(&self) -> String {
+        let rules: Vec<String> = self
+            .rules
+            .iter()
+            .map(|rule| {
+                format!(
+                    r#"{{"col":{},"con":{},"param":{},"v":"2.20.0"}}"#,
+                    json_string(&rule.column),
+                    json_string(&rule.condition),
+                    json_string(&rule.param),
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"match":"{}","rules":[{}],"rv":2}}"#,
+            if self.all { "all" } else { "any" },
+            rules.join(",")
+        )
+    }
+
     /// Whether `track` satisfies the rules. A list without rules holds nothing.
     pub fn matches(&self, track: &Track) -> bool {
         if self.rules.is_empty() {
@@ -118,6 +201,23 @@ fn unquote(literal: &str) -> String {
         Some(inner) => inner.replace("''", "'"),
         None => literal.to_string(),
     }
+}
+
+fn json_string(text: &str) -> String {
+    let mut out = String::from('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// SQL `LIKE`: `%` is any run of characters, `_` any one, and case does not matter.
@@ -396,6 +496,51 @@ mod tests {
 
         let none = Rules::parse(r#"{"match":"any","rules":[]}"#).unwrap();
         assert!(!none.matches(&track("x", None)));
+    }
+
+    #[test]
+    fn rules_from_an_editor_are_written_as_engine_writes_them() {
+        let rules = Rules::from_parts(
+            true,
+            vec![
+                ("genre".into(), "like".into(), "%Tech\"no%".into()),
+                ("bpm".into(), ">=".into(), " 125 ".into()),
+                ("title".into(), "=".into(), "It's".into()),
+            ],
+        )
+        .unwrap();
+        let json = rules.to_json();
+        assert_eq!(
+            json,
+            r#"{"match":"all","rules":[{"col":"genre","con":"LIKE","param":"'%Tech\"no%'","v":"2.20.0"},{"col":"bpm","con":">=","param":"125","v":"2.20.0"},{"col":"title","con":"=","param":"'It''s'","v":"2.20.0"}],"rv":2}"#
+        );
+        // What was written reads back as what was put in.
+        let again = Rules::parse(&json).unwrap();
+        assert_eq!(again.rules, rules.rules);
+        assert!(again.match_all());
+        assert_eq!(
+            again.parts().collect::<Vec<_>>(),
+            [
+                ("genre", "LIKE", "%Tech\"no%".to_string()),
+                ("bpm", ">=", "125".to_string()),
+                ("title", "=", "It's".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rules_from_an_editor_are_checked() {
+        let one = |column: &str, condition: &str, param: &str| {
+            Rules::from_parts(false, vec![(column.into(), condition.into(), param.into())])
+        };
+        assert!(one("genre", "LIKE", "x").is_ok());
+        assert!(Rules::from_parts(true, Vec::new()).is_err());
+        assert!(one("", "LIKE", "x").is_err());
+        assert!(one("genre; DROP TABLE Track", "LIKE", "x").is_err());
+        assert!(one("genre", "LIKE 'x' OR 1", "x").is_err());
+        assert!(one("genre", "", "x").is_err());
+        assert!(one("bpm", ">", "fast").is_err());
+        assert!(!one("genre", "LIKE", "x").unwrap().match_all());
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::library::{self, EditError, Library, OpenError};
 use crate::player::Start;
 use crate::save::{self, SaveError};
+use crate::smartlist::Rules;
 use crate::sync::{self, SyncError};
 use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 
@@ -122,7 +123,7 @@ impl LibraryService for Service {
             path: library.dir.display().to_string(),
             cache_path: library.cache.display().to_string(),
             track_count: library.tracks.len() as u32,
-            playlist_count: library.playlists.len() as u32,
+            playlist_count: library.playlists().len() as u32,
         };
         *self.0.library.write().expect("library lock") = Some(Arc::new(library));
         Ok(Response::new(response))
@@ -211,9 +212,35 @@ impl LibraryService for Service {
             .map_err(|error| Status::internal(error.to_string()))?
             .map_err(|error| match error {
                 EditError::NoSuchTrack => Status::not_found(error.to_string()),
-                EditError::Cache(_) | EditError::Database(_) => Status::internal(error.to_string()),
+                _ => Status::internal(error.to_string()),
             })?;
         Ok(Response::new(api::SetRatingResponse {}))
+    }
+
+    async fn create_smart_playlist(
+        &self,
+        request: Request<api::CreateSmartPlaylistRequest>,
+    ) -> Result<Response<api::SmartPlaylistEdited>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        let rules = rules_from(request.rules)?;
+        edited(library, move |library| {
+            library.create_smart_playlist(&request.title, &rules)
+        })
+        .await
+    }
+
+    async fn update_smart_playlist(
+        &self,
+        request: Request<api::UpdateSmartPlaylistRequest>,
+    ) -> Result<Response<api::SmartPlaylistEdited>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        let rules = rules_from(request.rules)?;
+        edited(library, move |library| {
+            library.update_smart_playlist(request.playlist_id as usize, &request.title, &rules)
+        })
+        .await
     }
 
     async fn close_library(
@@ -258,21 +285,9 @@ impl LibraryService for Service {
         _: Request<api::ListPlaylistsRequest>,
     ) -> Result<Response<api::ListPlaylistsResponse>, Status> {
         let library = self.library()?;
-        let playlists = library
-            .playlists
-            .iter()
-            .enumerate()
-            .map(|(index, playlist)| api::Playlist {
-                id: index as u32,
-                title: playlist.title.clone(),
-                depth: playlist.depth as u32,
-                parent_id: playlist.parent.map(|parent| parent as u32),
-                has_children: playlist.has_children,
-                is_smart: playlist.smart,
-                track_ids: playlist.tracks.iter().map(|&track| track as u32).collect(),
-            })
-            .collect();
-        Ok(Response::new(api::ListPlaylistsResponse { playlists }))
+        Ok(Response::new(api::ListPlaylistsResponse {
+            playlists: playlist_messages(&library),
+        }))
     }
 
     async fn get_album_art(
@@ -378,6 +393,71 @@ impl LibraryService for Service {
             }),
         }))
     }
+}
+
+fn playlist_messages(library: &Library) -> Vec<api::Playlist> {
+    library
+        .playlists()
+        .iter()
+        .enumerate()
+        .map(|(index, playlist)| api::Playlist {
+            id: index as u32,
+            title: playlist.title.clone(),
+            depth: playlist.depth as u32,
+            parent_id: playlist.parent.map(|parent| parent as u32),
+            has_children: playlist.has_children,
+            is_smart: playlist.smart,
+            rules: playlist.rules.as_ref().map(|rules| api::SmartRules {
+                match_all: rules.match_all(),
+                rules: rules
+                    .parts()
+                    .map(|(column, condition, param)| api::SmartRule {
+                        column: column.to_string(),
+                        condition: condition.to_string(),
+                        param,
+                    })
+                    .collect(),
+            }),
+            track_ids: playlist.tracks.iter().map(|&track| track as u32).collect(),
+        })
+        .collect()
+}
+
+fn rules_from(rules: Option<api::SmartRules>) -> Result<Rules, Status> {
+    let rules = rules.ok_or_else(|| Status::invalid_argument("a smart playlist needs rules"))?;
+    Rules::from_parts(
+        rules.match_all,
+        rules
+            .rules
+            .into_iter()
+            .map(|rule| (rule.column, rule.condition, rule.param))
+            .collect(),
+    )
+    .map_err(Status::invalid_argument)
+}
+
+/// Runs a change of the smart playlists off the async threads (it writes a file,
+/// possibly after waiting for a read) and answers with the playlists as they are then.
+async fn edited(
+    library: Arc<Library>,
+    edit: impl FnOnce(&Library) -> Result<usize, EditError> + Send + 'static,
+) -> Result<Response<api::SmartPlaylistEdited>, Status> {
+    tokio::task::spawn_blocking(move || {
+        edit(&library).map(|index| api::SmartPlaylistEdited {
+            playlist_id: index as u32,
+            playlists: playlist_messages(&library),
+        })
+    })
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?
+    .map(Response::new)
+    .map_err(|error| match error {
+        EditError::NoSuchTrack | EditError::NoSuchPlaylist => Status::not_found(error.to_string()),
+        EditError::NotSmart | EditError::EmptyTitle => Status::invalid_argument(error.to_string()),
+        EditError::TitleTaken => Status::already_exists(error.to_string()),
+        EditError::NoSmartlists => Status::failed_precondition(error.to_string()),
+        EditError::Cache(_) | EditError::Database(_) => Status::internal(error.to_string()),
+    })
 }
 
 fn track_message(id: u32, track: &library::Track, rating: Option<u32>) -> api::Track {

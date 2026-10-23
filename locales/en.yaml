@@ -121,3 +121,26 @@ now_playing: "{title} · {artist}"
 streaming_not_playable: "“{title}” is a streaming track and can't be played here."
 file_missing: "“{title}” was not found: {path}"
 play_failed: "Could not play “{title}”: {error}"
+smart_new: New smart playlist…
+smart_edit: Edit this smart playlist
+smart_title_new: New smart playlist
+smart_title_edit: Edit smart playlist
+smart_name: Name
+smart_match: "Include tracks that match"
+smart_match_all: all of these rules
+smart_match_any: any of these rules
+smart_op_contains: contains
+smart_op_not_contains: does not contain
+smart_op_is: is
+smart_op_is_not: is not
+smart_op_pattern: matches the pattern
+smart_value: Value
+smart_add_rule: Add a rule
+smart_remove_rule: Remove this rule
+smart_rule_unsupported: "Can't be edited here: {rule}"
+smart_pattern_hint: "In a pattern, % stands for any text and _ for one character."
+smart_save: Save
+smart_saving: Saving…
+smart_cancel: Cancel
+smart_name_missing: Give the playlist a name.
+smart_save_failed: "Could not save the smart playlist: {error}"

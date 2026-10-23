@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Debug)]
+use open_engine_api::v1::SmartRules;
+
+#[derive(Debug, Clone)]
 pub struct Track {
     /// The backend's id for the track, used to ask it to play the track.
     pub id: u32,
@@ -77,13 +79,15 @@ pub fn location(library_dir: &str, recorded: &str) -> String {
 
 /// A playlist or playlist folder. Playlists are stored depth first in display order,
 /// so a flat list is enough to draw the tree.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Playlist {
     pub title: String,
     pub depth: usize,
     pub has_children: bool,
     /// A smart playlist: its tracks are the ones that satisfy its rules.
     pub is_smart: bool,
+    /// What a smart playlist holds, if the backend could read it.
+    pub rules: Option<SmartRules>,
     /// Indices into `Library::tracks`, in playlist order.
     pub tracks: Vec<usize>,
 }
@@ -162,6 +166,21 @@ impl Library {
         })
     }
 
+    /// The same library with other playlists, as after a smart playlist was added.
+    pub fn with_playlists(&self, playlists: Vec<Playlist>) -> Self {
+        Self::new(
+            self.path.clone(),
+            self.cache_path.clone(),
+            self.tracks.clone(),
+            playlists,
+        )
+    }
+
+    /// Index into `tracks` of the track with the backend's `id`.
+    pub fn track_index(&self, id: u32) -> Option<usize> {
+        self.index_of_id.get(&id).copied()
+    }
+
     pub fn track_by_id(&self, id: u32) -> Option<&Track> {
         self.index_of_id.get(&id).map(|&index| &self.tracks[index])
     }
@@ -177,6 +196,7 @@ mod tests {
             depth,
             has_children: false,
             is_smart: false,
+            rules: None,
             tracks: Vec::new(),
         }
     }

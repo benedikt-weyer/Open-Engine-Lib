@@ -44,6 +44,18 @@ service LibraryService {
   // above 100, NOT_FOUND for an unknown track id, INTERNAL if the database can't be
   // written.
   rpc SetRating(SetRatingRequest) returns (SetRatingResponse);
+  // Adds a smart playlist to the working copy, at the top level after the smart
+  // playlists that are there. Playlist ids after it change: the answer has the new list
+  // of playlists. The source is not touched until `SyncToSource`.
+  // Errors: FAILED_PRECONDITION if no library is open or it has no smart playlists
+  // (too old), INVALID_ARGUMENT for an empty title or rules that are not valid,
+  // ALREADY_EXISTS if a top-level playlist has the title, INTERNAL if the database can't
+  // be written.
+  rpc CreateSmartPlaylist(CreateSmartPlaylistRequest) returns (SmartPlaylistEdited);
+  // Changes the title and rules of a smart playlist in the working copy. Errors as for
+  // `CreateSmartPlaylist`, and NOT_FOUND for an unknown playlist id, INVALID_ARGUMENT
+  // too if the playlist is not a smart one.
+  rpc UpdateSmartPlaylist(UpdateSmartPlaylistRequest) returns (SmartPlaylistEdited);
   // Closes the library and stops playback. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
@@ -99,6 +111,23 @@ message SetRatingRequest {
   uint32 rating = 2;
 }
 message SetRatingResponse {}
+
+message CreateSmartPlaylistRequest {
+  string title = 1;
+  SmartRules rules = 2;
+}
+message UpdateSmartPlaylistRequest {
+  // `Playlist.id` of a smart playlist.
+  uint32 playlist_id = 1;
+  string title = 2;
+  SmartRules rules = 3;
+}
+message SmartPlaylistEdited {
+  // The playlist that was added or changed, in `playlists`. (A new title can move it.)
+  uint32 playlist_id = 1;
+  // All playlists as `ListPlaylists` answers now.
+  repeated Playlist playlists = 2;
+}
 
 message CloseLibraryRequest {}
 message CloseLibraryResponse {}
@@ -180,6 +209,27 @@ message Playlist {
   repeated uint32 track_ids = 6;
   // True for a smart playlist: `track_ids` are the tracks that satisfy its rules.
   bool is_smart = 7;
+  // The rules of a smart playlist, if they could be read.
+  optional SmartRules rules = 8;
+}
+
+// What a smart playlist holds: the tracks that satisfy all (or any) of the rules.
+message SmartRules {
+  // All rules must match; false means any one.
+  bool match_all = 1;
+  repeated SmartRule rules = 2;
+}
+
+message SmartRule {
+  // A track field: `title`, `artist`, `album`, `genre` or `bpm` are understood. Others
+  // are kept as they are and match no track.
+  string column = 1;
+  // An SQL comparison: `LIKE`, `NOT LIKE`, `=`, `!=`, `<>`, and for `bpm` also `<`,
+  // `<=`, `>`, `>=`.
+  string condition = 2;
+  // The value as plain text (no SQL quotes). For `LIKE`, `%` stands for any run of
+  // characters and `_` for one. For `bpm` it must be a number.
+  string param = 3;
 }
 
 message GetWaveformRequest {

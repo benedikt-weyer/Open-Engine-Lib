@@ -9,10 +9,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::beatgrid::{self, Marker};
 use crate::cache::{self, DATABASE_DIR};
@@ -55,6 +55,16 @@ impl fmt::Display for OpenError {
 pub enum EditError {
     /// There is no track with that index.
     NoSuchTrack,
+    /// There is no playlist with that index.
+    NoSuchPlaylist,
+    /// The playlist is not a smart playlist.
+    NotSmart,
+    /// A playlist needs a title.
+    EmptyTitle,
+    /// Another playlist in the same place has the title.
+    TitleTaken,
+    /// The library has no table for smart playlists (it is from an older version).
+    NoSmartlists,
     /// The edit could not be noted in the cache.
     Cache(std::io::Error),
     Database(rusqlite::Error),
@@ -64,6 +74,13 @@ impl fmt::Display for EditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EditError::NoSuchTrack => write!(f, "there is no such track"),
+            EditError::NoSuchPlaylist => write!(f, "there is no such playlist"),
+            EditError::NotSmart => write!(f, "the playlist is not a smart playlist"),
+            EditError::EmptyTitle => write!(f, "a playlist needs a title"),
+            EditError::TitleTaken => write!(f, "there is already a playlist with that title"),
+            EditError::NoSmartlists => {
+                write!(f, "this library has no smart playlists (it is too old)")
+            }
             EditError::Cache(error) => write!(f, "could not note the edit in the cache: {error}"),
             EditError::Database(error) => write!(f, "could not write the database: {error}"),
         }
@@ -119,6 +136,10 @@ pub struct Playlist {
     pub has_children: bool,
     /// A smart playlist: its tracks are the ones that satisfy its rules.
     pub smart: bool,
+    /// The `listUuid` of a smart playlist.
+    pub uuid: Option<String>,
+    /// The rules of a smart playlist, if they could be read.
+    pub rules: Option<Rules>,
     /// Indices into `Library::tracks`, in playlist order (in library order for a smart one).
     pub tracks: Vec<usize>,
 }
@@ -131,7 +152,10 @@ pub struct Library {
     /// The cached copy of the library folder, which holds only `Database2`.
     pub cache: PathBuf,
     pub tracks: Vec<Track>,
-    pub playlists: Vec<Playlist>,
+    /// Behind a lock because adding or editing a smart playlist changes the list.
+    playlists: Mutex<Vec<Playlist>>,
+    by_id: TrackIds,
+    by_origin: TrackOrigins,
     /// Ratings set since the library was opened, by index in `tracks`.
     ratings: Mutex<HashMap<usize, u32>>,
     /// Kept open to read what is not loaded with the tracks (covers, beatgrids) on demand,
@@ -170,10 +194,137 @@ impl Library {
             dir,
             cache,
             tracks,
-            playlists,
+            playlists: Mutex::new(playlists),
+            by_id,
+            by_origin,
             ratings: Mutex::default(),
             connection: Mutex::new(connection),
         })
+    }
+
+    /// The playlists, depth first in display order. Indices into it identify a playlist
+    /// until a smart playlist is added.
+    pub fn playlists(&self) -> MutexGuard<'_, Vec<Playlist>> {
+        self.playlists.lock().expect("playlists lock")
+    }
+
+    /// Adds a smart playlist at the top level, after the smart playlists that are
+    /// already there, and returns its index in `playlists`.
+    pub fn create_smart_playlist(&self, title: &str, rules: &Rules) -> Result<usize, EditError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(EditError::EmptyTitle);
+        }
+        if self
+            .playlists()
+            .iter()
+            .any(|playlist| playlist.parent.is_none() && playlist.title == title)
+        {
+            return Err(EditError::TitleTaken);
+        }
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        if !has_smartlists(&connection) {
+            return Err(EditError::NoSmartlists);
+        }
+
+        let uuid: String =
+            connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        // A version 4 UUID in the usual 8-4-4-4-12 form.
+        let variant = ['8', '9', 'a', 'b'][usize::from(uuid.as_bytes()[16] % 4)];
+        let uuid = format!(
+            "{}-{}-4{}-{variant}{}-{}",
+            &uuid[0..8],
+            &uuid[8..12],
+            &uuid[13..16],
+            &uuid[17..20],
+            &uuid[20..32]
+        );
+
+        // The new one goes after the last smart playlist, and in front of the same
+        // playlist it was in front of.
+        let transaction = connection.unchecked_transaction()?;
+        let last: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT listUuid, COALESCE(nextPlaylistPath, '') FROM Smartlist \
+                 WHERE COALESCE(parentPlaylistPath, '') = '' \
+                   AND COALESCE(nextListUuid, '') = '' LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let next_path = match &last {
+            Some((last_uuid, next_path)) => {
+                transaction.execute(
+                    "UPDATE Smartlist SET nextListUuid = ?1, nextPlaylistPath = '' \
+                     WHERE listUuid = ?2",
+                    (&uuid, last_uuid),
+                )?;
+                next_path.as_str()
+            }
+            None => "",
+        };
+        transaction.execute(
+            "INSERT INTO Smartlist (listUuid, title, parentPlaylistPath, nextPlaylistPath, \
+                                    nextListUuid, rules, lastEditTime) \
+             VALUES (?1, ?2, '', ?3, '', ?4, datetime('now'))",
+            (&uuid, title, next_path, rules.to_json()),
+        )?;
+        transaction.commit()?;
+
+        self.reload_playlists(&connection)?;
+        self.playlists()
+            .iter()
+            .position(|playlist| playlist.uuid.as_deref() == Some(uuid.as_str()))
+            .ok_or(EditError::NoSuchPlaylist)
+    }
+
+    /// Changes the title and rules of the smart playlist at `index` in `playlists`, and
+    /// returns its index afterwards (a new title can move it).
+    pub fn update_smart_playlist(
+        &self,
+        index: usize,
+        title: &str,
+        rules: &Rules,
+    ) -> Result<usize, EditError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(EditError::EmptyTitle);
+        }
+        let uuid = {
+            let playlists = self.playlists();
+            let playlist = playlists.get(index).ok_or(EditError::NoSuchPlaylist)?;
+            let uuid = playlist.uuid.clone().ok_or(EditError::NotSmart)?;
+            if playlists.iter().enumerate().any(|(other, sibling)| {
+                other != index && sibling.parent == playlist.parent && sibling.title == title
+            }) {
+                return Err(EditError::TitleTaken);
+            }
+            uuid
+        };
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        let changed = connection.execute(
+            "UPDATE Smartlist SET title = ?1, rules = ?2, lastEditTime = datetime('now') \
+             WHERE listUuid = ?3",
+            (title, rules.to_json(), &uuid),
+        )?;
+        if changed == 0 {
+            return Err(EditError::NoSuchPlaylist);
+        }
+
+        self.reload_playlists(&connection)?;
+        self.playlists()
+            .iter()
+            .position(|playlist| playlist.uuid.as_deref() == Some(uuid.as_str()))
+            .ok_or(EditError::NoSuchPlaylist)
+    }
+
+    /// Reads the playlists again after the database changed.
+    fn reload_playlists(&self, connection: &Connection) -> rusqlite::Result<()> {
+        let playlists = load_playlists(connection, &self.tracks, &self.by_id, &self.by_origin)?;
+        *self.playlists() = playlists;
+        Ok(())
     }
 
     /// The star rating of the track at `index` in `tracks`, 0 to 100, as it is now.
@@ -484,6 +635,8 @@ fn load_playlists(
                     parent,
                     has_children: !children.is_empty(),
                     smart: false,
+                    uuid: None,
+                    rules: None,
                     tracks,
                 };
                 (playlist, children, path)
@@ -502,6 +655,8 @@ fn load_playlists(
                     parent,
                     has_children: false,
                     smart: true,
+                    uuid: Some(row.uuid),
+                    rules,
                     tracks,
                 };
                 (playlist, Vec::new(), String::new())
@@ -535,16 +690,19 @@ struct SmartRow {
     rules: String,
 }
 
-/// The smart playlists of the library. (A library from an older version has none.)
-fn load_smartlists(connection: &Connection) -> rusqlite::Result<Vec<SmartRow>> {
-    let has_table = connection
+fn has_smartlists(connection: &Connection) -> bool {
+    connection
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'Smartlist'",
             [],
             |_| Ok(()),
         )
-        .is_ok();
-    if !has_table {
+        .is_ok()
+}
+
+/// The smart playlists of the library. (A library from an older version has none.)
+fn load_smartlists(connection: &Connection) -> rusqlite::Result<Vec<SmartRow>> {
+    if !has_smartlists(connection) {
         return Ok(Vec::new());
     }
     let mut statement = connection.prepare(
@@ -804,8 +962,8 @@ mod tests {
         let library =
             Library::load(database(), PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
 
-        let shape: Vec<_> = library
-            .playlists
+        let playlists = library.playlists();
+        let shape: Vec<_> = playlists
             .iter()
             .map(|p| (p.title.as_str(), p.depth, p.parent, p.has_children))
             .collect();
@@ -838,8 +996,8 @@ mod tests {
         let library =
             Library::load(connection, PathBuf::from("/lib"), PathBuf::from("/cache")).unwrap();
 
-        let shape: Vec<_> = library
-            .playlists
+        let playlists = library.playlists();
+        let shape: Vec<_> = playlists
             .iter()
             .map(|p| (p.title.as_str(), p.depth, p.smart, p.has_children))
             .collect();
@@ -854,13 +1012,176 @@ mod tests {
                 ("Smart C", 1, true, false),
             ]
         );
-        assert_eq!(library.playlists[1].tracks, [0], "genre House");
-        assert_eq!(library.playlists[2].tracks, [2], "genre Techno");
+        drop(playlists);
+        assert_eq!(library.playlists()[1].tracks, [0], "genre House");
+        assert_eq!(library.playlists()[2].tracks, [2], "genre Techno");
         assert!(
-            library.playlists[5].tracks.is_empty(),
+            library.playlists()[5].tracks.is_empty(),
             "unreadable rules match nothing"
         );
-        assert_eq!(library.playlists[5].parent, Some(3));
+        assert_eq!(library.playlists()[5].parent, Some(3));
+    }
+
+    fn editable_library(name: &str) -> (Library, PathBuf) {
+        let cache =
+            std::env::temp_dir().join(format!("open-engine-lib-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).unwrap();
+        let connection = database();
+        connection
+            .execute_batch(
+                "CREATE TABLE Smartlist (listUuid TEXT NOT NULL PRIMARY KEY, title TEXT,
+                    parentPlaylistPath TEXT, nextPlaylistPath TEXT, nextListUuid TEXT, rules TEXT,
+                    lastEditTime DATETIME,
+                    UNIQUE (title, parentPlaylistPath),
+                    UNIQUE (parentPlaylistPath, nextPlaylistPath, nextListUuid));",
+            )
+            .unwrap();
+        let library = Library::load(connection, PathBuf::from("/lib"), cache.clone()).unwrap();
+        (library, cache)
+    }
+
+    fn rules(genre: &str) -> Rules {
+        Rules::from_parts(true, vec![("genre".into(), "LIKE".into(), genre.into())]).unwrap()
+    }
+
+    fn titles(library: &Library) -> Vec<String> {
+        library
+            .playlists()
+            .iter()
+            .map(|p| p.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn adds_smart_playlists_in_front_of_the_playlist_the_chain_ends_at() {
+        let (library, cache) = editable_library("smart-create");
+
+        // The first one has nothing to follow, so it stands after the playlists.
+        let first = library
+            .create_smart_playlist("  House  ", &rules("%house%"))
+            .unwrap();
+        assert_eq!(titles(&library), ["Beta", "Alpha", "Child", "House"]);
+        assert_eq!(first, 3);
+        assert_eq!(library.playlists()[3].tracks, [0]);
+        assert!(library.playlists()[3].smart);
+
+        // Move the end of the chain in front of Alpha, as Engine does for its own lists.
+        {
+            let connection = library.connection.lock().unwrap();
+            connection
+                .execute("UPDATE Smartlist SET nextPlaylistPath = 'Alpha;'", [])
+                .unwrap();
+        }
+        library
+            .reload_playlists(&library.connection.lock().unwrap())
+            .unwrap();
+        assert_eq!(titles(&library), ["Beta", "House", "Alpha", "Child"]);
+
+        // The second follows the first and stays in front of Alpha.
+        let second = library
+            .create_smart_playlist("Techno", &rules("%techno%"))
+            .unwrap();
+        assert_eq!(
+            titles(&library),
+            ["Beta", "House", "Techno", "Alpha", "Child"]
+        );
+        assert_eq!(second, 2);
+        assert_eq!(library.playlists()[2].tracks, [2]);
+
+        // It is stored as Engine stores rules, and the edit is noted for the cache.
+        let stored: String = library
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT rules FROM Smartlist WHERE title = 'Techno'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            r#"{"match":"all","rules":[{"col":"genre","con":"LIKE","param":"'%techno%'","v":"2.20.0"}],"rv":2}"#
+        );
+        assert!(cache.join("edited").exists());
+
+        assert!(matches!(
+            library.create_smart_playlist("Techno", &rules("x")),
+            Err(EditError::TitleTaken)
+        ));
+        assert!(matches!(
+            library.create_smart_playlist("Beta", &rules("x")),
+            Err(EditError::TitleTaken)
+        ));
+        assert!(matches!(
+            library.create_smart_playlist("  ", &rules("x")),
+            Err(EditError::EmptyTitle)
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn changes_the_title_and_rules_of_a_smart_playlist() {
+        let (library, cache) = editable_library("smart-update");
+        let index = library
+            .create_smart_playlist("House", &rules("%house%"))
+            .unwrap();
+        library
+            .create_smart_playlist("Other", &rules("%x%"))
+            .unwrap();
+        assert_eq!(library.playlists()[index].tracks, [0]);
+
+        let index = library
+            .update_smart_playlist(index, "Tech", &rules("%techno%"))
+            .unwrap();
+        assert_eq!(library.playlists()[index].title, "Tech");
+        assert_eq!(library.playlists()[index].tracks, [2]);
+        let parts: Vec<_> = library.playlists()[index]
+            .rules
+            .as_ref()
+            .unwrap()
+            .parts()
+            .map(|(c, o, p)| (c.to_string(), o.to_string(), p))
+            .collect();
+        assert_eq!(parts, [("genre".into(), "LIKE".into(), "%techno%".into())]);
+
+        // Its own title is fine; another list's, a playlist's and an empty one are not.
+        library
+            .update_smart_playlist(index, "Tech", &rules("%a%"))
+            .unwrap();
+        assert!(matches!(
+            library.update_smart_playlist(index, "Other", &rules("x")),
+            Err(EditError::TitleTaken)
+        ));
+        assert!(matches!(
+            library.update_smart_playlist(index, "Beta", &rules("x")),
+            Err(EditError::TitleTaken)
+        ));
+        // A playlist that is not smart, and one that is not there.
+        assert!(matches!(
+            library.update_smart_playlist(0, "x", &rules("x")),
+            Err(EditError::NotSmart)
+        ));
+        assert!(matches!(
+            library.update_smart_playlist(99, "x", &rules("x")),
+            Err(EditError::NoSuchPlaylist)
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_library_without_smart_playlists_cannot_get_one() {
+        let cache =
+            std::env::temp_dir().join(format!("open-engine-lib-no-smart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).unwrap();
+        let library = Library::load(database(), PathBuf::from("/lib"), cache.clone()).unwrap();
+        assert!(matches!(
+            library.create_smart_playlist("x", &rules("x")),
+            Err(EditError::NoSmartlists)
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     #[test]
@@ -870,8 +1191,8 @@ mod tests {
 
         // Entity 12 -> 10 -> 11, and the entity for the missing track 99 is dropped.
         // Track 3 is found through its origin ('other', 7), not its own id.
-        assert_eq!(library.playlists[0].tracks, [2, 0, 1]);
-        assert!(library.playlists[1].tracks.is_empty());
+        assert_eq!(library.playlists()[0].tracks, [2, 0, 1]);
+        assert!(library.playlists()[1].tracks.is_empty());
     }
 
     #[test]

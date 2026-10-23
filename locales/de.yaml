@@ -121,3 +121,26 @@ now_playing: "{title} · {artist}"
 streaming_not_playable: "„{title}“ ist ein Streaming-Titel und kann hier nicht abgespielt werden."
 file_missing: "„{title}“ wurde nicht gefunden: {path}"
 play_failed: "„{title}“ konnte nicht abgespielt werden: {error}"
+smart_new: Neue Smart-Playlist…
+smart_edit: Diese Smart-Playlist bearbeiten
+smart_title_new: Neue Smart-Playlist
+smart_title_edit: Smart-Playlist bearbeiten
+smart_name: Name
+smart_match: "Titel aufnehmen, die zutreffen auf"
+smart_match_all: alle dieser Regeln
+smart_match_any: mindestens eine dieser Regeln
+smart_op_contains: enthält
+smart_op_not_contains: enthält nicht
+smart_op_is: ist
+smart_op_is_not: ist nicht
+smart_op_pattern: passt auf das Muster
+smart_value: Wert
+smart_add_rule: Regel hinzufügen
+smart_remove_rule: Diese Regel entfernen
+smart_rule_unsupported: "Kann hier nicht bearbeitet werden: {rule}"
+smart_pattern_hint: "In einem Muster steht % für beliebigen Text und _ für ein Zeichen."
+smart_save: Speichern
+smart_saving: Speichern …
+smart_cancel: Abbrechen
+smart_name_missing: Bitte gib der Playlist einen Namen.
+smart_save_failed: "Die Smart-Playlist konnte nicht gespeichert werden: {error}"

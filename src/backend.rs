@@ -18,11 +18,12 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest,
-    GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, NextRequest,
-    OpenLibraryRequest, PlayRequest, PlaybackStatus, PreviousRequest, SaveLibraryAsRequest,
-    SeekRequest, SetRatingRequest, SoundSwitchState, StopRequest, SyncToSourceRequest,
-    SyncToSourceResponse, TogglePauseRequest,
+    CloseLibraryRequest, CreateSmartPlaylistRequest, GetAlbumArtRequest, GetInfoRequest,
+    GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest,
+    ListTracksRequest, NextRequest, OpenLibraryRequest, PlayRequest, PlaybackStatus,
+    PreviousRequest, SaveLibraryAsRequest, SeekRequest, SetRatingRequest, SmartRules,
+    SoundSwitchState, StopRequest, SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest,
+    UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -278,22 +279,92 @@ async fn load_library(
         .await
         .map_err(describe)?
         .into_inner()
-        .playlists
+        .playlists;
+    let playlists = playlists_from(playlists, |id| index_of.get(&id).copied());
+
+    Ok(Arc::new(Library::new(path, cache_path, tracks, playlists)))
+}
+
+/// The UI's playlists from the backend's, with the tracks as indices into the UI's list.
+fn playlists_from(
+    playlists: Vec<open_engine_api::v1::Playlist>,
+    index_of: impl Fn(u32) -> Option<usize>,
+) -> Vec<Playlist> {
+    playlists
         .into_iter()
         .map(|playlist| Playlist {
             title: playlist.title,
             depth: playlist.depth as usize,
             has_children: playlist.has_children,
             is_smart: playlist.is_smart,
+            rules: playlist.rules,
             tracks: playlist
                 .track_ids
                 .iter()
-                .filter_map(|id| index_of.get(id).copied())
+                .filter_map(|&id| index_of(id))
                 .collect(),
         })
-        .collect();
+        .collect()
+}
 
-    Ok(Arc::new(Library::new(path, cache_path, tracks, playlists)))
+/// A smart playlist that was added or changed: all playlists as they are now, and which
+/// one it is.
+#[derive(Debug, Clone)]
+pub struct SmartPlaylistEdited {
+    pub playlists: Vec<Playlist>,
+    pub playlist: usize,
+}
+
+/// Adds a smart playlist to the working copy. `library` is the open one, whose tracks the
+/// playlists refer to.
+pub async fn create_smart_playlist(
+    mut backend: Backend,
+    library: Arc<Library>,
+    title: String,
+    rules: SmartRules,
+) -> Result<SmartPlaylistEdited, String> {
+    let edited = backend
+        .library
+        .create_smart_playlist(CreateSmartPlaylistRequest {
+            title,
+            rules: Some(rules),
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    Ok(edited_from(edited, &library))
+}
+
+/// Changes the title and rules of the smart playlist `playlist` (an index into the
+/// library's playlists).
+pub async fn update_smart_playlist(
+    mut backend: Backend,
+    library: Arc<Library>,
+    playlist: usize,
+    title: String,
+    rules: SmartRules,
+) -> Result<SmartPlaylistEdited, String> {
+    let edited = backend
+        .library
+        .update_smart_playlist(UpdateSmartPlaylistRequest {
+            playlist_id: playlist as u32,
+            title,
+            rules: Some(rules),
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    Ok(edited_from(edited, &library))
+}
+
+fn edited_from(
+    edited: open_engine_api::v1::SmartPlaylistEdited,
+    library: &Library,
+) -> SmartPlaylistEdited {
+    SmartPlaylistEdited {
+        playlist: edited.playlist_id as usize,
+        playlists: playlists_from(edited.playlists, |id| library.track_index(id)),
+    }
 }
 
 /// Fetches a cover image: `None` if the backend has no image for it.

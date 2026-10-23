@@ -11,9 +11,10 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest,
-    GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, OpenLibraryRequest, PlayRequest,
-    PlaybackErrorKind, PlaybackState, SaveLibraryAsRequest, SetRatingRequest, SyncToSourceRequest,
+    CloseLibraryRequest, CreateSmartPlaylistRequest, GetAlbumArtRequest, GetInfoRequest,
+    GetSyncDiffRequest, GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest,
+    OpenLibraryRequest, PlayRequest, PlaybackErrorKind, PlaybackState, SaveLibraryAsRequest,
+    SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -348,6 +349,137 @@ async fn serves_the_api_over_grpc() {
         .unwrap()
         .into_inner();
     assert_eq!(reopened.cache_path, opened.cache_path);
+}
+
+#[tokio::test]
+async fn adds_and_changes_smart_playlists() {
+    let temp = TempDir::new("smart");
+    let library_dir = fixture_library(&temp.0);
+    rusqlite::Connection::open(library_dir.join("Database2/m.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE Smartlist (listUuid TEXT NOT NULL PRIMARY KEY, title TEXT,
+                parentPlaylistPath TEXT, nextPlaylistPath TEXT, nextListUuid TEXT, rules TEXT,
+                lastEditTime DATETIME, UNIQUE (title, parentPlaylistPath),
+                UNIQUE (parentPlaylistPath, nextPlaylistPath, nextListUuid));",
+        )
+        .unwrap();
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+
+    let rules = |genre: &str| SmartRules {
+        match_all: true,
+        rules: vec![SmartRule {
+            column: "genre".into(),
+            condition: "LIKE".into(),
+            param: format!("%{genre}%"),
+        }],
+    };
+
+    let created = library
+        .create_smart_playlist(CreateSmartPlaylistRequest {
+            title: "Houses".into(),
+            rules: Some(rules("house")),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let list = &created.playlists[created.playlist_id as usize];
+    assert_eq!((list.title.as_str(), list.is_smart), ("Houses", true));
+    assert_eq!(list.track_ids, [0]);
+    assert_eq!(list.rules, Some(rules("house")));
+
+    let changed = library
+        .update_smart_playlist(UpdateSmartPlaylistRequest {
+            playlist_id: created.playlist_id,
+            title: "Techs".into(),
+            rules: Some(rules("techno")),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let list = &changed.playlists[changed.playlist_id as usize];
+    assert_eq!(
+        (list.title.as_str(), list.track_ids.as_slice()),
+        ("Techs", &[1][..])
+    );
+
+    // The list ListPlaylists answers is the same one.
+    let listed = library
+        .list_playlists(ListPlaylistsRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .playlists;
+    assert_eq!(listed, changed.playlists);
+
+    let refused = |result: Result<_, Status>| code(result.map(|_: tonic::Response<_>| ()));
+    assert_eq!(
+        refused(
+            library
+                .create_smart_playlist(CreateSmartPlaylistRequest {
+                    title: "Techs".into(),
+                    rules: Some(rules("x")),
+                })
+                .await
+        ),
+        Code::AlreadyExists
+    );
+    assert_eq!(
+        refused(
+            library
+                .create_smart_playlist(CreateSmartPlaylistRequest {
+                    title: " ".into(),
+                    rules: Some(rules("x")),
+                })
+                .await
+        ),
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        refused(
+            library
+                .create_smart_playlist(CreateSmartPlaylistRequest {
+                    title: "No rules".into(),
+                    rules: None,
+                })
+                .await
+        ),
+        Code::InvalidArgument
+    );
+    // Playlist 0 is an ordinary one.
+    assert_eq!(
+        refused(
+            library
+                .update_smart_playlist(UpdateSmartPlaylistRequest {
+                    playlist_id: 0,
+                    title: "x".into(),
+                    rules: Some(rules("x")),
+                })
+                .await
+        ),
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        refused(
+            library
+                .update_smart_playlist(UpdateSmartPlaylistRequest {
+                    playlist_id: 99,
+                    title: "x".into(),
+                    rules: Some(rules("x")),
+                })
+                .await
+        ),
+        Code::NotFound
+    );
 }
 
 #[tokio::test]
