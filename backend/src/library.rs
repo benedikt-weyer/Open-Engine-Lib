@@ -59,6 +59,8 @@ pub enum EditError {
     NoSuchPlaylist,
     /// The playlist is not a smart playlist.
     NotSmart,
+    /// The playlist is a smart one, which is changed through its rules.
+    IsSmart,
     /// A playlist needs a title.
     EmptyTitle,
     /// Another playlist in the same place has the title.
@@ -76,6 +78,7 @@ impl fmt::Display for EditError {
             EditError::NoSuchTrack => write!(f, "there is no such track"),
             EditError::NoSuchPlaylist => write!(f, "there is no such playlist"),
             EditError::NotSmart => write!(f, "the playlist is not a smart playlist"),
+            EditError::IsSmart => write!(f, "the playlist is a smart playlist"),
             EditError::EmptyTitle => write!(f, "a playlist needs a title"),
             EditError::TitleTaken => write!(f, "there is already a playlist with that title"),
             EditError::NoSmartlists => {
@@ -136,6 +139,8 @@ pub struct Playlist {
     pub has_children: bool,
     /// A smart playlist: its tracks are the ones that satisfy its rules.
     pub smart: bool,
+    /// The `id` of a normal playlist in the database.
+    pub db_id: Option<i64>,
     /// The `listUuid` of a smart playlist.
     pub uuid: Option<String>,
     /// The rules of a smart playlist, if they could be read.
@@ -318,6 +323,163 @@ impl Library {
             .iter()
             .position(|playlist| playlist.uuid.as_deref() == Some(uuid.as_str()))
             .ok_or(EditError::NoSuchPlaylist)
+    }
+
+    /// Adds an empty playlist at the end of `parent`'s playlists (an index into
+    /// `playlists`; `None` for the top level) and returns its index.
+    pub fn create_playlist(&self, title: &str, parent: Option<usize>) -> Result<usize, EditError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(EditError::EmptyTitle);
+        }
+        let parent_id = {
+            let playlists = self.playlists();
+            let parent_id = match parent {
+                Some(parent) => {
+                    let parent = playlists.get(parent).ok_or(EditError::NoSuchPlaylist)?;
+                    parent.db_id.ok_or(EditError::IsSmart)?
+                }
+                None => 0,
+            };
+            if playlists
+                .iter()
+                .any(|playlist| playlist.parent == parent && playlist.title == title)
+            {
+                return Err(EditError::TitleTaken);
+            }
+            parent_id
+        };
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        // Inserted with no next playlist, which makes it the last: the database's own
+        // trigger links the one that was last to it.
+        connection.execute(
+            "INSERT INTO Playlist (title, parentListId, isPersisted, nextListId, \
+                                   lastEditTime, isExplicitlyExported) \
+             VALUES (?1, ?2, 1, 0, datetime('now'), 1)",
+            (title, parent_id),
+        )?;
+        let id = connection.last_insert_rowid();
+
+        self.reload_playlists(&connection)?;
+        self.playlists()
+            .iter()
+            .position(|playlist| playlist.db_id == Some(id))
+            .ok_or(EditError::NoSuchPlaylist)
+    }
+
+    /// Gives the playlist at `index` in `playlists` another title. Smart playlists that
+    /// are in it, or in front of it, follow it: they name it by its path.
+    pub fn rename_playlist(&self, index: usize, title: &str) -> Result<(), EditError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(EditError::EmptyTitle);
+        }
+        let (id, old_path, new_path) = {
+            let playlists = self.playlists();
+            let playlist = playlists.get(index).ok_or(EditError::NoSuchPlaylist)?;
+            let id = playlist.db_id.ok_or(EditError::IsSmart)?;
+            if playlists.iter().enumerate().any(|(other, sibling)| {
+                other != index && sibling.parent == playlist.parent && sibling.title == title
+            }) {
+                return Err(EditError::TitleTaken);
+            }
+            let old_path = playlist_path(&playlists, index);
+            let parent_path = playlist
+                .parent
+                .map_or_else(String::new, |parent| playlist_path(&playlists, parent));
+            (id, old_path, format!("{parent_path}{title};"))
+        };
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE Playlist SET title = ?1, lastEditTime = datetime('now') WHERE id = ?2",
+            (title, id),
+        )?;
+        if has_smartlists(&transaction) {
+            let length = old_path.chars().count() as i64;
+            for column in ["parentPlaylistPath", "nextPlaylistPath"] {
+                transaction.execute(
+                    &format!(
+                        "UPDATE Smartlist SET {column} = ?1 || substr({column}, ?2) \
+                         WHERE substr({column}, 1, ?3) = ?4"
+                    ),
+                    (&new_path, length + 1, length, &old_path),
+                )?;
+            }
+        }
+        transaction.commit()?;
+
+        self.reload_playlists(&connection)?;
+        Ok(())
+    }
+
+    /// Deletes the playlist at `index` in `playlists` with everything in it, the
+    /// playlists and smart playlists below it. The tracks stay in the library.
+    pub fn delete_playlist(&self, index: usize) -> Result<(), EditError> {
+        let (ids, uuids, path, parent_path) = {
+            let playlists = self.playlists();
+            let playlist = playlists.get(index).ok_or(EditError::NoSuchPlaylist)?;
+            playlist.db_id.ok_or(EditError::IsSmart)?;
+            // Playlists are stored depth first: what is in it follows it.
+            let end = playlists[index + 1..]
+                .iter()
+                .position(|inner| inner.depth <= playlist.depth)
+                .map_or(playlists.len(), |offset| index + 1 + offset);
+            let inside = &playlists[index..end];
+            (
+                inside
+                    .iter()
+                    .filter_map(|inner| inner.db_id)
+                    .collect::<Vec<_>>(),
+                inside
+                    .iter()
+                    .filter_map(|inner| inner.uuid.clone())
+                    .collect::<Vec<_>>(),
+                playlist_path(&playlists, index),
+                playlist
+                    .parent
+                    .map_or_else(String::new, |parent| playlist_path(&playlists, parent)),
+            )
+        };
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        let transaction = connection.unchecked_transaction()?;
+
+        if has_smartlists(&transaction) {
+            // A smart playlist that stood in front of it now stands in front of the
+            // playlist after it, if there is one.
+            let next: Option<String> = transaction
+                .query_row(
+                    "SELECT title FROM Playlist WHERE id = \
+                     (SELECT nextListId FROM Playlist WHERE id = ?1)",
+                    [ids[0]],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let next_path = next.map_or_else(String::new, |title| format!("{parent_path}{title};"));
+            transaction.execute(
+                "UPDATE OR IGNORE Smartlist SET nextPlaylistPath = ?1 \
+                 WHERE COALESCE(parentPlaylistPath, '') = ?2 AND nextPlaylistPath = ?3",
+                (next_path, &parent_path, &path),
+            )?;
+            for uuid in &uuids {
+                transaction.execute("DELETE FROM Smartlist WHERE listUuid = ?1", [uuid])?;
+            }
+        }
+        for id in &ids {
+            transaction.execute("DELETE FROM PlaylistEntity WHERE listId = ?1", [id])?;
+        }
+        // The ones inside first: the database's trigger relinks the siblings of each.
+        for id in ids.iter().rev() {
+            transaction.execute("DELETE FROM Playlist WHERE id = ?1", [id])?;
+        }
+        transaction.commit()?;
+
+        self.reload_playlists(&connection)?;
+        Ok(())
     }
 
     /// Reads the playlists again after the database changed.
@@ -635,6 +797,7 @@ fn load_playlists(
                     parent,
                     has_children: !children.is_empty(),
                     smart: false,
+                    db_id: Some(id),
                     uuid: None,
                     rules: None,
                     tracks,
@@ -655,6 +818,7 @@ fn load_playlists(
                     parent,
                     has_children: false,
                     smart: true,
+                    db_id: None,
                     uuid: Some(row.uuid),
                     rules,
                     tracks,
@@ -688,6 +852,22 @@ struct SmartRow {
     /// The playlist after this one, if one follows it instead, as a path like `parent`.
     next_path: String,
     rules: String,
+}
+
+/// The titles from the top down to the playlist at `index`, each followed by `;`: how
+/// smart playlists name where they are.
+fn playlist_path(playlists: &[Playlist], index: usize) -> String {
+    let mut titles = Vec::new();
+    let mut at = Some(index);
+    while let Some(index) = at {
+        titles.push(playlists[index].title.as_str());
+        at = playlists[index].parent;
+    }
+    titles
+        .iter()
+        .rev()
+        .map(|title| format!("{title};"))
+        .collect()
 }
 
 fn has_smartlists(connection: &Connection) -> bool {
@@ -1167,6 +1347,272 @@ mod tests {
             library.update_smart_playlist(99, "x", &rules("x")),
             Err(EditError::NoSuchPlaylist)
         ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// Like `editable_library`, with the `Playlist` table, its triggers and its views as
+    /// Engine creates them: Beta -> Alpha at the top, Alpha holds Child.
+    fn engine_library(name: &str) -> (Library, PathBuf) {
+        let (library, cache) = editable_library(name);
+        {
+            let connection = library.connection.lock().unwrap();
+            connection
+                .execute_batch(
+                    "DROP TABLE Playlist;
+                     CREATE TABLE Playlist (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT,
+                        parentListId INTEGER, isPersisted BOOLEAN, nextListId INTEGER,
+                        lastEditTime DATETIME, isExplicitlyExported BOOLEAN,
+                        CONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentListId),
+                        CONSTRAINT C_NEXT_LIST_ID_UNIQUE_FOR_PARENT UNIQUE (parentListId, nextListId));
+                     CREATE TRIGGER trigger_before_insert_List BEFORE INSERT ON Playlist
+                     FOR EACH ROW BEGIN
+                        UPDATE Playlist SET nextListId = -(1 + nextListId)
+                        WHERE nextListId = NEW.nextListId AND parentListId = NEW.parentListId;
+                     END;
+                     CREATE TRIGGER trigger_after_insert_List AFTER INSERT ON Playlist
+                     FOR EACH ROW BEGIN
+                        UPDATE Playlist SET nextListId = NEW.id
+                        WHERE nextListId = -(1 + NEW.nextListId) AND parentListId = NEW.parentListId;
+                     END;
+                     CREATE TRIGGER trigger_after_delete_List AFTER DELETE ON Playlist
+                     FOR EACH ROW BEGIN
+                        UPDATE Playlist SET nextListId = OLD.nextListId WHERE nextListId = OLD.id;
+                        DELETE FROM Playlist WHERE parentListId = OLD.id;
+                     END;
+                     CREATE VIEW PlaylistAllParent AS
+                        WITH FindAllParent AS (
+                            SELECT id, parentListId FROM Playlist
+                            UNION ALL
+                            SELECT r.id, p.parentListId FROM Playlist p
+                            INNER JOIN FindAllParent r ON r.parentListId = p.id)
+                        SELECT * FROM FindAllParent;
+                     CREATE TRIGGER trigger_after_insert_isPersist AFTER INSERT ON Playlist
+                        WHEN new.isPersisted = 1 BEGIN
+                        UPDATE Playlist SET isPersisted = 1
+                        WHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id = new.id);
+                     END;
+                     INSERT INTO Playlist (id, title, parentListId, isPersisted, nextListId) VALUES
+                        (1, 'Alpha', 0, 1, 0), (2, 'Beta', 0, 1, 1), (3, 'Child', 1, 1, 0);
+                     -- Smart playlists: in front of Alpha, in Alpha, in Child.
+                     INSERT INTO Smartlist VALUES
+                        ('s1', 'Before', '', 'Alpha;', '', '{}', NULL),
+                        ('s2', 'In Alpha', 'Alpha;', '', '', '{}', NULL),
+                        ('s3', 'In Child', 'Alpha;Child;', '', '', '{}', NULL);",
+                )
+                .unwrap();
+            library.reload_playlists(&connection).unwrap();
+        }
+        (library, cache)
+    }
+
+    fn smartlist_paths(library: &Library) -> Vec<(String, String, String)> {
+        let connection = library.connection.lock().unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT title, parentPlaylistPath, nextPlaylistPath FROM Smartlist ORDER BY title",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn adds_a_playlist_at_the_end_of_its_parent() {
+        let (library, cache) = engine_library("playlist-create");
+        assert_eq!(
+            titles(&library),
+            ["Beta", "Before", "Alpha", "Child", "In Child", "In Alpha"]
+        );
+
+        let top = library.create_playlist("  New  ", None).unwrap();
+        assert_eq!(library.playlists()[top].title, "New");
+        assert_eq!(library.playlists()[top].depth, 0);
+        assert!(!library.playlists()[top].smart);
+        assert!(library.playlists()[top].tracks.is_empty());
+        assert_eq!(
+            titles(&library),
+            [
+                "Beta", "Before", "Alpha", "Child", "In Child", "In Alpha", "New"
+            ],
+            "after the last one"
+        );
+
+        let alpha = library
+            .playlists()
+            .iter()
+            .position(|p| p.title == "Alpha")
+            .unwrap();
+        let inner = library.create_playlist("Inner", Some(alpha)).unwrap();
+        assert_eq!(library.playlists()[inner].parent, Some(alpha));
+        assert_eq!(library.playlists()[inner].depth, 1);
+        let alpha_children: Vec<_> = library
+            .playlists()
+            .iter()
+            .filter(|p| p.parent == Some(alpha))
+            .map(|p| p.title.clone())
+            .collect();
+        assert_eq!(alpha_children, ["Child", "Inner", "In Alpha"]);
+
+        // How Engine flags the ones it makes, and the edit is noted.
+        let (persisted, exported): (bool, bool) = library
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT isPersisted, isExplicitlyExported FROM Playlist WHERE title = 'New'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(persisted && exported);
+        assert!(cache.join("edited").exists());
+
+        assert!(matches!(
+            library.create_playlist("New", None),
+            Err(EditError::TitleTaken)
+        ));
+        assert!(matches!(
+            library.create_playlist("Child", Some(alpha)),
+            Err(EditError::TitleTaken)
+        ));
+        assert!(matches!(
+            library.create_playlist(" ", None),
+            Err(EditError::EmptyTitle)
+        ));
+        assert!(matches!(
+            library.create_playlist("x", Some(99)),
+            Err(EditError::NoSuchPlaylist)
+        ));
+        let smart = library.playlists().iter().position(|p| p.smart).unwrap();
+        assert!(matches!(
+            library.create_playlist("x", Some(smart)),
+            Err(EditError::IsSmart)
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn renaming_a_playlist_keeps_the_smart_playlists_that_name_it() {
+        let (library, cache) = engine_library("playlist-rename");
+        let alpha = library
+            .playlists()
+            .iter()
+            .position(|p| p.title == "Alpha")
+            .unwrap();
+        library.rename_playlist(alpha, "Omega").unwrap();
+
+        assert_eq!(
+            titles(&library),
+            ["Beta", "Before", "Omega", "Child", "In Child", "In Alpha"],
+            "it stays where it was"
+        );
+        assert_eq!(
+            smartlist_paths(&library),
+            [
+                ("Before".into(), "".into(), "Omega;".into()),
+                ("In Alpha".into(), "Omega;".into(), "".into()),
+                ("In Child".into(), "Omega;Child;".into(), "".into()),
+            ]
+        );
+        // Still found where they belong.
+        let playlists = library.playlists();
+        assert_eq!(playlists[1].title, "Before", "still in front of it");
+        assert_eq!(playlists[5].parent, Some(2));
+        drop(playlists);
+
+        assert!(matches!(
+            library.rename_playlist(alpha, "Beta"),
+            Err(EditError::TitleTaken)
+        ));
+        library.rename_playlist(alpha, "Omega").unwrap();
+        assert!(matches!(
+            library.rename_playlist(alpha, " "),
+            Err(EditError::EmptyTitle)
+        ));
+        assert!(matches!(
+            library.rename_playlist(99, "x"),
+            Err(EditError::NoSuchPlaylist)
+        ));
+        assert!(matches!(
+            library.rename_playlist(1, "x"),
+            Err(EditError::IsSmart)
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn deleting_a_playlist_takes_what_is_in_it_with_it() {
+        let (library, cache) = engine_library("playlist-delete");
+        let alpha = library
+            .playlists()
+            .iter()
+            .position(|p| p.title == "Alpha")
+            .unwrap();
+        library.delete_playlist(alpha).unwrap();
+
+        // Alpha, Child and the smart playlists in them are gone; Before is not in them.
+        assert_eq!(titles(&library), ["Beta", "Before"]);
+        assert_eq!(
+            smartlist_paths(&library),
+            [("Before".into(), "".into(), "".into())],
+            "nothing follows it any more"
+        );
+        let remaining: i64 = library
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM Playlist", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+
+        // Beta had tracks: they leave with it, and the tracks themselves stay.
+        library.delete_playlist(0).unwrap();
+        assert_eq!(titles(&library), ["Before"]);
+        let (entities, tracks): (i64, i64) = library
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT count(*) FROM PlaylistEntity), (SELECT count(*) FROM Track)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((entities, tracks), (0, 3));
+
+        assert!(matches!(
+            library.delete_playlist(0),
+            Err(EditError::IsSmart)
+        ));
+        assert!(matches!(
+            library.delete_playlist(5),
+            Err(EditError::NoSuchPlaylist)
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn deleting_a_middle_playlist_relinks_its_neighbours() {
+        let (library, cache) = engine_library("playlist-delete-middle");
+        library.create_playlist("Gamma", None).unwrap();
+        // Roots are now Beta -> Alpha -> Gamma. Take Alpha out.
+        let alpha = library
+            .playlists()
+            .iter()
+            .position(|p| p.title == "Alpha")
+            .unwrap();
+        library.delete_playlist(alpha).unwrap();
+        assert_eq!(titles(&library), ["Beta", "Before", "Gamma"]);
+        assert_eq!(
+            smartlist_paths(&library)[0],
+            ("Before".into(), "".into(), "Gamma;".into()),
+            "now in front of the one after Alpha"
+        );
+        library.create_playlist("Delta", None).unwrap();
+        assert_eq!(titles(&library), ["Beta", "Before", "Gamma", "Delta"]);
         let _ = std::fs::remove_dir_all(&cache);
     }
 

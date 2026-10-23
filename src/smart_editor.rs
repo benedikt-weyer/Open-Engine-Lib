@@ -332,8 +332,8 @@ impl Editor {
 
 /// A choice in a drop-down: what it is, and what it is called.
 #[derive(Clone)]
-struct Choice<T> {
-    value: T,
+pub struct Choice<T> {
+    pub value: T,
     label: String,
 }
 
@@ -349,7 +349,7 @@ impl<T: PartialEq> PartialEq for Choice<T> {
     }
 }
 
-fn choice<T>(value: T, label: impl Into<String>) -> Choice<T> {
+pub fn choice<T>(value: T, label: impl Into<String>) -> Choice<T> {
     Choice {
         value,
         label: label.into(),

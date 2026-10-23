@@ -243,6 +243,48 @@ impl LibraryService for Service {
         .await
     }
 
+    async fn create_playlist(
+        &self,
+        request: Request<api::CreatePlaylistRequest>,
+    ) -> Result<Response<api::PlaylistsEdited>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        playlists_edited(library, move |library| {
+            library
+                .create_playlist(&request.title, request.parent_id.map(|id| id as usize))
+                .map(Some)
+        })
+        .await
+    }
+
+    async fn rename_playlist(
+        &self,
+        request: Request<api::RenamePlaylistRequest>,
+    ) -> Result<Response<api::PlaylistsEdited>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        playlists_edited(library, move |library| {
+            library
+                .rename_playlist(request.playlist_id as usize, &request.title)
+                .map(|()| None)
+        })
+        .await
+    }
+
+    async fn delete_playlist(
+        &self,
+        request: Request<api::DeletePlaylistRequest>,
+    ) -> Result<Response<api::PlaylistsEdited>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        playlists_edited(library, move |library| {
+            library
+                .delete_playlist(request.playlist_id as usize)
+                .map(|()| None)
+        })
+        .await
+    }
+
     async fn close_library(
         &self,
         _: Request<api::CloseLibraryRequest>,
@@ -451,13 +493,37 @@ async fn edited(
     .await
     .map_err(|error| Status::internal(error.to_string()))?
     .map(Response::new)
-    .map_err(|error| match error {
+    .map_err(edit_status)
+}
+
+/// Like `edited`, for the changes of playlists in general: the closure gives the index of
+/// the playlist that was added, if one was.
+async fn playlists_edited(
+    library: Arc<Library>,
+    edit: impl FnOnce(&Library) -> Result<Option<usize>, EditError> + Send + 'static,
+) -> Result<Response<api::PlaylistsEdited>, Status> {
+    tokio::task::spawn_blocking(move || {
+        edit(&library).map(|index| api::PlaylistsEdited {
+            playlist_id: index.map(|index| index as u32),
+            playlists: playlist_messages(&library),
+        })
+    })
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?
+    .map(Response::new)
+    .map_err(edit_status)
+}
+
+fn edit_status(error: EditError) -> Status {
+    match error {
         EditError::NoSuchTrack | EditError::NoSuchPlaylist => Status::not_found(error.to_string()),
-        EditError::NotSmart | EditError::EmptyTitle => Status::invalid_argument(error.to_string()),
+        EditError::NotSmart | EditError::IsSmart | EditError::EmptyTitle => {
+            Status::invalid_argument(error.to_string())
+        }
         EditError::TitleTaken => Status::already_exists(error.to_string()),
         EditError::NoSmartlists => Status::failed_precondition(error.to_string()),
         EditError::Cache(_) | EditError::Database(_) => Status::internal(error.to_string()),
-    })
+    }
 }
 
 fn track_message(id: u32, track: &library::Track, rating: Option<u32>) -> api::Track {

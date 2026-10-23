@@ -143,6 +143,17 @@ impl Library {
         chain
     }
 
+    /// The playlist at `index` and everything in it, as a range of `playlists`. (They
+    /// are stored depth first, so what is in a playlist follows it.)
+    pub fn playlist_span(&self, index: usize) -> std::ops::Range<usize> {
+        let depth = self.playlists[index].depth;
+        let end = self.playlists[index + 1..]
+            .iter()
+            .position(|inner| inner.depth <= depth)
+            .map_or(self.playlists.len(), |offset| index + 1 + offset);
+        index..end
+    }
+
     /// The titles from the top-level playlist down to `index`: where to find it again.
     pub fn playlist_path(&self, index: usize) -> Vec<String> {
         self.playlist_chain(index)
@@ -199,6 +210,28 @@ mod tests {
             rules: None,
             tracks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_playlist_and_what_is_in_it_are_a_range() {
+        let library = Library::new(
+            "/lib".into(),
+            "/cache".into(),
+            Vec::new(),
+            vec![
+                playlist("Pop", 0),
+                playlist("House", 0),
+                playlist("Deep", 1),
+                playlist("Dark", 2),
+                playlist("Tech", 1),
+                playlist("Techno", 0),
+            ],
+        );
+        assert_eq!(library.playlist_span(0), 0..1);
+        assert_eq!(library.playlist_span(1), 1..5);
+        assert_eq!(library.playlist_span(2), 2..4);
+        assert_eq!(library.playlist_span(4), 4..5);
+        assert_eq!(library.playlist_span(5), 5..6);
     }
 
     #[test]

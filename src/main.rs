@@ -14,6 +14,7 @@ mod menubar;
 mod model;
 mod navbar;
 mod player_bar;
+mod playlist_dialog;
 mod recent;
 mod session;
 mod settings;
@@ -27,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use backend::{Backend, Control, WaveformSettings};
-use browser::{Browser, Source};
+use browser::{Browser, Change, Source};
 use clock::Clock;
 use columns::{Column, ColumnStore};
 use config::{ConfigStore, Language, Locations, ThemeMode, WaveformBand, WaveformColors};
@@ -136,6 +137,8 @@ struct State {
     sync: Option<SyncStage>,
     /// The window for adding or changing a smart playlist, while it is open.
     smart: Option<smart_editor::Editor>,
+    /// The window for adding, renaming or deleting a playlist, while it is open.
+    playlist_dialog: Option<playlist_dialog::Dialog>,
     /// Where the library is being saved to, and why the last save failed.
     saving: Option<PathBuf>,
     save_error: Option<String>,
@@ -183,6 +186,16 @@ pub enum Message {
     SmartSave,
     SmartCancel,
     SmartSaved(Result<backend::SmartPlaylistEdited, String>),
+
+    /// The button for a new playlist.
+    PlaylistNew,
+    /// The buttons next to the selected playlist (an index into the library's playlists).
+    PlaylistRename(usize),
+    PlaylistDelete(usize),
+    PlaylistDialog(playlist_dialog::Event),
+    PlaylistConfirm,
+    PlaylistCancel,
+    PlaylistsEdited(Result<backend::PlaylistsEdited, String>),
 
     /// A File menu entry was picked.
     MenuSelected(MenuItem),
@@ -281,6 +294,7 @@ impl State {
             delay_draft: None,
             sync: None,
             smart: None,
+            playlist_dialog: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::discover(),
@@ -329,6 +343,23 @@ impl State {
         match &self.backend {
             BackendState::Ready(backend) => Some(Backend::clone(backend)),
             _ => None,
+        }
+    }
+
+    /// Takes the playlists as they are after one was added, changed or deleted. The
+    /// list the queue was made from stays marked, unless that playlist is gone.
+    fn playlists_changed(
+        &mut self,
+        playlists: Vec<model::Playlist>,
+        change: Change,
+        show: Option<usize>,
+    ) {
+        let LibraryState::Open(browser) = &mut self.library else {
+            return;
+        };
+        browser.replace_playlists(playlists, &change, show);
+        if let Some(Source::Playlist(index)) = self.play_source {
+            self.play_source = change.map(index).map(Source::Playlist);
         }
     }
 
@@ -769,8 +800,16 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
                 state.sync = None;
             }
         }
-        Message::SmartNew | Message::SmartEdit(_)
-            if state.saving.is_some() || state.sync.is_some() || state.smart.is_some() => {}
+        // One window at a time, and none while the databases are being cloned.
+        Message::SmartNew
+        | Message::SmartEdit(_)
+        | Message::PlaylistNew
+        | Message::PlaylistRename(_)
+        | Message::PlaylistDelete(_)
+            if state.saving.is_some()
+                || state.sync.is_some()
+                || state.smart.is_some()
+                || state.playlist_dialog.is_some() => {}
         Message::SmartNew => {
             if matches!(state.library, LibraryState::Open(_)) {
                 state.smart = Some(smart_editor::Editor::new());
@@ -831,32 +870,115 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::SmartSaved(result) => match result {
             Ok(edited) => {
+                let change = match state.smart.as_ref().and_then(|editor| editor.target) {
+                    Some(_) => Change::Same,
+                    None => Change::Inserted(edited.playlist),
+                };
                 state.smart = None;
                 state.backend_error = None;
-                if let LibraryState::Open(browser) = &mut state.library {
-                    // The playlists after a new one move down, and the list playing
-                    // (if it is one of them) is found again by its titles.
-                    let old = Arc::clone(&browser.library);
-                    let playing = match state.play_source {
-                        Some(Source::Playlist(index)) => Some(old.playlist_path(index)),
-                        _ => None,
-                    };
-                    browser.replace_playlists(edited.playlists, edited.playlist);
-                    if let Some(path) = playing {
-                        state.play_source = Some(
-                            browser
-                                .library
-                                .find_playlist(&path)
-                                .map_or(Source::Collection, Source::Playlist),
-                        );
-                    }
-                }
+                state.playlists_changed(edited.playlists, change, Some(edited.playlist));
             }
             Err(error) => {
                 if let Some(editor) = &mut state.smart {
                     let strings = state.config.effective().language.strings();
                     editor.saving = false;
                     editor.error = Some(fill(&strings.smart_save_failed, &[("error", &error)]));
+                }
+            }
+        },
+
+        Message::PlaylistNew => {
+            if matches!(state.library, LibraryState::Open(_)) {
+                state.playlist_dialog = Some(playlist_dialog::Dialog::create());
+            }
+        }
+        Message::PlaylistRename(index) => {
+            if let LibraryState::Open(browser) = &state.library
+                && let Some(playlist) = browser.library.playlists.get(index)
+                && !playlist.is_smart
+            {
+                state.playlist_dialog =
+                    Some(playlist_dialog::Dialog::rename(index, &playlist.title));
+            }
+        }
+        Message::PlaylistDelete(index) => {
+            if let LibraryState::Open(browser) = &state.library
+                && browser
+                    .library
+                    .playlists
+                    .get(index)
+                    .is_some_and(|playlist| !playlist.is_smart)
+            {
+                state.playlist_dialog = Some(playlist_dialog::Dialog::delete(index));
+            }
+        }
+        Message::PlaylistDialog(event) => {
+            if let Some(dialog) = state.playlist_dialog.as_mut().filter(|dialog| !dialog.busy) {
+                dialog.update(event);
+            }
+        }
+        Message::PlaylistConfirm => {
+            let strings = state.config.effective().language.strings();
+            let backend = state.backend();
+            if let (Some(dialog), LibraryState::Open(browser)) =
+                (state.playlist_dialog.as_mut(), &state.library)
+                && !dialog.busy
+            {
+                let name = dialog.name.trim().to_string();
+                if dialog.needs_name() && name.is_empty() {
+                    dialog.error = Some(strings.smart_name_missing.clone());
+                    return Task::none();
+                }
+                let Some(backend) = backend else {
+                    return Task::none();
+                };
+                dialog.busy = true;
+                let library = Arc::clone(&browser.library);
+                return match dialog.kind {
+                    playlist_dialog::Kind::Create { parent } => Task::perform(
+                        backend::create_playlist(backend, library, name, parent),
+                        Message::PlaylistsEdited,
+                    ),
+                    playlist_dialog::Kind::Rename(index) => Task::perform(
+                        backend::rename_playlist(backend, library, index, name),
+                        Message::PlaylistsEdited,
+                    ),
+                    playlist_dialog::Kind::Delete(index) => Task::perform(
+                        backend::delete_playlist(backend, library, index),
+                        Message::PlaylistsEdited,
+                    ),
+                };
+            }
+        }
+        Message::PlaylistCancel => {
+            if state
+                .playlist_dialog
+                .as_ref()
+                .is_some_and(|dialog| !dialog.busy)
+            {
+                state.playlist_dialog = None;
+            }
+        }
+        Message::PlaylistsEdited(result) => match result {
+            Ok(edited) => {
+                state.backend_error = None;
+                let kind = state.playlist_dialog.take().map(|dialog| dialog.kind);
+                let (change, show) = match (kind, edited.playlist, &state.library) {
+                    (
+                        Some(playlist_dialog::Kind::Delete(index)),
+                        _,
+                        LibraryState::Open(browser),
+                    ) => (Change::Removed(browser.library.playlist_span(index)), None),
+                    (_, Some(added), _) => (Change::Inserted(added), Some(added)),
+                    _ => (Change::Same, None),
+                };
+                state.playlists_changed(edited.playlists, change, show);
+            }
+            Err(error) => {
+                if let Some(dialog) = &mut state.playlist_dialog {
+                    let strings = state.config.effective().language.strings();
+                    dialog.busy = false;
+                    dialog.error = Some(fill(&strings.playlist_failed, &[("error", &error)]));
                 }
             }
         },
@@ -1143,13 +1265,23 @@ fn view(state: &State) -> Element<'_, Message> {
     .height(Fill)
     .into();
     // The sync window lies over the whole app, which is dimmed and can't be used meanwhile.
-    // So does the window for a smart playlist (the two are never open together).
-    match (&state.sync, &state.smart) {
-        (Some(stage), _) => iced::widget::stack![window, sync_view::modal(stage, language)].into(),
-        (None, Some(editor)) => {
+    // So do the windows for playlists (only one is open at a time).
+    match (
+        &state.sync,
+        &state.smart,
+        &state.playlist_dialog,
+        &state.library,
+    ) {
+        (Some(stage), ..) => iced::widget::stack![window, sync_view::modal(stage, language)].into(),
+        (None, Some(editor), ..) => {
             iced::widget::stack![window, smart_editor::modal(editor, language)].into()
         }
-        (None, None) => window,
+        (None, None, Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
+            window,
+            playlist_dialog::modal(dialog, &browser.library, language)
+        ]
+        .into(),
+        _ => window,
     }
 }
 
@@ -1436,6 +1568,7 @@ mod tests {
             delay_draft: None,
             sync: None,
             smart: None,
+            playlist_dialog: None,
             saving: None,
             save_error: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
@@ -1869,6 +2002,121 @@ mod tests {
     }
 
     #[test]
+    fn a_playlist_is_added_renamed_and_deleted_through_one_window() {
+        let mut state = state();
+        // House (0) with Deep (1), and Pop (2). Deep is shown and Pop is playing.
+        let LibraryState::Open(open) = &mut state.library else {
+            unreachable!()
+        };
+        open.expand(&[0, 1]);
+        open.show(Source::Playlist(1));
+        state.play_source = Some(Source::Playlist(2));
+
+        // Only ordinary playlists have these windows, and only one window is open.
+        let _ = handle(&mut state, Message::PlaylistRename(9));
+        let _ = handle(&mut state, Message::PlaylistDelete(9));
+        assert!(state.playlist_dialog.is_none());
+        let _ = handle(&mut state, Message::PlaylistNew);
+        let _ = handle(&mut state, Message::PlaylistDelete(0));
+        assert!(matches!(
+            state.playlist_dialog.as_ref().map(|dialog| dialog.kind),
+            Some(playlist_dialog::Kind::Create { parent: None })
+        ));
+        let _ = handle(&mut state, Message::SmartNew);
+        assert!(state.smart.is_none());
+
+        // Nothing is sent without a name.
+        let _ = handle(&mut state, Message::PlaylistConfirm);
+        let dialog = state.playlist_dialog.as_ref().unwrap();
+        assert!(!dialog.busy && dialog.error.is_some());
+
+        // A new playlist between House and Pop is shown; the ones after it move down.
+        let _ = handle(
+            &mut state,
+            Message::PlaylistsEdited(Ok(backend::PlaylistsEdited {
+                playlists: vec![
+                    playlist("House", 0, true, &[]),
+                    playlist("Deep", 1, false, &[1, 2]),
+                    playlist("Mix", 0, false, &[]),
+                    playlist("Pop", 0, false, &[0]),
+                ],
+                playlist: Some(2),
+            })),
+        );
+        assert!(state.playlist_dialog.is_none());
+        assert_eq!(browser(&state).source, Source::Playlist(2));
+        assert_eq!(state.play_source, Some(Source::Playlist(3)));
+        assert!(browser(&state).is_expanded(0));
+
+        // Renaming changes no numbers and keeps what is shown.
+        let _ = handle(&mut state, Message::PlaylistRename(2));
+        assert_eq!(state.playlist_dialog.as_ref().unwrap().name, "Mix");
+        let _ = handle(
+            &mut state,
+            Message::PlaylistsEdited(Err("there is already a playlist with that title".into())),
+        );
+        let dialog = state.playlist_dialog.as_ref().unwrap();
+        assert!(!dialog.busy);
+        assert!(
+            dialog
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("already"))
+        );
+        let _ = handle(
+            &mut state,
+            Message::PlaylistsEdited(Ok(backend::PlaylistsEdited {
+                playlists: vec![
+                    playlist("House", 0, true, &[]),
+                    playlist("Deep", 1, false, &[1, 2]),
+                    playlist("Mixes", 0, false, &[]),
+                    playlist("Pop", 0, false, &[0]),
+                ],
+                playlist: None,
+            })),
+        );
+        assert!(state.playlist_dialog.is_none());
+        assert_eq!(browser(&state).source, Source::Playlist(2));
+        assert_eq!(browser(&state).library.playlists[2].title, "Mixes");
+
+        // Deleting House takes Deep with it: Mixes was shown and stays, Pop keeps playing.
+        let _ = handle(&mut state, Message::PlaylistDelete(0));
+        let _ = handle(
+            &mut state,
+            Message::PlaylistsEdited(Ok(backend::PlaylistsEdited {
+                playlists: vec![
+                    playlist("Mixes", 0, false, &[]),
+                    playlist("Pop", 0, false, &[0]),
+                ],
+                playlist: None,
+            })),
+        );
+        assert_eq!(browser(&state).source, Source::Playlist(0));
+        assert_eq!(state.play_source, Some(Source::Playlist(1)));
+
+        // Deleting the one that is shown goes back to all tracks, and the queue's list is gone
+        // when that is the one deleted.
+        let _ = handle(&mut state, Message::PlaylistDelete(1));
+        let _ = handle(
+            &mut state,
+            Message::PlaylistsEdited(Ok(backend::PlaylistsEdited {
+                playlists: vec![playlist("Mixes", 0, false, &[])],
+                playlist: None,
+            })),
+        );
+        assert_eq!(state.play_source, None);
+        let _ = handle(&mut state, Message::PlaylistDelete(0));
+        let _ = handle(
+            &mut state,
+            Message::PlaylistsEdited(Ok(backend::PlaylistsEdited {
+                playlists: Vec::new(),
+                playlist: None,
+            })),
+        );
+        assert_eq!(browser(&state).source, Source::Collection);
+    }
+
+    #[test]
     fn a_smart_playlist_is_edited_from_its_own_rules() {
         let mut state = state();
         let LibraryState::Open(open) = &mut state.library else {
@@ -1883,7 +2131,7 @@ mod tests {
                 param: "%House%".into(),
             }],
         });
-        open.replace_playlists(playlists, 0);
+        open.replace_playlists(playlists, &Change::Same, Some(0));
 
         // Only smart playlists can be edited.
         let _ = handle(&mut state, Message::SmartEdit(5));

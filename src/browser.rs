@@ -46,6 +46,33 @@ pub enum Source {
     Playlist(usize),
 }
 
+/// How the numbers of the playlists moved when one was added or deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// Nothing moved (a playlist was renamed or its rules changed).
+    Same,
+    /// A playlist was added at this number, and the ones from there on moved down.
+    Inserted(usize),
+    /// The playlists in this range were deleted, and the ones after it moved up.
+    Removed(Range<usize>),
+}
+
+impl Change {
+    /// Where the playlist that was number `index` is now, or `None` if it was deleted.
+    pub fn map(&self, index: usize) -> Option<usize> {
+        match self {
+            Change::Same => Some(index),
+            Change::Inserted(at) => Some(if index >= *at { index + 1 } else { index }),
+            Change::Removed(range) if range.contains(&index) => None,
+            Change::Removed(range) => Some(if index >= range.end {
+                index - range.len()
+            } else {
+                index
+            }),
+        }
+    }
+}
+
 pub struct Browser {
     pub library: Arc<Library>,
     pub source: Source,
@@ -128,27 +155,39 @@ impl Browser {
         }
     }
 
-    /// Takes the playlists as they are after a smart playlist was added or changed, and
-    /// shows `show`, that one. The folders that were open stay open.
-    pub fn replace_playlists(&mut self, playlists: Vec<Playlist>, show: usize) {
-        let old = &self.library;
-        let open: Vec<Vec<String>> = self
+    /// Takes the playlists as they are after one was added, changed or deleted. What was
+    /// shown stays shown (unless it is gone, then it is all tracks), and so do the open
+    /// folders. With `show` that playlist is shown instead.
+    pub fn replace_playlists(
+        &mut self,
+        playlists: Vec<Playlist>,
+        change: &Change,
+        show: Option<usize>,
+    ) {
+        let library = Arc::new(self.library.with_playlists(playlists));
+        self.expanded = self
             .expanded
             .iter()
-            .map(|&index| old.playlist_path(index))
+            .filter_map(|&index| change.map(index))
             .collect();
-        let library = Arc::new(old.with_playlists(playlists));
-        self.expanded = open
-            .iter()
-            .filter_map(|path| library.find_playlist(path))
-            .collect();
-        if show < library.playlists.len() {
-            self.expand(&library.playlist_chain(show));
-            self.show(Source::Playlist(show));
-        } else {
-            self.show(Source::Collection);
-        }
+        let source = match self.source {
+            Source::Playlist(index) => change.map(index).map(Source::Playlist),
+            Source::Collection => Some(Source::Collection),
+        };
+        let shown = show
+            .filter(|&index| index < library.playlists.len())
+            .map(Source::Playlist);
         self.library = library;
+        match (shown, source) {
+            (Some(shown), _) => {
+                if let Source::Playlist(index) = shown {
+                    self.expand(&self.library.playlist_chain(index));
+                }
+                self.show(shown);
+            }
+            (None, Some(source)) => self.source = source,
+            (None, None) => self.show(Source::Collection),
+        }
     }
 
     /// Scrolls the track list so that `row` is near its top.
@@ -249,18 +288,34 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
                 .on_press(Message::ShowPlaylist(index)),
         ]
         .align_y(iced::Center);
+        // A smart playlist always has its edit button. An ordinary one gets its buttons
+        // when it is the one shown, so the tree isn't full of them.
+        let strings = language.strings();
+        let small = |label: &'static str, tip: &'a String, message: Message| {
+            tooltip(
+                button(text(label))
+                    .padding([4, 8])
+                    .style(button::text)
+                    .on_press(message),
+                text(tip),
+                tooltip::Position::Right,
+            )
+            .style(container::rounded_box)
+        };
         if playlist.is_smart {
-            line = line.push(
-                tooltip(
-                    button(text("✎"))
-                        .padding([4, 8])
-                        .style(button::text)
-                        .on_press(Message::SmartEdit(index)),
-                    text(&language.strings().smart_edit),
-                    tooltip::Position::Right,
-                )
-                .style(container::rounded_box),
-            );
+            line = line.push(small("✎", &strings.smart_edit, Message::SmartEdit(index)));
+        } else if selected {
+            line = line
+                .push(small(
+                    "✎",
+                    &strings.playlist_rename,
+                    Message::PlaylistRename(index),
+                ))
+                .push(small(
+                    "×",
+                    &strings.playlist_delete,
+                    Message::PlaylistDelete(index),
+                ));
         }
         list = list.push(line);
     }
@@ -665,6 +720,18 @@ mod tests {
                 "the header must not fill the height"
             );
         }
+    }
+
+    #[test]
+    fn playlist_numbers_move_with_additions_and_deletions() {
+        assert_eq!(Change::Same.map(3), Some(3));
+        assert_eq!(Change::Inserted(2).map(1), Some(1));
+        assert_eq!(Change::Inserted(2).map(2), Some(3));
+        assert_eq!(Change::Removed(2..4).map(1), Some(1));
+        assert_eq!(Change::Removed(2..4).map(2), None);
+        assert_eq!(Change::Removed(2..4).map(3), None);
+        assert_eq!(Change::Removed(2..4).map(4), Some(2));
+        assert_eq!(Change::Removed(2..4).map(9), Some(7));
     }
 
     #[test]

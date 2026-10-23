@@ -77,6 +77,10 @@ pub fn view<'a>(
     let content = match browser {
         Some(browser) => column![
             browser::playlists(browser, language),
+            button(text(&strings.playlist_new))
+                .width(Fill)
+                .style(button::secondary)
+                .on_press_maybe(can_sync.then_some(Message::PlaylistNew)),
             button(text(&strings.smart_new))
                 .width(Fill)
                 .style(button::secondary)

@@ -18,12 +18,12 @@ use open_engine_api::v1::backend_service_client::BackendServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CloseLibraryRequest, CreateSmartPlaylistRequest, GetAlbumArtRequest, GetInfoRequest,
-    GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest, ListPlaylistsRequest,
-    ListTracksRequest, NextRequest, OpenLibraryRequest, PlayRequest, PlaybackStatus,
-    PreviousRequest, SaveLibraryAsRequest, SeekRequest, SetRatingRequest, SmartRules,
-    SoundSwitchState, StopRequest, SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest,
-    UpdateSmartPlaylistRequest,
+    CloseLibraryRequest, CreatePlaylistRequest, CreateSmartPlaylistRequest, DeletePlaylistRequest,
+    GetAlbumArtRequest, GetInfoRequest, GetSyncDiffRequest, GetSyncDiffResponse,
+    GetWaveformRequest, ListPlaylistsRequest, ListTracksRequest, NextRequest, OpenLibraryRequest,
+    PlayRequest, PlaybackStatus, PreviousRequest, RenamePlaylistRequest, SaveLibraryAsRequest,
+    SeekRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest, SyncToSourceRequest,
+    SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -363,6 +363,80 @@ fn edited_from(
 ) -> SmartPlaylistEdited {
     SmartPlaylistEdited {
         playlist: edited.playlist_id as usize,
+        playlists: playlists_from(edited.playlists, |id| library.track_index(id)),
+    }
+}
+
+/// The playlists after a playlist was added, renamed or deleted: all of them, and the
+/// one that was added, if one was.
+#[derive(Debug, Clone)]
+pub struct PlaylistsEdited {
+    pub playlists: Vec<Playlist>,
+    pub playlist: Option<usize>,
+}
+
+/// Adds an empty playlist to `parent` (an index into the library's playlists), or to
+/// the top level.
+pub async fn create_playlist(
+    mut backend: Backend,
+    library: Arc<Library>,
+    title: String,
+    parent: Option<usize>,
+) -> Result<PlaylistsEdited, String> {
+    let edited = backend
+        .library
+        .create_playlist(CreatePlaylistRequest {
+            title,
+            parent_id: parent.map(|parent| parent as u32),
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    Ok(playlists_edited_from(edited, &library))
+}
+
+/// Gives the playlist at index `playlist` another title.
+pub async fn rename_playlist(
+    mut backend: Backend,
+    library: Arc<Library>,
+    playlist: usize,
+    title: String,
+) -> Result<PlaylistsEdited, String> {
+    let edited = backend
+        .library
+        .rename_playlist(RenamePlaylistRequest {
+            playlist_id: playlist as u32,
+            title,
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    Ok(playlists_edited_from(edited, &library))
+}
+
+/// Deletes the playlist at index `playlist` and what is in it.
+pub async fn delete_playlist(
+    mut backend: Backend,
+    library: Arc<Library>,
+    playlist: usize,
+) -> Result<PlaylistsEdited, String> {
+    let edited = backend
+        .library
+        .delete_playlist(DeletePlaylistRequest {
+            playlist_id: playlist as u32,
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    Ok(playlists_edited_from(edited, &library))
+}
+
+fn playlists_edited_from(
+    edited: open_engine_api::v1::PlaylistsEdited,
+    library: &Library,
+) -> PlaylistsEdited {
+    PlaylistsEdited {
+        playlist: edited.playlist_id.map(|id| id as usize),
         playlists: playlists_from(edited.playlists, |id| library.track_index(id)),
     }
 }

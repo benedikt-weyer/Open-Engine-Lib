@@ -146,3 +146,18 @@ smart_saving: Saving…
 smart_cancel: Cancel
 smart_name_missing: Give the playlist a name.
 smart_save_failed: "Could not save the smart playlist: {error}"
+playlist_new: New playlist…
+playlist_rename: Rename this playlist
+playlist_delete: Delete this playlist
+playlist_title_new: New playlist
+playlist_title_rename: Rename playlist
+playlist_title_delete: Delete playlist
+playlist_place: Create in
+playlist_top_level: (top level)
+playlist_create: Create
+playlist_rename_confirm: Rename
+playlist_delete_confirm: Delete
+playlist_delete_question: "Delete “{name}”?"
+playlist_delete_inside: "The playlists inside it are deleted too: {count}."
+playlist_delete_note: "Its tracks stay in the library. The source is only changed when you sync, and syncing keeps a backup."
+playlist_failed: "Could not change the playlists: {error}"

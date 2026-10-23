@@ -56,6 +56,21 @@ service LibraryService {
   // `CreateSmartPlaylist`, and NOT_FOUND for an unknown playlist id, INVALID_ARGUMENT
   // too if the playlist is not a smart one.
   rpc UpdateSmartPlaylist(UpdateSmartPlaylistRequest) returns (SmartPlaylistEdited);
+  // Adds an empty playlist to the working copy, at the end of the playlists of
+  // `parent_id` or of the top level. Playlist ids after it change: the answer has the
+  // new list of playlists and the id of the new one.
+  // Errors: FAILED_PRECONDITION if no library is open, INVALID_ARGUMENT for an empty
+  // title or a parent that is a smart playlist, NOT_FOUND for an unknown parent,
+  // ALREADY_EXISTS if the parent has a playlist with the title, INTERNAL if the
+  // database can't be written.
+  rpc CreatePlaylist(CreatePlaylistRequest) returns (PlaylistsEdited);
+  // Changes the title of a playlist in the working copy. Errors as for `CreatePlaylist`,
+  // and INVALID_ARGUMENT for a smart playlist (see `UpdateSmartPlaylist`).
+  rpc RenamePlaylist(RenamePlaylistRequest) returns (PlaylistsEdited);
+  // Deletes a playlist from the working copy, with the playlists and smart playlists
+  // in it. Its tracks stay in the library. Playlist ids after it change. Errors as for
+  // `RenamePlaylist`.
+  rpc DeletePlaylist(DeletePlaylistRequest) returns (PlaylistsEdited);
   // Closes the library and stops playback. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
@@ -125,6 +140,25 @@ message UpdateSmartPlaylistRequest {
 message SmartPlaylistEdited {
   // The playlist that was added or changed, in `playlists`. (A new title can move it.)
   uint32 playlist_id = 1;
+  // All playlists as `ListPlaylists` answers now.
+  repeated Playlist playlists = 2;
+}
+
+message CreatePlaylistRequest {
+  string title = 1;
+  // `Playlist.id` of the playlist to put it in; unset for the top level.
+  optional uint32 parent_id = 2;
+}
+message RenamePlaylistRequest {
+  uint32 playlist_id = 1;
+  string title = 2;
+}
+message DeletePlaylistRequest {
+  uint32 playlist_id = 1;
+}
+message PlaylistsEdited {
+  // The playlist that was added; unset after a rename or a delete.
+  optional uint32 playlist_id = 1;
   // All playlists as `ListPlaylists` answers now.
   repeated Playlist playlists = 2;
 }

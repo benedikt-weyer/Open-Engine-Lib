@@ -146,3 +146,18 @@ smart_saving: Speichern …
 smart_cancel: Abbrechen
 smart_name_missing: Bitte gib der Playlist einen Namen.
 smart_save_failed: "Die Smart-Playlist konnte nicht gespeichert werden: {error}"
+playlist_new: Neue Playlist…
+playlist_rename: Diese Playlist umbenennen
+playlist_delete: Diese Playlist löschen
+playlist_title_new: Neue Playlist
+playlist_title_rename: Playlist umbenennen
+playlist_title_delete: Playlist löschen
+playlist_place: Anlegen in
+playlist_top_level: (oberste Ebene)
+playlist_create: Anlegen
+playlist_rename_confirm: Umbenennen
+playlist_delete_confirm: Löschen
+playlist_delete_question: "„{name}“ löschen?"
+playlist_delete_inside: "Die Playlists darin werden mit gelöscht: {count}."
+playlist_delete_note: "Die Titel bleiben in der Bibliothek. Die Quelle wird erst beim Abgleich geändert, und dabei wird eine Sicherung angelegt."
+playlist_failed: "Die Playlists konnten nicht geändert werden: {error}"
