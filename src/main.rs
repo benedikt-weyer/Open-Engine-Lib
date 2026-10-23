@@ -125,6 +125,8 @@ struct State {
     reachable: Reachability,
     /// Why the recent libraries could not be saved.
     recents_error: Option<String>,
+    /// Why the last drive could not be unmounted.
+    drive_error: Option<String>,
     /// What the backend last said about playback, and when.
     status: PlaybackStatus,
     /// The playhead's position, running on between the reports in `status`.
@@ -354,6 +356,12 @@ pub enum Message {
     OpenRecent(PathBuf),
     ScanDrives,
     DrivesFound(Vec<Drive>),
+    /// The button that unmounts a drive: its block device and name.
+    UnmountDrive(PathBuf, String),
+    DriveUnmounted {
+        name: String,
+        result: Result<(), String>,
+    },
     /// Open the Engine library on a drive (the path is its `Engine Library` folder).
     OpenDrive(PathBuf),
     /// "Add local music folder…": ask for a folder.
@@ -484,6 +492,7 @@ impl State {
             covers: Covers::default(),
             reachable: Reachability::default(),
             recents_error: None,
+            drive_error: None,
             status: PlaybackStatus::default(),
             clock: Clock::new(Instant::now()),
             scratch: None,
@@ -1274,6 +1283,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::AddLocalFolder
         | Message::ChooseLibrary
         | Message::CloseLibrary
+        | Message::DriveUnmounted { .. }
         | Message::DrivesFound(..)
         | Message::ForgetRecent(..)
         | Message::LibraryChosen(..)
@@ -1283,6 +1293,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::LocalFolderChosen(..)
         | Message::MenuSelected(..)
         | Message::OpenDrive(..)
+        | Message::UnmountDrive(..)
         | Message::OpenLocalFolder(..)
         | Message::OpenRecent(..)
         | Message::Reloaded(..)
@@ -1478,6 +1489,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
             sidebar::Sources {
                 recents: &state.recents,
                 recents_error: state.recents_error.as_deref(),
+                drive_error: state.drive_error.as_deref(),
                 drives: &state.drives,
                 local: &state.local_folders,
             },
@@ -1819,6 +1831,7 @@ mod tests {
             covers: Covers::default(),
             reachable: Reachability::default(),
             recents_error: None,
+            drive_error: None,
             status: PlaybackStatus::default(),
             clock: Clock::new(Instant::now()),
             scratch: None,
@@ -2896,6 +2909,40 @@ mod tests {
     }
 
     #[test]
+    fn a_drive_that_cannot_be_unmounted_says_why_until_the_next_try() {
+        let mut state = state();
+        let _ = handle(
+            &mut state,
+            Message::DriveUnmounted {
+                name: "STICK".into(),
+                result: Err("target is busy".into()),
+            },
+        );
+        let shown = state.drive_error.clone().unwrap();
+        assert!(
+            shown.contains("STICK") && shown.contains("target is busy"),
+            "{shown}"
+        );
+
+        // Trying again clears it; a drive that went is looked for at once.
+        let _ = handle(
+            &mut state,
+            Message::UnmountDrive("/dev/sdc1".into(), "STICK".into()),
+        );
+        assert_eq!(state.drive_error, None);
+        state.scanning_drives = false;
+        let _ = handle(
+            &mut state,
+            Message::DriveUnmounted {
+                name: "STICK".into(),
+                result: Ok(()),
+            },
+        );
+        assert!(state.scanning_drives);
+        assert_eq!(state.drive_error, None);
+    }
+
+    #[test]
     fn a_library_is_repaired_in_steps() {
         let mut state = state();
         let target = PathBuf::from("/media/STICK/Engine Library");
@@ -3098,6 +3145,7 @@ mod tests {
                 name: "STICK".into(),
                 mount: "/media/STICK".into(),
                 library: None,
+                device: None,
             }]),
         );
         assert_eq!(state.reachable.get("/media/STICK/a.flac"), None);

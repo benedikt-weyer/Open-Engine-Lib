@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use iced::widget::{Space, button, column, container, row, scrollable, text, tooltip};
-use iced::{Element, Fill};
+use iced::{Center, Element, Fill};
 
 use crate::Message;
 use crate::browser::{self, Browser};
@@ -28,6 +28,8 @@ pub struct Sources<'a> {
     pub recents: &'a Recents,
     /// Why the recent libraries could not be saved.
     pub recents_error: Option<&'a str>,
+    /// Why the last drive could not be unmounted.
+    pub drive_error: Option<&'a str>,
     pub drives: &'a [Drive],
     /// The folders of music that were added.
     pub local: &'a LocalFolders,
@@ -46,6 +48,7 @@ pub fn view<'a>(
     let Sources {
         recents,
         recents_error,
+        drive_error,
         drives,
         local,
     } = sources;
@@ -77,6 +80,9 @@ pub fn view<'a>(
             list = list.push(drive_entry(drive, current, can_open, language));
         }
         drive_section = drive_section.push(scrollable(list));
+    }
+    if let Some(error) = drive_error {
+        drive_section = drive_section.push(error_text::view(error.to_owned(), language));
     }
 
     let local_section = local_section(local, current, can_open, language);
@@ -267,11 +273,26 @@ fn drive_entry<'a>(
                 .map(Message::OpenDrive),
         );
 
-    tooltip(
+    let open = tooltip(
         open,
         text(drive.mount.display().to_string()),
         tooltip::Position::Right,
     )
-    .style(container::rounded_box)
-    .into()
+    .style(container::rounded_box);
+
+    // Unmounting writes out what is still in memory, so the drive can be pulled out safely.
+    let unmount = tooltip(
+        button(text("⏏")).style(button::secondary).on_press_maybe(
+            drive
+                .device
+                .clone()
+                .filter(|_| can_open)
+                .map(|device| Message::UnmountDrive(device, drive.name.clone())),
+        ),
+        text(&strings.drive_unmount),
+        tooltip::Position::Left,
+    )
+    .style(container::rounded_box);
+
+    row![open, unmount].spacing(4).align_y(Center).into()
 }

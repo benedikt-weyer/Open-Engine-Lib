@@ -93,6 +93,8 @@ forget_library: Remove from the list
 drives: USB drives
 no_drives: No USB drives connected.
 drive_has_library: Engine library
+drive_unmount: Unmount (safe to unplug afterwards)
+drive_unmount_failed: "Could not unmount {name}: {error}"
 drive_no_library: No Engine library at the root
 recents_save_failed: "Could not save the recent libraries: {error}"
 close_library: Close library

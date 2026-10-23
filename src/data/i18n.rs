@@ -143,6 +143,8 @@ pub struct Strings {
     pub drives: String,
     pub no_drives: String,
     pub drive_has_library: String,
+    pub drive_unmount: String,
+    pub drive_unmount_failed: String,
     pub drive_no_library: String,
     pub recents_save_failed: String,
     pub close_library: String,

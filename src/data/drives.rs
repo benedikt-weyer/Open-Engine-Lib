@@ -3,7 +3,9 @@
 //! the top of the drive, so that is the only place looked at.
 //!
 //! Only Linux is supported: a drive is a mounted filesystem whose block device hangs
-//! off a USB port. Elsewhere the list is always empty.
+//! off a USB port. Elsewhere the list is always empty. A drive can be unmounted (through
+//! the desktop's UDisks service, so no root is needed), which writes out what is still in
+//! memory first.
 
 use std::path::PathBuf;
 
@@ -20,6 +22,24 @@ pub struct Drive {
     pub mount: PathBuf,
     /// The `Engine Library` folder on the drive, if it has one.
     pub library: Option<PathBuf>,
+    /// The block device the drive's filesystem is on (`/dev/sdc1`), which is what is
+    /// unmounted.
+    pub device: Option<PathBuf>,
+}
+
+/// Unmounts the filesystem on `device` (`Drive::device`) once everything written to it
+/// has reached the drive, so that it can be pulled out. Fails with the reason if
+/// something is still using it.
+pub async fn unmount(device: PathBuf) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::unmount(&device).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device;
+        Err("unmounting is only supported on Linux".into())
+    }
 }
 
 /// The connected USB drives, sorted by name. This reads the disk, so it is not for the
@@ -48,6 +68,8 @@ mod linux {
         /// `major:minor` of the device, which is also its name under `/sys/dev/block`.
         device: String,
         point: PathBuf,
+        /// The block device file (`/dev/sdc1`), when the kernel names one.
+        source: Option<PathBuf>,
     }
 
     pub fn detect() -> Vec<Drive> {
@@ -57,13 +79,13 @@ mod linux {
         let mut drives: Vec<Drive> = parse_mountinfo(&mountinfo)
             .into_iter()
             .filter(|mount| is_usb(Path::new("/sys/dev/block"), &mount.device))
-            .map(|mount| drive(mount.point))
+            .map(|mount| drive(mount.point, mount.source))
             .collect();
         drives.sort_by_key(|drive| drive.name.to_lowercase());
         drives
     }
 
-    fn drive(mount: PathBuf) -> Drive {
+    fn drive(mount: PathBuf, device: Option<PathBuf>) -> Drive {
         let library = mount.join(LIBRARY_DIR);
         let has_library = library.join(MAIN_DATABASE).is_file();
         Drive {
@@ -73,7 +95,41 @@ mod linux {
             ),
             library: has_library.then_some(library),
             mount,
+            device,
         }
+    }
+
+    /// Where UDisks has the block device `/dev/<name>`. Only plain names (`sdc1`) are
+    /// handled: UDisks escapes the others, and a USB drive has plain ones.
+    fn block_object_path(device: &Path) -> Option<String> {
+        let name = device.strip_prefix("/dev").ok()?.to_str()?;
+        (!name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric()))
+            .then(|| format!("/org/freedesktop/UDisks2/block_devices/{name}"))
+    }
+
+    pub async fn unmount(device: &Path) -> Result<(), String> {
+        use std::collections::HashMap;
+
+        let path = block_object_path(device)
+            .ok_or_else(|| format!("{} cannot be unmounted from here", device.display()))?;
+        let connection = zbus::Connection::system()
+            .await
+            .map_err(|error| format!("the system bus is not available: {error}"))?;
+        let options: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+        connection
+            .call_method(
+                Some("org.freedesktop.UDisks2"),
+                path.as_str(),
+                Some("org.freedesktop.UDisks2.Filesystem"),
+                "Unmount",
+                &(options,),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| match error {
+                zbus::Error::MethodError(_, Some(message), _) => message,
+                other => other.to_string(),
+            })
     }
 
     /// The mounts of whole filesystems of real devices. A device that is mounted in more
@@ -93,9 +149,17 @@ mod linux {
             if mounts.iter().any(|mount| mount.device == device) {
                 continue;
             }
+            // After the optional fields, a `-`, the file system type and the source.
+            let source = fields
+                .iter()
+                .position(|field| *field == "-")
+                .and_then(|dash| fields.get(dash + 2))
+                .filter(|source| source.starts_with('/'))
+                .map(|source| PathBuf::from(unescape(source)));
             mounts.push(Mount {
                 device: device.to_string(),
                 point: PathBuf::from(unescape(point)),
+                source,
             });
         }
         mounts
@@ -175,6 +239,35 @@ mod linux {
         }
 
         #[test]
+        fn knows_the_block_device_of_a_mount() {
+            let mounts = parse_mountinfo(MOUNTINFO);
+            let sources: Vec<Option<&str>> = mounts
+                .iter()
+                .map(|mount| mount.source.as_deref().and_then(Path::to_str))
+                .collect();
+            assert_eq!(
+                sources,
+                [
+                    Some("/dev/mapper/root"),
+                    Some("/dev/sda1"),
+                    Some("/dev/sdb1")
+                ]
+            );
+        }
+
+        #[test]
+        fn udisks_names_a_plain_block_device_by_its_name() {
+            assert_eq!(
+                block_object_path(Path::new("/dev/sdc1")).as_deref(),
+                Some("/org/freedesktop/UDisks2/block_devices/sdc1")
+            );
+            // Anything else would need UDisks' escaping, or is not a device file.
+            assert_eq!(block_object_path(Path::new("/dev/mapper/root")), None);
+            assert_eq!(block_object_path(Path::new("/dev/")), None);
+            assert_eq!(block_object_path(Path::new("/tmp/sdc1")), None);
+        }
+
+        #[test]
         fn unescapes_only_complete_octal_codes() {
             assert_eq!(unescape("a\\040b\\134c"), "a b\\c");
             assert_eq!(unescape("trailing\\04"), "trailing\\04");
@@ -231,20 +324,20 @@ mod linux {
             let with = temp.0.join("WITH");
             fs::create_dir_all(with.join("Engine Library/Database2")).unwrap();
             fs::write(with.join("Engine Library/Database2/m.db"), b"db").unwrap();
-            let found = drive(with.clone());
+            let found = drive(with.clone(), None);
             assert_eq!(found.name, "WITH");
             assert_eq!(found.library, Some(with.join("Engine Library")));
 
             // A folder of that name without the database isn't a library.
             let empty = temp.0.join("EMPTY");
             fs::create_dir_all(empty.join("Engine Library")).unwrap();
-            assert_eq!(drive(empty).library, None);
+            assert_eq!(drive(empty, None).library, None);
 
             // And one further down doesn't count: players only look at the root.
             let nested = temp.0.join("NESTED");
             fs::create_dir_all(nested.join("Music/Engine Library/Database2")).unwrap();
             fs::write(nested.join("Music/Engine Library/Database2/m.db"), b"db").unwrap();
-            assert_eq!(drive(nested).library, None);
+            assert_eq!(drive(nested, None).library, None);
         }
     }
 }

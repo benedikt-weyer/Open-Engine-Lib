@@ -220,6 +220,31 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
             state.drives = drives;
         }
+        Message::UnmountDrive(device, name) => {
+            state.drive_error = None;
+            return Task::perform(drives::unmount(device), move |result| {
+                Message::DriveUnmounted {
+                    name: name.clone(),
+                    result,
+                }
+            });
+        }
+        Message::DriveUnmounted { name, result } => match result {
+            // It is gone from the list at once, not at the next look.
+            Ok(()) => {
+                if !state.scanning_drives {
+                    state.scanning_drives = true;
+                    return scan_drives();
+                }
+            }
+            Err(error) => {
+                let language = state.config.effective().language;
+                state.drive_error = Some(fill(
+                    &language.strings().drive_unmount_failed,
+                    &[("name", &name), ("error", &error)],
+                ));
+            }
+        },
         Message::OpenRecent(path) | Message::OpenDrive(path) => {
             // One library at a time: the backend would end up with the other one.
             if !matches!(state.library, LibraryState::Opening(_)) {
