@@ -7,7 +7,7 @@ description = "Open Engine Lib backend: reads the Engine library and plays track
 [dependencies]
 dirs = "7.0.0"
 flate2 = "1.1.10"
-open-engine-api = { version = "0.1.0", path = "../api" }
+open-engine-api = { path = "../api" }
 rodio = { version = "0.23.0", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

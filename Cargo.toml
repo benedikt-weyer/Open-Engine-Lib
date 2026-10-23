@@ -24,7 +24,7 @@ default-run = "open-engine-lib"
 dirs = "7.0.0"
 getrandom = "0.4.3"
 iced = { version = "0.14", features = ["tokio", "image", "canvas"] }
-open-engine-api = { version = "0.1.0", path = "api" }
+open-engine-api = { path = "api" }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["rt", "time"] }
