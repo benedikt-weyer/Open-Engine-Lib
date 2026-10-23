@@ -33,6 +33,9 @@ const MIN_VIEWPORT: f32 = 1600.0;
 const INDENT: f32 = 16.0;
 /// Side of the icon that marks a smart playlist.
 const SMART_ICON: f32 = 14.0;
+/// The width of the place before a playlist's title: the arrow of a folder, or the mark
+/// of a smart playlist.
+const TOGGLE_WIDTH: f32 = 26.0;
 
 /// Which list the track pane shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,28 +223,23 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
                 .style(button::text)
                 .on_press(Message::ToggleFolder(index))
                 .into()
+        } else if playlist.is_smart {
+            // Smart playlists have no children, so their mark takes the place of the arrow.
+            container(canvas(SmartIcon).width(SMART_ICON).height(SMART_ICON))
+                .center_x(TOGGLE_WIDTH)
+                .into()
         } else {
-            Space::new().width(26).into()
+            Space::new().width(TOGGLE_WIDTH).into()
         };
         if playlist.has_children && !expanded {
             hidden_below = Some(playlist.depth);
         }
 
         let selected = browser.source == Source::Playlist(index);
-        // Smart playlists are marked; the others get no icon, and no gap either.
-        let mut label = row![].spacing(6).align_y(iced::Center);
-        if playlist.is_smart {
-            label = label.push(
-                canvas(SmartIcon { selected })
-                    .width(SMART_ICON)
-                    .height(SMART_ICON),
-            );
-        }
-        label = label.push(text(&playlist.title));
         let mut line = row![
             Space::new().width(playlist.depth as f32 * INDENT),
             toggle,
-            button(label)
+            button(text(&playlist.title))
                 .width(Fill)
                 .style(if selected {
                     button::primary
@@ -270,12 +268,10 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
     scrollable(list).width(Fill).height(Fill).into()
 }
 
-/// The mark of a smart playlist: a sparkle, in the text color of the playlist's button.
+/// The mark of a smart playlist: a sparkle, in the text color of the page.
 /// Drawn rather than written as a character so that it looks the same whatever fonts
 /// there are.
-struct SmartIcon {
-    selected: bool,
-}
+struct SmartIcon;
 
 impl canvas::Program<Message> for SmartIcon {
     type State = ();
@@ -288,12 +284,7 @@ impl canvas::Program<Message> for SmartIcon {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let palette = theme.extended_palette();
-        let color: Color = if self.selected {
-            palette.primary.base.text
-        } else {
-            palette.background.base.text
-        };
+        let color: Color = theme.extended_palette().background.base.text;
         let side = bounds.width.min(bounds.height);
 
         // A four-pointed star: points on the axes, pinched in between.
