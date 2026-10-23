@@ -8,6 +8,7 @@ use iced::{Background, Border, Color, Element, Fill, Theme};
 
 use crate::Message;
 use crate::config::Language;
+use crate::error_text;
 use crate::i18n::fill;
 
 /// What the File menu can do.
@@ -119,20 +120,19 @@ pub fn view<'a>(
         bar = bar.push(text(fill(&strings.saving_library, &[("path", &path.display())])).size(14));
     }
     if let Some(error) = error {
-        bar = bar.push(
-            text(fill(&strings.save_library_failed, &[("error", &error)]))
-                .size(14)
-                .style(text::danger),
-        );
+        bar = bar.push(error_text::compact(
+            fill(&strings.save_library_failed, &[("error", &error)]),
+            14,
+            language,
+        ));
     }
     if reloading {
         bar = bar.push(text(&strings.reloading_library).size(14));
     } else if let Some((message, failed)) = reload {
-        let message = text(message).size(14);
         bar = bar.push(if failed {
-            message.style(text::danger)
+            error_text::compact(message, 14, language)
         } else {
-            message
+            text(message).size(14).into()
         });
     }
     iced::widget::container(bar.width(Fill))

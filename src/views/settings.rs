@@ -5,6 +5,7 @@ use crate::Message;
 use crate::config::{
     ConfigStore, Language, ThemeMode, WAVEFORM_DELAY_MAX_MS, WaveformBand, WaveformColors,
 };
+use crate::error_text;
 use crate::i18n::fill;
 
 fn theme_name(language: Language, theme: ThemeMode) -> &'static str {
@@ -176,11 +177,13 @@ pub fn view<'a>(
     }
 
     for warning in &config.warnings {
-        page = page.push(text(warning.as_str()).style(text::danger));
+        page = page.push(error_text::view(warning.as_str(), language));
     }
     if let Some(error) = error {
-        page =
-            page.push(text(fill(&strings.save_failed, &[("error", &error)])).style(text::danger));
+        page = page.push(error_text::view(
+            fill(&strings.save_failed, &[("error", &error)]),
+            language,
+        ));
     }
 
     page.into()

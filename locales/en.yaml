@@ -167,6 +167,7 @@ local_hint: "A folder of music files: only what the files say is shown."
 close_folder: "Close folder"
 now_playing: "{title} · {artist}"
 streaming_not_playable: "“{title}” is a streaming track and can't be played here."
+copy_error: "Copy"
 file_missing: "“{title}” was not found: {path}"
 play_failed: "Could not play “{title}”: {error}"
 smart_new: New smart playlist…

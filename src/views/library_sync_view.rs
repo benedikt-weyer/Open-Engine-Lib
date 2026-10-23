@@ -13,6 +13,7 @@ use open_engine_api::v1::{GetLibrarySyncDiffResponse, OperationProgress, SyncToL
 use crate::Message;
 use crate::config::Language;
 use crate::drives::Drive;
+use crate::error_text;
 use crate::i18n::fill;
 use crate::progress_view::{self, format_size};
 use crate::recent::{Recents, display_name};
@@ -172,7 +173,7 @@ pub fn modal<'a>(
                 &strings.libsync_target,
                 &[("path", &target.display())]
             )),
-            text(fill(&strings.libsync_failed, &[("error", error)])).style(text::danger),
+            error_text::view(fill(&strings.libsync_failed, &[("error", error)]), language),
             row![
                 button(text(&strings.libsync_back))
                     .style(button::secondary)
@@ -453,9 +454,10 @@ fn ready<'a>(
         }
     }
     if let Some(error) = error {
-        content = content.push(
-            text(fill(&strings.libsync_run_failed, &[("error", &error)])).style(text::danger),
-        );
+        content = content.push(error_text::view(
+            fill(&strings.libsync_run_failed, &[("error", &error)]),
+            language,
+        ));
     }
 
     let buttons = row![

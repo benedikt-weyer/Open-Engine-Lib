@@ -34,8 +34,9 @@ use recent::Recents;
 use session::{Session, SessionStore};
 use sync_view::Stage as SyncStage;
 use views::{
-    browser, cue_bar, cue_editor, deck, library_sync_view, loop_bar, loop_editor, menubar, navbar,
-    player_bar, playlist_dialog, progress_view, settings, sidebar, smart_editor, sync_view,
+    browser, cue_bar, cue_editor, deck, error_text, library_sync_view, loop_bar, loop_editor,
+    menubar, navbar, player_bar, playlist_dialog, progress_view, settings, sidebar, smart_editor,
+    sync_view,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -174,6 +175,8 @@ pub enum Message {
     ThemeSelected(ThemeMode),
     LanguageSelected(Language),
     ResetOverrides,
+    /// Puts an error message on the clipboard.
+    CopyText(String),
     WaveformColorsSelected(WaveformColors),
     /// A waveform gain slider is being dragged to a value: not saved until it is let go.
     WaveformGainDragged(WaveformBand, f32),
@@ -1039,6 +1042,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         return Task::none();
     }
     match message {
+        Message::CopyText(text) => iced::clipboard::write(text),
         Message::BackendStarted(..)
         | Message::CloseRequested(..)
         | Message::LanguageSelected(..)
@@ -1238,9 +1242,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
         }
         BackendState::Failed(error) => {
             return centered(vec![
-                text(fill(&strings.backend_failed, &[("error", error)]))
-                    .style(text::danger)
-                    .into(),
+                error_text::view(fill(&strings.backend_failed, &[("error", error)]), language),
                 button(text(&strings.retry))
                     .on_press(Message::RetryBackend)
                     .into(),
@@ -1263,11 +1265,10 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
                     .into(),
             ];
             if let Some(error) = error {
-                lines.push(
-                    text(fill(&strings.open_failed, &[("error", error)]))
-                        .style(text::danger)
-                        .into(),
-                );
+                lines.push(error_text::view(
+                    fill(&strings.open_failed, &[("error", error)]),
+                    language,
+                ));
             }
             if let Some(error) = &state.backend_error {
                 lines.push(backend_error(language, error));
@@ -1437,7 +1438,10 @@ fn open_library<'a>(
     page = page.push(bar);
 
     if let Some(error) = &state.status.error {
-        page = page.push(text(playback_error(language, error, library)).style(text::danger));
+        page = page.push(error_text::view(
+            playback_error(language, error, library),
+            language,
+        ));
     }
     if let Some(error) = &state.backend_error {
         page = page.push(backend_error(language, error));
@@ -1453,12 +1457,10 @@ fn centered<'a>(lines: Vec<Element<'a, Message>>) -> Element<'a, Message> {
 }
 
 fn backend_error<'a>(language: Language, error: &str) -> Element<'a, Message> {
-    text(fill(
-        &language.strings().backend_error,
-        &[("error", &error)],
-    ))
-    .style(text::danger)
-    .into()
+    error_text::view(
+        fill(&language.strings().backend_error, &[("error", &error)]),
+        language,
+    )
 }
 
 fn playback_error(language: Language, error: &PlaybackError, library: &Library) -> String {

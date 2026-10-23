@@ -11,6 +11,7 @@ use open_engine_api::v1::{SmartRule, SmartRules};
 
 use crate::Message;
 use crate::config::Language;
+use crate::error_text;
 use crate::i18n::{Strings, fill};
 
 const WIDTH: f32 = 720.0;
@@ -422,7 +423,7 @@ pub fn modal<'a>(editor: &'a Editor, language: Language) -> Element<'a, Message>
         );
     }
     if let Some(error) = &editor.error {
-        body = body.push(text(error).style(text::danger));
+        body = body.push(error_text::view(error.as_str(), language));
     }
 
     let save = button(text(if editor.saving {

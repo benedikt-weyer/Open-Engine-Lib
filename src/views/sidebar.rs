@@ -11,6 +11,7 @@ use crate::Message;
 use crate::browser::{self, Browser};
 use crate::config::Language;
 use crate::drives::Drive;
+use crate::error_text;
 use crate::local_folders::LocalFolders;
 use crate::recent::{Recents, display_name};
 
@@ -61,13 +62,10 @@ pub fn view<'a>(
         section = section.push(scrollable(list));
     }
     if let Some(error) = recents_error {
-        section = section.push(
-            text(crate::i18n::fill(
-                &strings.recents_save_failed,
-                &[("error", &error)],
-            ))
-            .style(text::danger),
-        );
+        section = section.push(error_text::view(
+            crate::i18n::fill(&strings.recents_save_failed, &[("error", &error)]),
+            language,
+        ));
     }
 
     let mut drive_section = column![text(&strings.drives).size(16)].spacing(6);

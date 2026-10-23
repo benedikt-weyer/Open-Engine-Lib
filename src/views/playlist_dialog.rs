@@ -7,6 +7,7 @@ use iced::{Color, Element, Fill, Theme};
 
 use crate::Message;
 use crate::config::Language;
+use crate::error_text;
 use crate::i18n::fill;
 use crate::model::Library;
 use crate::smart_editor::{Choice, choice};
@@ -153,7 +154,7 @@ pub fn modal<'a>(
         }
     }
     if let Some(error) = &dialog.error {
-        body = body.push(text(error).style(text::danger));
+        body = body.push(error_text::view(error.as_str(), language));
     }
 
     let confirm_label = match dialog.kind {

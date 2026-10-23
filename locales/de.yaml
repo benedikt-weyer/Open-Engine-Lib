@@ -167,6 +167,7 @@ local_hint: "Ein Ordner mit Musikdateien: Es wird nur angezeigt, was die Dateien
 close_folder: "Ordner schließen"
 now_playing: "{title} · {artist}"
 streaming_not_playable: "„{title}“ ist ein Streaming-Titel und kann hier nicht abgespielt werden."
+copy_error: "Kopieren"
 file_missing: "„{title}“ wurde nicht gefunden: {path}"
 play_failed: "„{title}“ konnte nicht abgespielt werden: {error}"
 smart_new: Neue Smart-Playlist…

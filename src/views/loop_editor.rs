@@ -11,6 +11,7 @@ use iced::{Background, Border, Center, Color, Element, Fill, Theme};
 use crate::Message;
 use crate::config::Language;
 use crate::cues::{self, PALETTE, SLOTS};
+use crate::error_text;
 use crate::i18n::fill;
 use crate::loops::Loop;
 
@@ -210,7 +211,7 @@ pub fn modal<'a>(editor: &'a Editor, language: Language) -> Element<'a, Message>
     ]
     .spacing(14);
     if let Some(error) = &editor.error {
-        body = body.push(text(error).style(text::danger));
+        body = body.push(error_text::view(error.as_str(), language));
     }
 
     let save = button(text(if editor.busy {

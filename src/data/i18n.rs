@@ -290,6 +290,7 @@ pub struct Strings {
     pub now_playing: String,
     pub streaming_not_playable: String,
     pub file_missing: String,
+    pub copy_error: String,
     pub play_failed: String,
 }
 

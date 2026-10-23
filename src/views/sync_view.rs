@@ -13,6 +13,7 @@ use open_engine_api::v1::{
 
 use crate::Message;
 use crate::config::Language;
+use crate::error_text;
 use crate::i18n::fill;
 
 const WIDTH: f32 = 760.0;
@@ -78,7 +79,10 @@ pub fn modal<'a>(
     let body: Element<'a, Message> = match stage {
         Stage::Loading => text(&strings.sync_comparing).into(),
         Stage::Failed(error) => column![
-            text(fill(&strings.sync_load_failed, &[("error", error)])).style(text::danger),
+            error_text::view(
+                fill(&strings.sync_load_failed, &[("error", error)]),
+                language
+            ),
             row![
                 button(text(&strings.sync_refresh)).on_press(Message::SyncOpen),
                 button(text(&strings.sync_close)).on_press(Message::SyncClose),
@@ -207,8 +211,10 @@ fn ready<'a>(
         }));
     }
     if let Some(error) = error {
-        content = content
-            .push(text(fill(&strings.sync_failed, &[("error", &error)])).style(text::danger));
+        content = content.push(error_text::view(
+            fill(&strings.sync_failed, &[("error", &error)]),
+            language,
+        ));
     }
 
     let runnable = if reverse {
