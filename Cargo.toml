@@ -44,3 +44,6 @@ yaml_serde = "0.10.7"
 # MPRIS, the desktop's media interface, is D-Bus and only Linux has it.
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
+
+[dev-dependencies]
+iced_runtime = "0.14"

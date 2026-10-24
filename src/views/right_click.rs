@@ -2,9 +2,19 @@
 //! wraps, which `mouse_area` does not (it only says that it did), so that a context menu can
 //! open at the pointer. Everything else is left to the wrapped widget.
 
-use iced::advanced::widget::{Operation, Tree, Widget};
+use iced::advanced::widget::{Operation, Tree, Widget, tree};
 use iced::advanced::{Clipboard, Layout, Shell, layout, mouse, overlay, renderer};
 use iced::{Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
+
+/// How far what the wrapper is in has been moved, by the scrollables around it, from where
+/// it is on the window. Inside a scrollable the pointer is where it is in the content, which
+/// is the position on the window plus the distance scrolled, so it has to be taken off
+/// again. A widget is told this only when it is asked for its overlay, which happens before
+/// every batch of events.
+#[derive(Default)]
+struct State {
+    translation: Vector,
+}
 
 pub struct RightClick<'a, Message> {
     content: Element<'a, Message>,
@@ -24,6 +34,14 @@ pub fn right_click<'a, Message>(
 }
 
 impl<Message> Widget<Message, Theme, Renderer> for RightClick<'_, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(State::default())
+    }
+
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.content)]
     }
@@ -88,7 +106,8 @@ impl<Message> Widget<Message, Theme, Renderer> for RightClick<'_, Message> {
             && cursor.is_over(layout.bounds())
             && let Some(position) = cursor.position()
         {
-            shell.publish((self.on_right_click)(position));
+            let translation = tree.state.downcast_ref::<State>().translation;
+            shell.publish((self.on_right_click)(position + translation));
             shell.capture_event();
         }
     }
@@ -139,6 +158,7 @@ impl<Message> Widget<Message, Theme, Renderer> for RightClick<'_, Message> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        tree.state.downcast_mut::<State>().translation = translation;
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,

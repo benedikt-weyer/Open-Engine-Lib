@@ -1437,6 +1437,18 @@ fn view_page(state: &State) -> Element<'_, Message> {
     .width(Fill)
     .height(Fill)
     .into();
+    with_windows(state, window, language)
+}
+
+/// The page with the window that is open over it, if one is. The page stays the first of a
+/// stack whether a window is open or not, so that it keeps its state (how far the track
+/// list is scrolled) when one opens: a different widget in its place would be built anew,
+/// and the scrollable would tell that it has "scrolled", which closes the track menu.
+fn with_windows<'a>(
+    state: &'a State,
+    window: Element<'a, Message>,
+    language: Language,
+) -> Element<'a, Message> {
     // The sync window lies over the whole app, which is dimmed and can't be used meanwhile.
     // So do the windows for playlists (only one is open at a time).
     if let Some(stage) = &state.sync {
@@ -1491,7 +1503,7 @@ fn view_page(state: &State) -> Element<'_, Message> {
             playlist_dialog::modal(dialog, &browser.library, language)
         ]
         .into(),
-        _ => window,
+        _ => iced::widget::stack![window].into(),
     }
 }
 
@@ -1871,6 +1883,137 @@ mod tests {
             ));
         }
         DIR.with(PathBuf::clone)
+    }
+
+    /// Runs the events through the UI of the open library, without a window, and gives the
+    /// messages they make.
+    fn press(
+        state: &State,
+        cache: iced_runtime::user_interface::Cache,
+        events: &[iced::Event],
+        at: iced::Point,
+    ) -> (Vec<Message>, iced_runtime::user_interface::Cache) {
+        use iced::advanced::renderer::Headless;
+        let LibraryState::Open(browser) = &state.library else {
+            panic!("a library is open");
+        };
+        let mut renderer = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(<iced::Renderer as Headless>::new(
+                iced::Font::default(),
+                iced::Pixels(16.0),
+                Some("tiny-skia"),
+            ))
+            .expect("a renderer that needs no graphics card");
+        let mut interface = iced_runtime::user_interface::UserInterface::build(
+            with_windows(
+                state,
+                open_library(state, browser, Language::English),
+                Language::English,
+            ),
+            iced::Size::new(1400.0, 700.0),
+            cache,
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        interface.update(
+            events,
+            iced::mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        (messages, interface.into_cache())
+    }
+
+    /// An app whose track list is long enough to scroll.
+    fn state_with_a_long_list() -> State {
+        let mut state = state();
+        state.library = LibraryState::Open(Browser::new(Arc::new(Library::new(
+            "/media/DRIVE/Engine Library".into(),
+            "/cache".into(),
+            (0..3000)
+                .map(|i| Track {
+                    path: format!("../Music/{i}.flac"),
+                    ..track(i % 3)
+                })
+                .collect(),
+            vec![playlist("House", 0, true, &[])],
+        ))));
+        state
+    }
+
+    #[test]
+    fn the_context_menu_stays_open_in_a_list_with_a_scrollbar() {
+        use iced::mouse::{Button, Event};
+        let mut state = state_with_a_long_list();
+        let at = iced::Point::new(600.0, 300.0);
+        let moved = iced::Event::Mouse(Event::CursorMoved { position: at });
+        let right = iced::Event::Mouse(Event::ButtonPressed(Button::Right));
+        let redraw = || iced::Event::Window(iced::window::Event::RedrawRequested(Instant::now()));
+
+        let (messages, mut cache) = press(&state, Default::default(), &[redraw()], at);
+        for message in messages {
+            let _ = handle(&mut state, message);
+        }
+        let (messages, next) = press(&state, cache, &[moved, right], at);
+        cache = next;
+        for message in messages {
+            let _ = handle(&mut state, message);
+        }
+        assert!(state.track_menu.is_some(), "a right click opens the menu");
+
+        // The menu is on screen now, and the window is drawn again.
+        for _ in 0..3 {
+            let (messages, next) = press(&state, cache, &[redraw()], at);
+            cache = next;
+            for message in messages {
+                let _ = handle(&mut state, message);
+            }
+        }
+        assert!(
+            state.track_menu.is_some(),
+            "drawing the list again is not scrolling it"
+        );
+    }
+
+    #[test]
+    fn the_context_menu_opens_where_the_right_click_was_even_in_a_scrolled_list() {
+        use iced::mouse::{Button, Event, ScrollDelta};
+        let mut state = state_with_a_long_list();
+        let at = iced::Point::new(600.0, 300.0);
+        let moved = iced::Event::Mouse(Event::CursorMoved { position: at });
+        let mut cache = iced_runtime::user_interface::Cache::default();
+
+        // Scrolled down by ten screens.
+        for _ in 0..5 {
+            let wheel = iced::Event::Mouse(Event::WheelScrolled {
+                delta: ScrollDelta::Pixels { x: 0.0, y: -600.0 },
+            });
+            let (messages, next) = press(&state, cache, &[moved.clone(), wheel], at);
+            cache = next;
+            for message in messages {
+                let _ = handle(&mut state, message);
+            }
+        }
+
+        let right = iced::Event::Mouse(Event::ButtonPressed(Button::Right));
+        let (messages, _) = press(&state, cache, &[moved, right], at);
+        let opened: Vec<_> = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::TrackMenuOpen { row, at } => Some((row, at)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened.len(), 1, "a right click on a track opens its menu");
+        let (row, opened_at) = opened[0];
+        assert!(row > 0, "it is a track far down the list: {row}");
+        assert_eq!(
+            opened_at, at,
+            "the menu opens at the pointer, not further down"
+        );
     }
 
     fn state() -> State {
