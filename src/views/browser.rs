@@ -9,8 +9,8 @@ use std::sync::Arc;
 use iced::widget::canvas::{Frame, Geometry, Path};
 use iced::widget::image::Handle;
 use iced::widget::{
-    Space, button, canvas, checkbox, column, container, image, mouse_area, row, scrollable, text,
-    tooltip,
+    Space, button, canvas, checkbox, column, container, image, mouse_area, responsive, row,
+    scrollable, text, tooltip,
 };
 use iced::{Color, ContentFit, Element, Fill, Point, Rectangle, Renderer, Size, Theme, mouse};
 
@@ -915,13 +915,37 @@ fn column_picker<'a>(kind: Kind, hidden: &Hidden, language: Language) -> Element
     .into()
 }
 
+/// The least width the location column is given before the list scrolls sideways.
+const LOCATION_MIN_WIDTH: f32 = 200.0;
+
+/// The width the lines of the list need: the columns, their gaps and the least the
+/// location gets. When the window is narrower than this the list scrolls sideways.
+fn content_width(layout: Layout<'_>, numbered: bool) -> f32 {
+    let Layout {
+        widths,
+        hidden,
+        kind,
+    } = layout;
+    // The padding of a line, then the marker and the cover, each followed by a gap.
+    let mut width = 16.0 + MARKER_WIDTH + GAP + THUMBNAIL + GAP;
+    if numbered {
+        width += NUMBER_WIDTH + GAP;
+    }
+    for column in Column::ALL {
+        if shown(column, kind, hidden) {
+            width += widths.get(column) + GAP;
+        }
+    }
+    width + LOCATION_MIN_WIDTH
+}
+
 /// The tracks of the shown list. `playing` is the row that is playing, if it is in this list.
 pub fn tracks<'a>(
     browser: &'a Browser,
     playing: Option<usize>,
-    covers: &Covers,
-    reachable: &Reachability,
-    columns: Columns<'_>,
+    covers: &'a Covers,
+    reachable: &'a Reachability,
+    columns: Columns<'a>,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -959,63 +983,76 @@ pub fn tracks<'a>(
         kind,
     };
     let numbered = browser.numbered();
-    let header = header(language, layout, browser.sort(), numbered);
 
     if list.is_empty() {
+        let header = header(language, layout, browser.sort(), numbered);
         return column![heading, header, text(&strings.no_tracks)]
             .spacing(10)
             .width(Fill)
             .into();
     }
 
-    // Only the rows near the viewport exist; spacers stand in for the rest.
-    let Range {
-        start: first,
-        end: last,
-    } = browser.visible_rows();
+    // The header and the rows are as wide as their columns need, or as the window if that
+    // is more, and scroll sideways together; the rows scroll up and down below the header.
+    let needed = content_width(layout, numbered);
+    let table = responsive(move |size| {
+        // Only the rows near the viewport exist; spacers stand in for the rest.
+        let Range {
+            start: first,
+            end: last,
+        } = browser.visible_rows();
 
-    let mut body = column![Space::new().height(first as f32 * ROW_HEIGHT)];
-    for (row_index, &track_index) in list.iter().enumerate().take(last).skip(first) {
-        let track = &browser.library.tracks[track_index];
-        body = body.push(track_row(
-            track,
-            row_index,
-            RowState {
-                selected: browser.selected == Some(row_index),
-                origin: browser.origin(track),
-                location_reachable: reachable.get(&track.location),
-                origin_reachable: browser
-                    .origin(track)
-                    .and_then(|origin| reachable.get(origin)),
-                playing: playing == Some(row_index),
-                stars: stars_of(browser.rating(track.id)),
-                cues: browser.cue_count(track.id),
-                loops: browser.loop_count(track.id),
-                analysis: browser.analysis(track),
-                analysis_origin: browser.analysis_origin(track),
-                analysis_note: browser.analysis_note(track),
-                bpm: browser.bpm(track),
-                number: numbered.then(|| browser.position(row_index) + 1),
-            },
-            track.album_art.and_then(|id| covers.get(id)),
-            layout,
-            language,
-        ));
-    }
-    body = body.push(Space::new().height((list.len() - last) as f32 * ROW_HEIGHT));
+        let mut body = column![Space::new().height(first as f32 * ROW_HEIGHT)];
+        for (row_index, &track_index) in list.iter().enumerate().take(last).skip(first) {
+            let track = &browser.library.tracks[track_index];
+            body = body.push(track_row(
+                track,
+                row_index,
+                RowState {
+                    selected: browser.selected == Some(row_index),
+                    origin: browser.origin(track),
+                    location_reachable: reachable.get(&track.location),
+                    origin_reachable: browser
+                        .origin(track)
+                        .and_then(|origin| reachable.get(origin)),
+                    playing: playing == Some(row_index),
+                    stars: stars_of(browser.rating(track.id)),
+                    cues: browser.cue_count(track.id),
+                    loops: browser.loop_count(track.id),
+                    analysis: browser.analysis(track),
+                    analysis_origin: browser.analysis_origin(track),
+                    analysis_note: browser.analysis_note(track),
+                    bpm: browser.bpm(track),
+                    number: numbered.then(|| browser.position(row_index) + 1),
+                },
+                track.album_art.and_then(|id| covers.get(id)),
+                layout,
+                language,
+            ));
+        }
+        body = body.push(Space::new().height((list.len() - last) as f32 * ROW_HEIGHT));
 
-    column![
-        heading,
-        header,
-        scrollable(body)
-            .id(iced::widget::Id::new(TRACKS))
-            .on_scroll(Message::TrackListScrolled)
+        let table = column![
+            header(language, layout, browser.sort(), numbered),
+            scrollable(body)
+                .id(iced::widget::Id::new(TRACKS))
+                .on_scroll(Message::TrackListScrolled)
+                .width(Fill)
+                .height(Fill),
+        ]
+        .spacing(10)
+        .width(size.width.max(needed))
+        .height(Fill);
+        scrollable(table)
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().spacing(2),
+            ))
             .width(Fill)
-            .height(Fill),
-    ]
-    .spacing(10)
-    .width(Fill)
-    .into()
+            .height(Fill)
+            .into()
+    });
+
+    column![heading, table].spacing(10).width(Fill).into()
 }
 
 /// Id of the track list's scrollable, to scroll it back to the top.
