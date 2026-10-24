@@ -69,7 +69,28 @@ One row per track, `id` is `AUTOINCREMENT` and never reused (a trigger aborts in
 Triggers keep `lastEditTime` current, forbid changing or recycling `id`, fill in `originTrackId`/`originDatabaseUuid`, and insert an empty `PerformanceData` row for every new track.
 
 ### `PerformanceData`
-One row per track (`trackId` is the primary key and a foreign key with cascade). The analysis results are all BLOBs, decoded in the next section: `trackData`, `overviewWaveFormData`, `beatData`, `quickCues`, `loops`. Also `thirdPartySourceId` and `activeOnLoadLoops`.
+One row per track (`trackId` is the primary key and a foreign key with cascade). The analysis results are all BLOBs, decoded in the next section.
+
+| Column | Holds | Seen |
+| --- | --- | --- |
+| `trackData` | Sample rate, sample count, key and three band levels (see [below](#trackdata-44-or-68-bytes-decompressed-big-endian)) | NULL only for an unanalysed track |
+| `overviewWaveFormData` | The coarse overview waveform in three bands | NULL only for an unanalysed track |
+| `beatData` | The beatgrid, as analysed and as adjusted | NULL only for an unanalysed track |
+| `quickCues` | The eight cue pads | NULL for an unanalysed track, and for some streaming tracks |
+| `loops` | The eight loop pads | As `quickCues`, and for more streaming tracks |
+| `thirdPartySourceId` (integer) | Nothing is known about it: no table refers to it | NULL in every row of the four libraries looked at (6,419 rows, streaming tracks included) |
+| `activeOnLoadLoops` (integer) | Looks like a flag. Open Engine Lib doesn't touch it. | `0` for every analysed track, NULL for every unanalysed one |
+
+#### Analysed and not analysed
+A track can be in the library without being analysed. `Track.isAnalyzed` and the row's contents agree:
+
+- **Not analysed** (`isAnalyzed = 0`): the `PerformanceData` row exists (the insert trigger above makes it) but is empty: every BLOB and `activeOnLoadLoops` are NULL. The `Track` row has `length`, `bpm` and `bpmAnalyzed` NULL and `key = -1`. This was the case for 9 of 3,123 tracks in one library and 9 of 3,294 in another (the same nine FLAC files of one folder, added on one day), all of them files, not streaming tracks.
+- **Analysed** (`isAnalyzed = 1`): `trackData`, `overviewWaveFormData` and `beatData` are always set. `quickCues` and `loops` are set for every analysed file in these two libraries (3,114 tracks in each). Of the 171 TIDAL streaming tracks in the second library, 170 are analysed; of those, 93 have cues but no `loops` and one has neither cues nor loops. (The library the sections below were first decoded from had 11 tracks without `quickCues` and 104 without `loops`, so a file track can lack them too.)
+- **The 171st streaming track is `isAnalyzed = 0` but has `trackData`, `overviewWaveFormData` and `beatData`** (and no cues or loops). So the flag is not simply "has a `trackData` blob" for streaming tracks.
+- There was no orphan `PerformanceData` row and no track without a row in any of the four libraries.
+- The trigger `trigger_PerformanceData_after_update_Track_timestamp` is declared `AFTER UPDATE OF trackData, isAnalyzed, ...` on `PerformanceData`, but `isAnalyzed` is a column of `Track`, not of `PerformanceData`. The trigger fires for the other listed columns, so a change to a blob updates `Track.lastEditTime`; that `isAnalyzed` is listed there looks like a mistake in Engine's schema.
+
+For Open Engine Lib this means: cues and loops cannot be written for an unanalysed track (there is no sample rate to put positions in), and its beatgrid is empty.
 
 ### `AlbumArt`
 `id`, `hash` (indexed), `albumArt` (BLOB). `Track.albumArtId` points here. Rows come in five kinds, told apart by the SQLite type of `hash` and by what `albumArt` holds:
@@ -141,13 +162,26 @@ Common wrapper for `trackData`, `beatData`, `quickCues`, `overviewWaveFormData` 
 
 Decoded layouts below are from the library inspected. Field names are mine.
 
-### `trackData` (44 bytes decompressed, big-endian)
+### `trackData` (44 or 68 bytes decompressed, big-endian)
 | Offset | Type | Meaning |
 | --- | --- | --- |
-| 0 | f64 | sample rate (44100.0) |
-| 8 | i64 | total sample count |
-| 16 | i32 | key (matches `Track.key`) |
-| 20 | 3 × f64 | values in the 0–1 range, probably loudness measures (not verified) |
+| 0 | f64 | sample rate (44100.0 for 2,863 of 3,114 tracks; 48000, 88200, 96000, 176400 and 192000 also occur) |
+| 8 | i64 | total sample count (divided by the sample rate it matched `Track.length` to within 1.5 s for every track that has a length, in both libraries) |
+| 16 | i32 | key (matches `Track.key` for all 3,114 tracks of one library. In the other it differs for 7 of 3,285 tracks, all of them TIDAL streaming tracks) |
+| 20 | 3 × f64 | three levels in the range 0 to 1, see below |
+| 44 | 3 × f64 | only in the 68-byte form: nearly always zero, see below |
+
+**The three levels (offset 20).** They are `0.0, 0.0, 0.0` for 2,356 of 3,114 tracks (76 %) and filled in for the other 758, in both forms of the blob. Where filled in they are ordered from large to small (first ≥ second ≥ third) for 719 of 758, and range from 0.19 to 0.89, 0.16 to 0.72 and 0.06 to 0.52.
+
+What they are was worked out from tracks whose audio file was on this machine (24 tracks with filled-in levels, and the overview waveform of the 758):
+
+- They follow the three bands of the overview waveform (below): the correlation over the tracks between level *n* and the mean of overview channel *n* was 0.77, 0.73 and 0.64, and between the levels of the same band was higher than across bands (for the maximum of the channel: 0.87, 0.75 and 0.70). None of the statistics tried (mean, median, maximum, percentiles, RMS of the overview channel) gave a constant ratio to the level (the spread of the ratio was 19 % at best, usually 20 to 30 %).
+- Against the audio itself (ffmpeg's `astats` after band filters with 250 Hz and 4 kHz as split points), the first level correlated with the loudest 50 ms RMS of the low band at 0.88 and was about 1.19 times it (6 % spread); but it correlated just as well with the same figure for the whole mix (0.88), because the bass dominates these tracks. The third correlated with the high band's figure at 0.80 and with the whole mix's at only 0.32, which does point to the high band. The second correlated with the mid band only weakly (0.44, no better than with the low band or the whole mix). No figure matched any of them exactly.
+- The same-named file analysed in two libraries gave 0.656641 and 0.656655 for the first level, the identical second level and 0.242489 and 0.242489 (differing only in the eighth digit) for the third, so they are measured from the audio, not constants.
+
+So they are most likely a summary level of the low, mid and high band of the track (**inferred**; the second one is the weakest evidence). The exact quantity and the split points were **not identified**, and nothing in Open Engine Lib uses them. Why 76 % of the tracks have zeros was not looked into; a zero triple does not mean the track is unanalysed (all of those tracks have every other BLOB).
+
+**The 68-byte form.** 460 of 3,114 tracks have 24 more bytes after the levels (the other 2,654 have 44). They are almost all zero: 458 of the 460 are `0.0, 0.0, 0.0`. The two others (tracks 2943 and 2944, added the same day) have three more values between 0 and 1 (`0.22, 0.44, 0.34` and `0.41, 0.19, 0.39`), not in decreasing order and different from the first three. The 68-byte form belongs to newer imports: every track added since July 2026 has it (425 tracks), and so do 35 of those added in January and February; every track added in December 2025 and March 2026 has 44 bytes. That is consistent with a newer version of Engine writing it, but the version was not looked at: `Information` has the same schema version (3.0.2) for all of them. Open Engine Lib reads only the first 44 bytes and never writes this BLOB.
 
 ### `beatData` (decompressed)
 | Offset | Type | Meaning |
@@ -159,7 +193,15 @@ Decoded layouts below are from the library inspected. Field names are mine.
 | 25 | N × 24 bytes | markers, **little-endian**: f64 sample offset, i64 beat number, i32 beats until next marker, i32 unknown |
 | ... | i64 BE | number of adjusted markers, followed by the same marker layout |
 
-Nine trailing bytes after the adjusted markers were not identified. Open Engine Lib uses the adjusted list (falling back to the analysed one) and draws beats evenly spaced between markers; beat numbers divisible by 4 start a bar, which matches the first marker's number in the tracks I looked at (-4) but is otherwise an assumption. Sanity check: BPM computed from the first and last marker (`60 × sampleRate × Δbeats / Δsamples`) matched `bpmAnalyzed` within 0.6 BPM for 3,265 of 3,284 tracks. The rest are likely variable-tempo grids or grids edited after analysis, which I did not investigate.
+Findings about the markers, from the 3,285 tracks of one library:
+
+- Every track has **exactly two markers in each list**: one before the start of the audio and one after its end. The beats between them are not stored, so they have to be assumed evenly spaced.
+- The first marker's beat number is a multiple of 4 (3,285 of 3,285; -4 in all that were printed) and its sample offset is negative (3,285 of 3,285), so before the audio starts. Its "beats until next marker" is the difference of the two beat numbers (always), and the last marker's is 0.
+- The two lists are identical for 3,263 of 3,285 tracks, so the adjusted grid is a copy of the analysed one unless the user changed it. `isBeatGridLocked` is 1 for 20 tracks.
+- The last `i32` of a marker (the one the table calls unknown) is 0 on the first marker of 3,189 tracks. On the last marker it is 0 for 560 tracks, a number under 256 for 2,524 and a large arbitrary number for 201 (186 different values in all). It has no pattern that was found and looks like uninitialised padding. Open Engine Lib ignores it.
+- The nine trailing bytes are **one byte (always 0) and a big-endian f64**. The f64 is `0.0` for 3,153 tracks, `-2048.0` for 131 and `-5058.0` for one. `-2048.0` was seen on 99 of 116 `mp4` and 31 of 2,763 44.1 kHz `flac` tracks, one `m4a`, and on no `mp3`. 2,048 samples is the usual priming (encoder delay) of AAC, which the `mp4` tracks presumably are, so this is probably the start offset of the audio in samples. That is **inferred**: it was not compared with the audio. Open Engine Lib does not use it and keeps these bytes as they are.
+
+Open Engine Lib uses the adjusted list (falling back to the analysed one) and draws beats evenly spaced between markers; beat numbers divisible by 4 start a bar, which matches the first marker's number in the tracks I looked at (-4) but is otherwise an assumption. Sanity check: BPM computed from the first and last marker (`60 × sampleRate × Δbeats / Δsamples`) matched `bpmAnalyzed` within 0.6 BPM for 3,265 of 3,284 tracks. The rest are likely variable-tempo grids or grids edited after analysis, which I did not investigate.
 
 ### `quickCues` (big-endian)
 `i64 count` (8 in every track of a library of 3,294), then per cue: `u8 label length`, label bytes, `f64 sample position`, `4 bytes ARGB colour`. Then a 17-byte tail: `f64`, `u8`, `f64`. These look like the main cue point (adjusted and default) with an override flag.
@@ -174,7 +216,7 @@ The tail was `bff0000000000000 00 bff0000000000000` (`-1.0`, 0, `-1.0`) for 2,35
 As with the cues, the eight entries are the eight loop pads, and an unset one is still there: an empty label, `-1.0` and `-1.0`, both flags 0 and colour `00000000` (25,493 of them in a library of 3,294 tracks, every one exactly like that). Positions are in samples of the track's sample rate. A set loop has both flags 1 (all 27 seen), the label `Loop N` (N is the pad, from 1) until it is renamed, and the same colour per pad as the cues: `fff4d338`, `ffef8130`, `ffaa55c4`, `ffce3239`, `ff86c64b` for pads 1 to 5 (6 to 8 were not set on any track). 104 tracks had no `loops` at all (NULL), the rest are 192 bytes (eight empty slots; a label adds its length), and 17 tracks had any loop set, up to 5. Loops of 1 to 5 seconds were typical. A slot with only one end set was not seen; Open Engine Lib leaves such a slot alone. The column `activeOnLoadLoops` (0, or NULL for 9 tracks) is not touched.
 
 ### `overviewWaveFormData` and `OverviewData/*.rgb` (big-endian header)
-Header: `i64` (1024), `i64` (1024), `f64` samples per entry (total samples / 1024). Then 3 bytes per entry. There are 1025 entries for a declared count of 1024. The meaning of the 3 bytes per entry (likely low, mid and high band heights) was not verified. The `.rgb` overview files use this same layout (see [OverviewData](#overviewdata)), but their entry values are not the same as the database BLOB.
+Header: `i64` (1024), `i64` (1024), `f64` samples per entry (total samples / 1024; this held for all 3,114 tracks of one library, and every blob decompresses to 3,099 bytes). Then 3 bytes per entry. There are 1025 entries for a declared count of 1024. The 3 bytes per entry are **the low, mid and high band, in that order**. Checked on the one library track whose audio file was at hand: the amplitude of the first byte over the 1,024 equal slices of the track correlates with the RMS of the audio below about 150 to 400 Hz at 0.99, the second with the RMS between about 150 Hz and 1.5 kHz at 0.98 (0.94 with 200 Hz to 2 kHz, falling to 0.83 when the upper limit is 3 kHz), and the third with the RMS above 1.5 to 2 kHz at 0.97 (0.93 above 4 kHz). The split points are therefore only roughly known, and the filters Engine uses are not. The three channels are not scaled the same: across the 3,114 analysed tracks the mean byte was 90, 65 and 19, and the largest 255, 255 and 122 (so the high band is drawn with less height). For that track the byte divided by 255 was about 1.8 to 2 times the RMS of the low band, 2 times that of the mid band and 1.0 to 1.1 times that of the high band; the scaling was **not** worked out further. Only the one track was checked this way. The `.rgb` overview files use this same layout (see [OverviewData](#overviewdata)), but their entry values are not the same as the database BLOB.
 
 ## Files outside the databases
 
@@ -257,8 +299,12 @@ The crashed process was `SoundSwitch` (the lighting-control app that runs on the
 - **Playlist and entity order is a linked list**, not a position column. Writers must also maintain `nextListId`/`nextEntityId` and `isPersisted`, which triggers partly handle.
 - **Triggers and ids**: ids are never recycled. Inserting a track must go through SQL so the `PerformanceData` row and origin fields are created.
 - **Mixed endianness** in BLOBs, as above.
+- **A track can be in the library but not analysed.** Its `PerformanceData` row is empty (see [Analysed and not analysed](#analysed-and-not-analysed)), so every BLOB reader has to accept NULL, and a writer has no sample rate to put cues in.
 - **Writing is untested.** I only read. Anything that edits these files should be tried on a copy first, and the BLOB encoders checked byte-for-byte against the originals.
 
 ## Method
 
 The four databases were copied to a scratch directory and opened read-only with Python's `sqlite3`. Nothing on the drive was modified. Decoding was cross-checked: beat-grid BPM against `bpmAnalyzed`, sample counts against the track data, and exact-length parsing for the cue and loop BLOBs. The other files were inspected with `ffprobe`/`ffmpeg` (stems, and extracting embedded covers to hash them), `zstd` and `file` (coredumps), and short Python scripts (MP4 boxes, the AAC config, JSON, SHA-1/base64url matching).
+
+### The analysis blobs (second look)
+The findings on `PerformanceData` above (unanalysed tracks, the 68-byte `trackData`, the band meaning of the overview and of the levels, the `beatData` markers and tail) came from copies of the `m.db` of four libraries, opened read-only in Python: a library of 3,123 tracks (all files), one of 3,294 tracks (171 TIDAL streaming tracks) and two copies of a library of one track. Nothing in them was modified. The audio files of the large libraries were not on the machine, except 425 tracks of the second one (a folder of downloads) and the one track of the small ones; those were decoded with `ffmpeg` (`astats` after high- and low-pass filters, and raw samples cut into 1,024 slices) and compared with the stored values. That is a small base for the claims about the band levels and the overview scaling, so those are marked as inferred where they are.
