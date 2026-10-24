@@ -4,6 +4,7 @@
 //! `main.rs` imports these modules, so the rest of the app refers to them as `crate::config`,
 //! `crate::model` and so on.
 
+pub(crate) mod analysis_queue;
 pub(crate) mod backend;
 pub(crate) mod clock;
 pub(crate) mod colors;

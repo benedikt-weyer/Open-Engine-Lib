@@ -25,10 +25,11 @@ use open_engine_api::v1::{
     CreateSmartPlaylistRequest, DeletePlaylistRequest, DeleteProfileRequest, EndScratchRequest,
     GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLibrarySyncDiffRequest,
     GetLibrarySyncDiffResponse, GetLoopsRequest, GetOriginPrefixRequest, GetOriginPrefixResponse,
-    GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest, LearnRequest,
-    ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
-    MoveScratchRequest, NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress,
-    PlayRequest, PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
+    GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest,
+    ImportFolderRequest, ImportFolderResponse, LearnRequest, ListPlaylistsRequest,
+    ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse, MoveScratchRequest,
+    NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress, PlayRequest,
+    PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
     RemoveStreamingTracksRequest, RemoveStreamingTracksResponse, RemoveTrackFromPlaylistRequest,
     RemoveTracksRequest, RemoveTracksResponse, RenamePlaylistRequest, RenameProfileRequest,
     RepairLibraryRequest, RepairLibraryResponse, ReplaceOriginPrefixRequest,
@@ -817,6 +818,29 @@ pub async fn sync_to_library(
             copy_stems: options.copy_stems,
             reverse: options.reverse,
             create_if_missing: true,
+        })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Imports the tracks of the folder `playlist` (an id in the open folder library's playlists)
+/// into the Engine library at `target` as a playlist called `title` (the progress is asked
+/// with `progress` meanwhile).
+pub async fn import_folder(
+    mut backend: Backend,
+    playlist: usize,
+    target: PathBuf,
+    title: String,
+    copy_files: bool,
+) -> Result<ImportFolderResponse, String> {
+    backend
+        .library
+        .import_folder_as_playlist(ImportFolderRequest {
+            playlist_id: playlist as u32,
+            target_path: target.display().to_string(),
+            copy_files,
+            title,
         })
         .await
         .map(|response| response.into_inner())

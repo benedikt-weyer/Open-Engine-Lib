@@ -16,6 +16,7 @@ mod cache;
 mod controller;
 mod cues;
 mod folder;
+mod folder_import;
 mod library;
 mod loops;
 mod mirror;

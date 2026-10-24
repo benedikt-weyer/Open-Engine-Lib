@@ -16,13 +16,13 @@ use open_engine_api::v1::{
     CloseLibraryRequest, ControllerAction, CreateProfileRequest, CreateSmartPlaylistRequest, Cue,
     DeleteProfileRequest, GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLoopsRequest,
     GetOriginPrefixRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest,
-    LearnRequest, ListPlaylistsRequest, ListTracksRequest, Loop, MigrateOriginsRequest,
-    OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest, PlaybackErrorKind, PlaybackState,
-    PullFromSourceRequest, RemoveStreamingTracksRequest, RemoveTrackFromPlaylistRequest,
-    RemoveTracksRequest, RenameProfileRequest, ReplaceOriginPrefixRequest, SaveLibraryAsRequest,
-    SelectProfileRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest,
-    SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest,
-    WatchControllerRequest,
+    ImportFolderRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest, Loop,
+    MigrateOriginsRequest, OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest,
+    PlaybackErrorKind, PlaybackState, PullFromSourceRequest, RemoveStreamingTracksRequest,
+    RemoveTrackFromPlaylistRequest, RemoveTracksRequest, RenameProfileRequest,
+    ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
+    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule,
+    SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -3691,4 +3691,199 @@ async fn scans_a_real_music_folder() {
             track.artist, track.title, track.album, track.bpm, track.length_seconds, track.path
         );
     }
+}
+
+/// The parts of an Engine library's schema that importing needs: columns that have to have a
+/// value, and the triggers that fill in a new track's origin and make its performance data.
+const IMPORT_SCHEMA: &str = "
+    CREATE TABLE Information (id INTEGER PRIMARY KEY, uuid TEXT);
+    INSERT INTO Information VALUES (1, 'stick-library');
+    CREATE TABLE Track (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, artist TEXT,
+        album TEXT, genre TEXT, length INTEGER, path TEXT, filename TEXT, fileType TEXT,
+        key INTEGER, isAnalyzed NUMERIC NOT NULL, trackType INTEGER NOT NULL DEFAULT 1,
+        streamingSource TEXT, bpmAnalyzed REAL, bpm INTEGER,
+        originDatabaseUuid TEXT, originTrackId INTEGER, albumArtId INTEGER,
+        UNIQUE (originDatabaseUuid, originTrackId), UNIQUE (path));
+    CREATE TRIGGER fix_origin AFTER INSERT ON Track WHEN NEW.originTrackId IS NULL BEGIN
+        UPDATE Track SET originTrackId = NEW.id,
+            originDatabaseUuid = (SELECT uuid FROM Information) WHERE id = NEW.id;
+    END;
+    CREATE TABLE AlbumArt (id INTEGER PRIMARY KEY, hash, albumArt);
+    CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB, beatData BLOB);
+    CREATE TRIGGER performance AFTER INSERT ON Track
+    BEGIN INSERT INTO PerformanceData(trackId) VALUES(NEW.id); END;
+    CREATE TABLE Playlist (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, parentListId INTEGER,
+        isPersisted BOOLEAN, nextListId INTEGER, lastEditTime DATETIME, isExplicitlyExported BOOLEAN,
+        UNIQUE (title, parentListId), UNIQUE (parentListId, nextListId));
+    CREATE TABLE PlaylistEntity (id INTEGER PRIMARY KEY AUTOINCREMENT, listId INTEGER,
+        trackId INTEGER, databaseUuid TEXT, nextEntityId INTEGER, membershipReference INTEGER,
+        UNIQUE (listId, databaseUuid, trackId));
+    CREATE TABLE Smartlist (listUuid TEXT NOT NULL PRIMARY KEY, title TEXT,
+        parentPlaylistPath TEXT, nextPlaylistPath TEXT, nextListUuid TEXT, rules TEXT,
+        lastEditTime DATETIME);";
+
+#[tokio::test]
+async fn imports_a_folder_of_music_into_an_engine_library_as_a_playlist() {
+    let temp = TempDir::new("import-folder");
+    let music = temp.0.join("Music");
+    std::fs::create_dir_all(music.join("Set")).unwrap();
+    wav(&music.join("Set/a.wav"), &[(440.0, 0.2)]);
+    wav(&music.join("Set/b.wav"), &[(330.0, 0.2)]);
+    let stick = temp.0.join("stick");
+    std::fs::create_dir_all(stick.join("Engine Library/Database2")).unwrap();
+    rusqlite::Connection::open(stick.join("Engine Library/Database2/m.db"))
+        .unwrap()
+        .execute_batch(IMPORT_SCHEMA)
+        .unwrap();
+
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    let request = |playlist_id| ImportFolderRequest {
+        playlist_id,
+        target_path: stick.display().to_string(),
+        copy_files: true,
+        title: String::new(),
+    };
+    assert_eq!(
+        code(library.import_folder_as_playlist(request(0)).await),
+        Code::FailedPrecondition,
+        "no library open"
+    );
+
+    // An Engine library is not a folder of music.
+    library
+        .open_library(OpenLibraryRequest {
+            path: stick.display().to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        code(library.import_folder_as_playlist(request(0)).await),
+        Code::FailedPrecondition
+    );
+
+    library
+        .open_local_folder(OpenLocalFolderRequest {
+            path: music.display().to_string(),
+        })
+        .await
+        .unwrap();
+    let playlists = library
+        .list_playlists(ListPlaylistsRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .playlists;
+    let set = playlists
+        .iter()
+        .find(|playlist| playlist.title == "Set")
+        .unwrap()
+        .id;
+    assert_eq!(
+        code(library.import_folder_as_playlist(request(99)).await),
+        Code::NotFound,
+        "no such folder"
+    );
+    let nowhere = ImportFolderRequest {
+        target_path: temp.0.join("nowhere").display().to_string(),
+        ..request(set)
+    };
+    assert_eq!(
+        code(library.import_folder_as_playlist(nowhere).await),
+        Code::NotFound
+    );
+
+    let done = library
+        .import_folder_as_playlist(request(set))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        (
+            done.tracks_added,
+            done.tracks_existing,
+            done.files_copied,
+            done.files_missing
+        ),
+        (2, 0, 2, 0)
+    );
+    assert_eq!(done.playlist_title, "Set");
+    assert!(!done.playlist_existed);
+    assert_eq!(
+        done.added_paths,
+        [
+            "../Engine-Tracks/Unknown Artist/Unknown Album/a.wav",
+            "../Engine-Tracks/Unknown Artist/Unknown Album/b.wav"
+        ]
+    );
+    assert!(
+        stick
+            .join("Engine-Tracks/Unknown Artist/Unknown Album/a.wav")
+            .is_file()
+    );
+    assert!(
+        !library
+            .get_progress(GetProgressRequest {})
+            .await
+            .unwrap()
+            .into_inner()
+            .running
+    );
+
+    // The folder is untouched, and importing again adds nothing.
+    assert!(music.join("Set/a.wav").is_file());
+    let again = library
+        .import_folder_as_playlist(request(set))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((again.tracks_added, again.tracks_existing), (0, 2));
+    assert!(again.playlist_existed && again.backup_path.is_empty());
+
+    // The library has the tracks, not analysed, in a playlist.
+    library
+        .open_library(OpenLibraryRequest {
+            path: stick.display().to_string(),
+        })
+        .await
+        .unwrap();
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let tracks = stream.message().await.unwrap().unwrap().tracks;
+    assert_eq!(tracks.len(), 2);
+    assert!(
+        tracks
+            .iter()
+            .all(|track| track.analysis == 0 && !track.streaming)
+    );
+    assert_eq!(
+        tracks
+            .iter()
+            .map(|track| track.path.as_str())
+            .collect::<Vec<_>>(),
+        done.added_paths
+    );
+    // (Where the file came from is the track's origin.)
+    assert!(
+        tracks[0]
+            .origin
+            .as_deref()
+            .is_some_and(|origin| origin.ends_with("Music/Set/a.wav")),
+        "{:?}",
+        tracks[0].origin
+    );
+    let playlists = library
+        .list_playlists(ListPlaylistsRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .playlists;
+    assert_eq!(playlists.len(), 1);
+    assert_eq!(playlists[0].title, "Set");
+    assert_eq!(playlists[0].track_ids.len(), 2);
 }

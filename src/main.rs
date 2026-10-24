@@ -17,8 +17,8 @@ use controller::Controller;
 use covers::Covers;
 use cues::{Cue, TrackCues};
 use data::{
-    backend, clock, colors, columns, config, controller, covers, cues, drives, i18n, local_folders,
-    loops, model, mpris, reachable, recent, session, waveform,
+    analysis_queue, backend, clock, colors, columns, config, controller, covers, cues, drives,
+    i18n, local_folders, loops, model, mpris, reachable, recent, session, waveform,
 };
 use drives::Drive;
 use i18n::fill;
@@ -39,9 +39,10 @@ use repair_view::Stage as RepairStage;
 use session::{Session, SessionStore};
 use sync_view::Stage as SyncStage;
 use views::{
-    browser, cue_bar, cue_editor, deck, error_text, library_sync_view, loop_bar, loop_editor,
-    menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog, progress_view, repair_view,
-    right_click, settings, sidebar, smart_editor, sync_view, toast, track_menu,
+    browser, cue_bar, cue_editor, deck, error_text, folder_menu, import_view, library_sync_view,
+    loop_bar, loop_editor, menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog,
+    progress_view, repair_view, right_click, settings, sidebar, smart_editor, sync_view, toast,
+    track_menu,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -160,6 +161,14 @@ struct State {
     progress: Option<open_engine_api::v1::OperationProgress>,
     /// The window for syncing the playlists to another library, while it is open.
     library_sync: Option<LibrarySyncStage>,
+    /// The window for importing a folder into an Engine library, while it is open.
+    import: Option<import_view::Import>,
+    /// The menu of a folder of the playlist tree, while it is open.
+    folder_menu: Option<folder_menu::Menu>,
+    /// The tracks that wait to be analysed.
+    analysis_queue: Option<analysis_queue::Queue>,
+    /// What to do when the library that was imported into has been opened.
+    after_open: Option<analysis_queue::AfterOpen>,
     /// The window for repairing a library, while it is open.
     repair: Option<RepairStage>,
     /// The window for adding or changing a smart playlist, while it is open.
@@ -283,6 +292,29 @@ pub enum Message {
     LibrarySyncBack,
     LibrarySyncClose,
 
+    /// The folder menu of the playlist tree (right click on a folder of a folder of music):
+    /// opened on a folder at a place in the window, closed, and "Import as playlist…".
+    FolderMenuOpen {
+        playlist: usize,
+        at: iced::Point,
+    },
+    FolderMenuClose,
+    FolderMenuImport,
+    /// The import window: a folder was chosen to add a library by (`None`: the dialog was
+    /// closed), the library was chosen, the playlist's title was typed, a tick was set, the
+    /// buttons, and the end of the work.
+    ImportAdd,
+    ImportAdded(Option<PathBuf>),
+    ImportTarget(PathBuf),
+    ImportTitle(String),
+    ImportOption(import_view::Setting, bool),
+    ImportStart,
+    ImportFinished(Result<open_engine_api::v1::ImportFolderResponse, String>),
+    ImportBack,
+    /// "Open library" in the window that says it is done.
+    ImportOpenLibrary,
+    ImportClose,
+
     /// The button that opens the window for repairing a library, and what it does.
     RepairOpen,
     RepairAdd,
@@ -316,6 +348,10 @@ pub enum Message {
     TrackMenuClose,
     /// "Analyse track" (or "Analyse again") in the context menu.
     TrackMenuAnalyse,
+    /// "Analyse the N unanalysed tracks of this list" in the context menu.
+    TrackMenuAnalyseAll,
+    /// The toast's button that leaves out the tracks of the queue that wait.
+    AnalysisQueueStop,
     /// The analysis of a track (in the library at `library`) ended.
     AnalysisFinished {
         library: String,
@@ -530,6 +566,10 @@ impl State {
             sync_reverse: false,
             progress: None,
             library_sync: None,
+            import: None,
+            folder_menu: None,
+            analysis_queue: None,
+            after_open: None,
             repair: None,
             smart: None,
             playlist_dialog: None,
@@ -700,6 +740,13 @@ impl State {
     fn syncing(&self) -> bool {
         matches!(self.sync, Some(SyncStage::Syncing { .. }))
             || matches!(self.library_sync, Some(LibrarySyncStage::Syncing { .. }))
+            || matches!(
+                &self.import,
+                Some(import_view::Import {
+                    stage: import_view::Stage::Importing { .. },
+                    ..
+                })
+            )
     }
 
     /// Whether the backend is doing something it reports progress on: a sync writing, or a
@@ -712,6 +759,7 @@ impl State {
     fn window_open(&self) -> bool {
         self.sync.is_some()
             || self.library_sync.is_some()
+            || self.import.is_some()
             || self.repair.is_some()
             || self.smart.is_some()
             || self.playlist_dialog.is_some()
@@ -802,6 +850,7 @@ impl State {
         self.reload_result = None;
         self.streaming_confirm = false;
         self.track_menu = None;
+        self.folder_menu = None;
         self.progress = None;
         self.library = LibraryState::Opening(path.clone());
         match kind {
@@ -1276,9 +1325,24 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::OriginPrefixLoaded(..)
         | Message::OriginPrefixOpen
         | Message::OriginPrefixPicked(..) => handlers::origin_prefix::handle(state, message),
+        Message::FolderMenuClose
+        | Message::FolderMenuImport
+        | Message::FolderMenuOpen { .. }
+        | Message::ImportAdd
+        | Message::ImportAdded(..)
+        | Message::ImportBack
+        | Message::ImportClose
+        | Message::ImportFinished(..)
+        | Message::ImportOpenLibrary
+        | Message::ImportOption(..)
+        | Message::ImportStart
+        | Message::ImportTarget(..)
+        | Message::ImportTitle(..) => handlers::import::handle(state, message),
         Message::TrackMenuClose
         | Message::TrackMenuOpen { .. }
         | Message::TrackMenuAnalyse
+        | Message::TrackMenuAnalyseAll
+        | Message::AnalysisQueueStop
         | Message::AnalysisFinished { .. }
         | Message::ToastClose
         | Message::ToastTick
@@ -1474,6 +1538,22 @@ fn with_windows<'a>(
         ]
         .into();
     }
+    if let Some(import) = &state.import {
+        let current = match &state.library {
+            LibraryState::Open(browser) => browser.library.path.as_str(),
+            _ => "",
+        };
+        let sources = library_sync_view::Sources {
+            recents: &state.recents,
+            drives: &state.drives,
+            current,
+        };
+        return iced::widget::stack![
+            window,
+            import_view::modal(import, sources, state.progress.as_ref(), language)
+        ]
+        .into();
+    }
     if let Some(stage) = &state.repair {
         let sources = repair_view::Sources {
             recents: &state.recents,
@@ -1496,6 +1576,13 @@ fn with_windows<'a>(
     if let (Some(menu), LibraryState::Open(_)) = (&state.track_menu, &state.library) {
         return iced::widget::stack![window, track_menu::layer(menu, state.analysing(), language)]
             .into();
+    }
+    if let (Some(menu), LibraryState::Open(_)) = (&state.folder_menu, &state.library) {
+        return iced::widget::stack![
+            window,
+            folder_menu::layer(menu, !state.locked() && !state.syncing(), language)
+        ]
+        .into();
     }
     match (&state.playlist_dialog, &state.library) {
         (Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
@@ -1893,10 +1980,29 @@ mod tests {
         events: &[iced::Event],
         at: iced::Point,
     ) -> (Vec<Message>, iced_runtime::user_interface::Cache) {
-        use iced::advanced::renderer::Headless;
         let LibraryState::Open(browser) = &state.library else {
             panic!("a library is open");
         };
+        press_on(
+            with_windows(
+                state,
+                open_library(state, browser, Language::English),
+                Language::English,
+            ),
+            cache,
+            events,
+            at,
+        )
+    }
+
+    /// The same for any element.
+    fn press_on<'a>(
+        element: Element<'a, Message>,
+        cache: iced_runtime::user_interface::Cache,
+        events: &[iced::Event],
+        at: iced::Point,
+    ) -> (Vec<Message>, iced_runtime::user_interface::Cache) {
+        use iced::advanced::renderer::Headless;
         let mut renderer = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
@@ -1907,11 +2013,7 @@ mod tests {
             ))
             .expect("a renderer that needs no graphics card");
         let mut interface = iced_runtime::user_interface::UserInterface::build(
-            with_windows(
-                state,
-                open_library(state, browser, Language::English),
-                Language::English,
-            ),
+            element,
             iced::Size::new(1400.0, 700.0),
             cache,
             &mut renderer,
@@ -2056,6 +2158,10 @@ mod tests {
             sync_reverse: false,
             progress: None,
             library_sync: None,
+            import: None,
+            folder_menu: None,
+            analysis_queue: None,
+            after_open: None,
             repair: None,
             smart: None,
             playlist_dialog: None,
@@ -2645,6 +2751,8 @@ mod tests {
         state.toast = Some(toast::Toast::Analysing {
             library: "/media/DRIVE/Engine Library".into(),
             title: "Track 1".into(),
+            position: None,
+            stoppable: false,
         });
     }
 
@@ -3142,6 +3250,7 @@ mod tests {
                 confirm_library: false,
                 can_analyse: true,
                 analysed: false,
+                analyse_all: 3,
             }
         );
         assert_eq!(browser(&state).selected, Some(1), "the row is selected");
@@ -4667,5 +4776,360 @@ mod tests {
         let mut state = state();
         state.library = LibraryState::Closed { error: None };
         assert_eq!(state.snapshot(), None);
+    }
+
+    /// An app with a folder of music open (see `library_at`): the folders House (no tracks
+    /// of its own), Deep (b, c) and Pop (a).
+    fn state_with_a_folder() -> State {
+        let mut state = state();
+        state.library = LibraryState::Open(Browser::new(Arc::new(
+            library_at("/home/me/Music").of_kind(model::Kind::Folder),
+        )));
+        state
+    }
+
+    #[test]
+    fn right_clicking_a_folder_of_a_folder_of_music_opens_its_menu() {
+        let folder = state_with_a_folder();
+        let LibraryState::Open(browser) = &folder.library else {
+            unreachable!()
+        };
+        // "Pop" is the third line of the tree, under "All tracks" and "House" (which is closed,
+        // so "Deep" in it is not shown).
+        let at = iced::Point::new(100.0, 90.0);
+        let events = [
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: at }),
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                iced::mouse::Button::Right,
+            )),
+        ];
+        let (messages, _) = press_on(
+            browser::playlists(browser, Language::English),
+            Default::default(),
+            &events,
+            at,
+        );
+        let opened: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::FolderMenuOpen { playlist, .. } => Some(*playlist),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [2], "the folder under the pointer");
+
+        // In an Engine library the tree has no such menu.
+        let engine = state();
+        let LibraryState::Open(browser) = &engine.library else {
+            unreachable!()
+        };
+        let (messages, _) = press_on(
+            browser::playlists(browser, Language::English),
+            Default::default(),
+            &events,
+            at,
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, Message::FolderMenuOpen { .. }))
+        );
+    }
+
+    #[test]
+    fn the_folder_menu_opens_only_for_a_folder_of_music_and_leads_to_the_import_window() {
+        let at = iced::Point::new(10.0, 10.0);
+        let mut engine = state();
+        let _ = handle(&mut engine, Message::FolderMenuOpen { playlist: 1, at });
+        assert!(
+            engine.folder_menu.is_none(),
+            "an Engine library has no such menu"
+        );
+
+        let mut state = state_with_a_folder();
+        let _ = handle(&mut state, Message::FolderMenuOpen { playlist: 1, at });
+        assert_eq!(
+            state.folder_menu,
+            Some(folder_menu::Menu {
+                playlist: 1,
+                title: "Deep".into(),
+                at
+            })
+        );
+        let _ = handle(&mut state, Message::FolderMenuImport);
+        assert!(state.folder_menu.is_none());
+        let import = state.import.as_ref().expect("the window is open");
+        assert_eq!((import.name.as_str(), import.tracks), ("Deep", 2));
+        assert!(matches!(import.stage, import_view::Stage::Pick));
+        assert!(state.window_open(), "nothing else opens meanwhile");
+
+        // A folder with no music of its own below it has nothing to import.
+        let mut empty = state_with_a_folder();
+        let _ = handle(&mut empty, Message::FolderMenuOpen { playlist: 0, at });
+        let _ = handle(&mut empty, Message::FolderMenuImport);
+        assert!(empty.import.is_none());
+    }
+
+    fn import_done(added: &[&str]) -> open_engine_api::v1::ImportFolderResponse {
+        open_engine_api::v1::ImportFolderResponse {
+            target_path: "/media/DRIVE/Engine Library".into(),
+            playlist_title: "Pop".into(),
+            tracks_added: added.len() as u32,
+            added_paths: added.iter().map(|path| (*path).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_import_window_goes_from_the_library_to_the_options_to_the_end() {
+        use import_view::{Setting, Stage};
+        let mut state = state_with_a_folder();
+        let at = iced::Point::new(10.0, 10.0);
+        let _ = handle(&mut state, Message::FolderMenuOpen { playlist: 1, at });
+        let _ = handle(&mut state, Message::FolderMenuImport);
+
+        let target = PathBuf::from("/media/DRIVE/Engine Library");
+        let _ = handle(&mut state, Message::ImportTarget(target.clone()));
+        let stage = |state: &State| state.import.as_ref().unwrap().stage.clone();
+        match stage(&state) {
+            Stage::Options { options, .. } => {
+                // The folder's name is the playlist's, the files are copied and the tracks
+                // analysed unless that is taken back.
+                assert_eq!(options.title, "Deep");
+                assert!(options.copy_files && options.analyse);
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = handle(&mut state, Message::ImportTitle("Warm-up".into()));
+        let _ = handle(&mut state, Message::ImportOption(Setting::Analyse, false));
+        match stage(&state) {
+            Stage::Options { options, .. } => {
+                assert_eq!(options.title, "Warm-up");
+                assert!(options.copy_files && !options.analyse);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Back to the choice of the library, and on again.
+        let _ = handle(&mut state, Message::ImportBack);
+        assert!(matches!(stage(&state), Stage::Pick));
+        let _ = handle(&mut state, Message::ImportTarget(target.clone()));
+
+        // It fails: the options are back, with why.
+        let options = import_view::Options {
+            title: "Deep".into(),
+            copy_files: true,
+            analyse: true,
+        };
+        state.import.as_mut().unwrap().stage = Stage::Importing {
+            target: target.clone(),
+            options: options.clone(),
+        };
+        assert!(state.syncing(), "how far it is gets asked");
+        assert!(
+            !state.import.as_ref().unwrap().stage.can_close(),
+            "it can't be closed meanwhile"
+        );
+        let _ = handle(&mut state, Message::ImportClose);
+        assert!(state.import.is_some());
+        let _ = handle(
+            &mut state,
+            Message::ImportFinished(Err("no library".into())),
+        );
+        match stage(&state) {
+            Stage::Options { error, .. } => assert_eq!(error.as_deref(), Some("no library")),
+            other => panic!("{other:?}"),
+        }
+
+        // It works: the end says so, and the library is remembered.
+        state.import.as_mut().unwrap().stage = Stage::Importing { target, options };
+        let _ = handle(
+            &mut state,
+            Message::ImportFinished(Ok(import_done(&["../a.flac"]))),
+        );
+        assert!(matches!(stage(&state), Stage::Done { analyse: true, .. }));
+        assert_eq!(
+            state.recents.paths().first().map(PathBuf::as_path),
+            Some(Path::new("/media/DRIVE/Engine Library"))
+        );
+
+        // Opening the library closes the window and remembers what to do when it is open.
+        let _ = handle(&mut state, Message::ImportOpenLibrary);
+        assert!(state.import.is_none());
+        assert_eq!(
+            state.after_open,
+            Some(analysis_queue::AfterOpen {
+                library: "/media/DRIVE/Engine Library".into(),
+                playlist: "Pop".into(),
+                added: vec!["../a.flac".into()],
+                analyse: true,
+            })
+        );
+    }
+
+    #[test]
+    fn the_imported_playlist_is_shown_when_its_library_is_open() {
+        let mut state = state_with_a_folder();
+        state.after_open = Some(analysis_queue::AfterOpen {
+            library: "/media/DRIVE/Engine Library".into(),
+            playlist: "Pop".into(),
+            added: Vec::new(),
+            analyse: false,
+        });
+        state.library = LibraryState::Opening("/media/DRIVE/Engine Library".into());
+        let library = Arc::new(library_at("/media/DRIVE/Engine Library"));
+        let _ = handle(&mut state, Message::LibraryOpened(Ok(library)));
+        assert!(state.after_open.is_none());
+        assert_eq!(
+            browser(&state).source,
+            Source::Playlist(2),
+            "Pop is the third"
+        );
+        assert!(state.analysis_queue.is_none() && !state.analysing());
+
+        // Another library than the one imported into is left alone.
+        let mut other = state_with_a_folder();
+        other.after_open = Some(analysis_queue::AfterOpen {
+            library: "/media/OTHER/Engine Library".into(),
+            playlist: "Pop".into(),
+            added: Vec::new(),
+            analyse: true,
+        });
+        other.library = LibraryState::Opening("/media/DRIVE/Engine Library".into());
+        let library = Arc::new(library_at("/media/DRIVE/Engine Library"));
+        let _ = handle(&mut other, Message::LibraryOpened(Ok(library)));
+        assert_eq!(browser(&other).source, Source::Collection);
+        assert!(!other.analysing());
+    }
+
+    #[test]
+    fn a_list_of_tracks_is_analysed_one_after_the_other_and_the_end_says_how_it_went() {
+        let library = "/media/DRIVE/Engine Library".to_owned();
+        let queue = |tracks: u32| {
+            let mut queue = analysis_queue::Queue::new(
+                library.clone(),
+                (1..=tracks).map(|id| (id, format!("Track {id}"))).collect(),
+                false,
+            );
+            queue.next();
+            queue
+        };
+        let finished = |state: &mut State, track: u32, result: Result<_, String>| {
+            let _ = handle(
+                state,
+                Message::AnalysisFinished {
+                    library: library.clone(),
+                    track,
+                    title: format!("Track {track}"),
+                    result,
+                },
+            );
+        };
+        let running = |state: &mut State| {
+            state.toast = Some(toast::Toast::Analysing {
+                library: library.clone(),
+                title: "Track 1".into(),
+                position: Some((1, 2)),
+                stoppable: true,
+            });
+        };
+
+        // The first of two is done and the second can't be started (there is no backend
+        // here): that ends the queue, with how many are done.
+        let mut state = state();
+        state.analysis_queue = Some(queue(2));
+        running(&mut state);
+        finished(&mut state, 1, Ok(analysis_response(120.0, Some("C major"))));
+        assert!(state.analysis_queue.is_none());
+        assert!(!state.analysing(), "nothing is left to wait for");
+        match &state.toast {
+            Some(toast::Toast::Done { message, .. }) => {
+                assert!(message.contains("1 of 2"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            browser(&state).analysis(browser(&state).library.track_by_id(1).unwrap()),
+            5,
+            "the track that was done shows it"
+        );
+
+        // A failure is told with the track and why, and stays.
+        let mut state = self::state();
+        state.analysis_queue = Some(queue(2));
+        running(&mut state);
+        finished(&mut state, 1, Err("no models".into()));
+        match &state.toast {
+            Some(toast::Toast::Failed { message }) => {
+                assert!(
+                    message.contains("1 of 2")
+                        && message.contains("Track 1")
+                        && message.contains("no models"),
+                    "{message}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A queue of one is told as before: with the track's tempo.
+        let mut state = self::state();
+        state.analysis_queue = Some(queue(1));
+        state.toast = Some(toast::Toast::Analysing {
+            library: library.clone(),
+            title: "Track 1".into(),
+            position: None,
+            stoppable: false,
+        });
+        finished(
+            &mut state,
+            1,
+            Ok(analysis_response(126.04, Some("A♭ minor"))),
+        );
+        match &state.toast {
+            Some(toast::Toast::Done { message, .. }) => {
+                assert!(
+                    message.contains("Track 1") && message.contains("126.0"),
+                    "{message}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Stopping drops the tracks that wait and takes the button away.
+        let mut state = self::state();
+        state.analysis_queue = Some(queue(3));
+        running(&mut state);
+        let _ = handle(&mut state, Message::AnalysisQueueStop);
+        assert!(!state.analysis_queue.as_ref().unwrap().has_next());
+        assert!(matches!(
+            state.toast,
+            Some(toast::Toast::Analysing {
+                stoppable: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_context_menu_offers_to_analyse_every_track_of_the_list_that_has_no_analysis() {
+        let mut state = state();
+        let at = iced::Point::new(10.0, 10.0);
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert_eq!(menu(&state).analyse_all, 3);
+
+        // Tracks that have an analysis are not counted.
+        let _ = handle(&mut state, Message::TrackMenuClose);
+        if let LibraryState::Open(browser) = &mut state.library {
+            browser.set_analysed(
+                0,
+                browser::Analysed {
+                    bits: model::ANALYSIS_BEATGRID,
+                    origin: model::AnalysisOrigin::Engine,
+                    note: None,
+                    bpm: None,
+                },
+            );
+        }
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert_eq!(menu(&state).analyse_all, 2);
     }
 }

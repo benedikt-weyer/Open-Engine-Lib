@@ -129,20 +129,20 @@ fn truncate_units(text: &str, units: usize) -> String {
 }
 
 /// Where a track's file goes.
-struct Destination {
+pub(crate) struct Destination {
     /// As the track's path in the other library, relative to its `Engine Library` folder.
-    relative: String,
-    absolute: PathBuf,
-    size: u64,
+    pub relative: String,
+    pub absolute: PathBuf,
+    pub size: u64,
     /// A file of the same size is already there (from an earlier sync).
-    present: bool,
+    pub present: bool,
 }
 
-/// Where each track of `source` that has a file goes: `Engine-Tracks/Artist/Album/File`,
-/// beside `target_dir`. Names that exFAT treats as the same (it ignores case) get a
-/// number: the first track keeps the plain name.
-fn destinations(
-    source: &Library,
+/// Where each of `tracks` (an index and the track) that has a file goes:
+/// `Engine-Tracks/Artist/Album/File`, beside `target_dir`. Names that exFAT treats as the
+/// same (it ignores case) get a number: the first track keeps the plain name.
+pub(crate) fn destinations<'a>(
+    tracks: impl IntoIterator<Item = (usize, &'a crate::library::Track)>,
     target_dir: &Path,
     report: &mut Report,
 ) -> HashMap<usize, Destination> {
@@ -150,7 +150,7 @@ fn destinations(
     let mut claimed: HashSet<String> = HashSet::new();
     let mut destinations = HashMap::new();
 
-    for (index, track) in source.tracks.iter().enumerate() {
+    for (index, track) in tracks {
         if track.streaming {
             continue;
         }
@@ -223,7 +223,7 @@ fn numbered(stem: &str, n: u32, units: usize) -> String {
 }
 
 /// The file name of a track path as written in a library (`../a/b.flac` is `b.flac`).
-fn base_name(path: &str) -> &str {
+pub(crate) fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
@@ -233,7 +233,7 @@ fn stars(rating: Option<u32>) -> String {
 }
 
 /// Copies `from` to `to` (making its folders) so that `to` is never half written.
-fn copy_file(from: &Path, to: &Path, progress: &Progress) -> std::io::Result<()> {
+pub(crate) fn copy_file(from: &Path, to: &Path, progress: &Progress) -> std::io::Result<()> {
     if let Some(folder) = to.parent() {
         fs::create_dir_all(folder)?;
     }
@@ -311,7 +311,7 @@ pub fn sync(
 ) -> Result<Report, MirrorError> {
     let mut report = Report::default();
     let destinations = if options.copy_tracks {
-        destinations(source, &probe.dir, &mut report)
+        destinations(source.tracks.iter().enumerate(), &probe.dir, &mut report)
     } else {
         HashMap::new()
     };

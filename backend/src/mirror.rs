@@ -26,7 +26,7 @@ use crate::progress::{Phase, Progress};
 use crate::sync::is_busy;
 use crate::track_sync;
 
-const MAIN_DATABASE: &str = "m.db";
+pub(crate) const MAIN_DATABASE: &str = "m.db";
 const SCRATCH_DIR: &str = "library-sync";
 /// Where the working copy it replaces is kept, in the cache folder, by a sync the other
 /// way round.
@@ -45,6 +45,8 @@ pub enum MirrorError {
     SameLibrary,
     /// Another program is writing to the other library.
     Busy,
+    /// The folder to import has no tracks.
+    NothingToImport,
     Io(io::Error),
     Open(OpenError),
     Edit(EditError),
@@ -64,6 +66,7 @@ impl fmt::Display for MirrorError {
                 f,
                 "another program is writing to that library right now; try again in a moment"
             ),
+            MirrorError::NothingToImport => write!(f, "that folder has no music to import"),
             MirrorError::Io(error) => write!(f, "{error}"),
             MirrorError::Open(error) => write!(f, "{error}"),
             MirrorError::Edit(error) => write!(f, "{error}"),
@@ -148,7 +151,7 @@ struct Work {
 }
 
 /// Where the result of a sync goes.
-struct Place {
+pub(crate) struct Place {
     /// The `Database2` folder the changed databases are put in.
     databases: PathBuf,
     /// Where the origins go, if not with the other databases: a library keeps them in the
@@ -167,6 +170,22 @@ struct Place {
     /// The library folder to take away again if making the library fails (when it was
     /// made for this).
     undo: Option<PathBuf>,
+}
+
+impl Place {
+    /// Where a change to the library at `dir` (its `Engine Library` folder), which exists,
+    /// goes, after what it replaces was kept in `backup`.
+    pub(crate) fn existing_library(dir: &Path, backup: PathBuf) -> Self {
+        Self {
+            databases: dir.join(DATABASE_DIR),
+            origins: Some(origins::source_file(dir)),
+            library: Some(dir.to_path_buf()),
+            backup,
+            check_busy: true,
+            create: false,
+            undo: None,
+        }
+    }
 }
 
 /// Everything a sync starts from.
@@ -195,13 +214,13 @@ impl Prepared {
 /// Where the main database and the origins are in a library: a working copy's `Database2`
 /// folder has both, a library at `dir` keeps the origins beside its `Engine Library` folder.
 #[derive(Clone)]
-struct Databases {
+pub(crate) struct Databases {
     main: PathBuf,
     origins: PathBuf,
 }
 
 impl Databases {
-    fn of_library(dir: &Path) -> Self {
+    pub(crate) fn of_library(dir: &Path) -> Self {
         Self {
             main: dir.join(DATABASE_DIR).join(MAIN_DATABASE),
             origins: cache::source_file(dir, origins::FILE),
@@ -224,7 +243,11 @@ impl Databases {
 }
 
 /// Copies the main database and the origins to the same place in `to`, which is made.
-fn copy_databases(from: &Databases, to: &Path, progress: &Progress) -> Result<(), MirrorError> {
+pub(crate) fn copy_databases(
+    from: &Databases,
+    to: &Path,
+    progress: &Progress,
+) -> Result<(), MirrorError> {
     fs::create_dir_all(to.join(DATABASE_DIR))?;
     for (name, path) in from.files() {
         if path.is_file() {
@@ -235,7 +258,7 @@ fn copy_databases(from: &Databases, to: &Path, progress: &Progress) -> Result<()
 }
 
 /// What the files to be copied add up to.
-fn databases_size(databases: &Databases) -> u64 {
+pub(crate) fn databases_size(databases: &Databases) -> u64 {
     databases
         .files()
         .iter()
@@ -554,7 +577,7 @@ pub fn push(
 /// Puts the changed databases from the copy in `scratch` into the library's `databases`
 /// folder (the origins to theirs), after keeping the ones they replace in a backup folder,
 /// which is returned.
-fn install(
+pub(crate) fn install(
     place: &Place,
     scratch: &Path,
     changed: &[&str],

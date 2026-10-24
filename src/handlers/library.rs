@@ -186,6 +186,11 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 if let Some(session) = state.restore.take() {
                     return state.restore_session(session);
                 }
+                // The library that a folder was imported into: its new playlist is shown and
+                // the new tracks are analysed, if that was chosen.
+                if let Some(after) = state.after_open.take() {
+                    return super::import::opened_after_import(state, after);
+                }
             }
         }
         Message::CloseLibrary => {

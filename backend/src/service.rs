@@ -15,6 +15,7 @@ use tonic::{Request, Response, Status};
 use crate::audio_client::Audio;
 use crate::controller::Controller;
 use crate::cues::Cue;
+use crate::folder_import;
 use crate::library::{self, EditError, Library, OpenError};
 use crate::loops::Loop;
 use crate::mirror::{self, MirrorError};
@@ -602,6 +603,54 @@ impl LibraryService for Service {
         Ok(Response::new(done))
     }
 
+    async fn import_folder_as_playlist(
+        &self,
+        request: Request<api::ImportFolderRequest>,
+    ) -> Result<Response<api::ImportFolderResponse>, Status> {
+        let library = self.library()?;
+        if !library.is_folder() {
+            return Err(Status::failed_precondition(
+                "the open library is not a folder of music",
+            ));
+        }
+        let request = request.into_inner();
+        let index = request.playlist_id as usize;
+        let title = {
+            let playlists = library.playlists();
+            let playlist = playlists
+                .get(index)
+                .ok_or_else(|| Status::not_found(format!("unknown playlist id {index}")))?;
+            if request.title.trim().is_empty() {
+                playlist.title.clone()
+            } else {
+                request.title.clone()
+            }
+        };
+        let progress = self.0.progress.clone();
+        // Copies files and writes a database: not on the async threads.
+        tokio::task::spawn_blocking(move || {
+            let _running = progress.try_begin().ok_or_else(|| {
+                Status::failed_precondition(
+                    "another operation is running, try again when it is done",
+                )
+            })?;
+            folder_import::import(
+                &library,
+                &folder_import::Request {
+                    target: std::path::Path::new(&request.target_path),
+                    playlist: index,
+                    title: &title,
+                    copy_files: request.copy_files,
+                },
+                &progress,
+            )
+            .map_err(mirror_status)
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .map(Response::new)
+    }
+
     async fn get_progress(
         &self,
         _: Request<api::GetProgressRequest>,
@@ -1120,7 +1169,9 @@ fn mirror_options(
 fn mirror_status(error: MirrorError) -> Status {
     match error {
         MirrorError::NotALibrary(_) => Status::not_found(error.to_string()),
-        MirrorError::SameLibrary => Status::invalid_argument(error.to_string()),
+        MirrorError::SameLibrary | MirrorError::NothingToImport => {
+            Status::invalid_argument(error.to_string())
+        }
         MirrorError::Busy => Status::failed_precondition(error.to_string()),
         MirrorError::Edit(error) => edit_status(error),
         MirrorError::Io(_) | MirrorError::Open(_) | MirrorError::Database(_) => {

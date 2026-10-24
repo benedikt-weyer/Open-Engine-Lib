@@ -3,6 +3,7 @@
 
 pub(super) mod controller;
 pub(super) mod cues;
+pub(super) mod import;
 pub(super) mod library;
 pub(super) mod library_sync;
 pub(super) mod loops;

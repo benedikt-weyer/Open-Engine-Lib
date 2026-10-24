@@ -643,7 +643,16 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
                     Message::PlaylistDelete(index),
                 ));
         }
-        list = list.push(line);
+        // The folders of a folder of music have a menu (import as a playlist).
+        list = list.push(if browser.library.is_engine() {
+            Element::from(line)
+        } else {
+            right_click(line, move |at| Message::FolderMenuOpen {
+                playlist: index,
+                at,
+            })
+            .into()
+        });
     }
 
     scrollable(list).width(Fill).height(Fill).into()

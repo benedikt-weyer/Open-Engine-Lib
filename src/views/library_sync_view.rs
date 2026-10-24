@@ -166,7 +166,7 @@ pub fn modal<'a>(
     let body: Element<'a, Message> = match stage {
         Stage::Pick => column![
             text(&strings.libsync_pick),
-            choices(sources, language),
+            choices(sources, language, Message::LibrarySyncTarget, true),
             row![
                 button(text(&strings.libsync_add))
                     .style(button::secondary)
@@ -278,8 +278,15 @@ pub fn modal<'a>(
     }))
 }
 
-/// The recent libraries and the drives with a library, except the open one.
-fn choices<'a>(sources: Sources<'a>, language: Language) -> Element<'a, Message> {
+/// The recent libraries and the drives, except the open library; clicking one sends
+/// `on_pick` with its folder. A drive without a library is offered only with `new_ones`
+/// (to make one there).
+pub(crate) fn choices<'a>(
+    sources: Sources<'a>,
+    language: Language,
+    on_pick: fn(PathBuf) -> Message,
+    new_ones: bool,
+) -> Element<'a, Message> {
     let strings = language.strings();
     let current = Path::new(sources.current);
 
@@ -293,7 +300,7 @@ fn choices<'a>(sources: Sources<'a>, language: Language) -> Element<'a, Message>
         ])
         .width(Fill)
         .style(button::text)
-        .on_press(Message::LibrarySyncTarget(path.to_path_buf()))
+        .on_press(on_pick(path.to_path_buf()))
         .into()
     };
 
@@ -317,6 +324,7 @@ fn choices<'a>(sources: Sources<'a>, language: Language) -> Element<'a, Message>
         .drives
         .iter()
         .filter(|drive| drive.library.as_deref() != Some(current))
+        .filter(|drive| new_ones || drive.library.is_some())
         .collect();
     if others.is_empty() {
         drives = drives.push(text(&strings.no_drives).style(text::secondary));

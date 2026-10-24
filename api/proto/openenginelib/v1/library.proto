@@ -17,6 +17,7 @@ service LibraryService {
   // the folders that have music below them, each holding the tracks of all the folders
   // below it too. There is no Engine library behind it: the things only an Engine library
   // has (ratings, cues, loops, SoundSwitch lighting, origins, covers, beatgrids) are empty,
+  // (`ImportFolderAsPlaylist` is the one call that needs such a library),
   // and the calls that change or sync a library (`SaveLibraryAs`, `GetSyncDiff`,
   // `SyncToSource`, `PullFromSource`, `SetRating`, the playlist and smart playlist edits,
   // `MigrateOrigins`, `RemoveStreamingTracks`, `RemoveTracks`, `RemoveTrackFromPlaylist`,
@@ -164,6 +165,25 @@ service LibraryService {
   // with the changes, after the old one was kept in `open-engine-lib-backup` next to it.
   // Errors as for `GetLibrarySyncDiff`.
   rpc SyncToLibrary(SyncToLibraryRequest) returns (SyncToLibraryResponse);
+  // Adds the tracks of a folder of music (a playlist of the open folder: the audio files
+  // below that folder) to the Engine library at `target_path` and makes them a playlist
+  // there, named after the folder (or `title`). The tracks are new tracks of that library,
+  // not analysed (the Engine software does that, or `AnalyzeTrack` once the library is
+  // open), with what their tags say, and their saved origin is the file they came from.
+  // With `copy_files` the audio files are copied to an `Engine-Tracks` folder beside the
+  // library's `Engine Library` folder, as `Artist/Album/File` with names that exFAT accepts,
+  // and the tracks' paths lead there; without it the paths lead to the files where they are.
+  // A track the library already has (the same path) is not added twice, only put in the
+  // playlist, and a playlist of that title that is there gets the tracks added to its end.
+  // Like `SyncToLibrary` it works on a copy of the library's `m.db`, which replaces the
+  // original after the original was kept in `before-folder-import` in the cache folder of
+  // the open folder, and the copied files are taken away again if that fails. Nothing of the
+  // open folder is changed. `GetProgress` says how far it is.
+  // Errors: FAILED_PRECONDITION if no library is open, the open library is not a folder of
+  // music or the other library is being written to by another program, NOT_FOUND if there
+  // is no Engine library at the path or no such playlist, INVALID_ARGUMENT if the playlist
+  // has no tracks, INTERNAL if reading or writing fails.
+  rpc ImportFolderAsPlaylist(ImportFolderRequest) returns (ImportFolderResponse);
   // How far the sync (`SyncToSource`, `SyncToLibrary`) or the opening of a folder
   // (`OpenLocalFolder`) that is running has got, to be
   // asked again and again while it runs. Not running: `running` is false and the rest is
@@ -496,6 +516,38 @@ message SyncToLibraryResponse {
   bool created = 9;
   // Streaming tracks that were deleted from the changed library.
   uint32 tracks_removed = 10;
+}
+
+message ImportFolderRequest {
+  // `Playlist.id` of the folder in the open folder library. The tracks below it come along.
+  uint32 playlist_id = 1;
+  // The Engine library: its `Engine Library` folder, the folder or drive that contains it, or
+  // its `Database2` folder.
+  string target_path = 2;
+  // Copy the audio files into `Engine-Tracks` beside the library.
+  bool copy_files = 3;
+  // The playlist's title; empty for the folder's name.
+  string title = 4;
+}
+message ImportFolderResponse {
+  // The other library's `Engine Library` folder.
+  string target_path = 1;
+  // The playlist the tracks are in, as titled there.
+  string playlist_title = 2;
+  // The playlist was there already and got the tracks added.
+  bool playlist_existed = 3;
+  // Tracks that were new to the library.
+  uint32 tracks_added = 4;
+  // Tracks the library had already, which are only in the playlist now.
+  uint32 tracks_existing = 5;
+  // Tracks whose audio file could not be found, so they were left out.
+  uint32 files_missing = 6;
+  uint32 files_copied = 7;
+  // Where the library's replaced `m.db` was kept.
+  string backup_path = 8;
+  // The tracks that were added, as the paths the library has for them (relative to its
+  // `Engine Library` folder, as `Track.path`), to find them when it is open.
+  repeated string added_paths = 9;
 }
 
 message PullFromSourceRequest {}

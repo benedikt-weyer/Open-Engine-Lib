@@ -27,6 +27,10 @@ pub enum Toast {
         /// The library it is in, to tell the answer from one for another library.
         library: String,
         title: String,
+        /// Which track of how many it is, when a list of tracks is analysed.
+        position: Option<(u32, u32)>,
+        /// There are tracks after this one that can still be left out.
+        stoppable: bool,
     },
     /// It was done; says what came out.
     Done { message: String, since: Instant },
@@ -70,23 +74,41 @@ pub fn layer<'a>(
             .on_press(Message::ToastClose)
     };
     let content: Element<'a, Message> = match toast {
-        Toast::Analysing { title, .. } => {
+        Toast::Analysing {
+            title,
+            position,
+            stoppable,
+            ..
+        } => {
             // (Before the backend has said anything the bar is empty.)
             let fraction = progress
                 .filter(|progress| progress.running)
                 .and_then(progress_view::fraction)
                 .unwrap_or(0.0);
-            column![
-                text(fill(&strings.toast_analysing, &[("title", title)]))
-                    .size(14)
-                    .wrapping(text::Wrapping::None),
+            let heading = match position {
+                Some((done, total)) => fill(
+                    &strings.toast_analysing_queue,
+                    &[("title", title), ("done", done), ("total", total)],
+                ),
+                None => fill(&strings.toast_analysing, &[("title", title)]),
+            };
+            let mut lines = column![
+                text(heading).size(14).wrapping(text::Wrapping::None),
                 progress_bar(0.0..=1.0, fraction).girth(6),
                 text(stage(progress, language))
                     .size(13)
                     .style(text::secondary),
             ]
-            .spacing(8)
-            .into()
+            .spacing(8);
+            if *stoppable {
+                lines = lines.push(
+                    button(text(&strings.toast_queue_stop).size(13))
+                        .padding([2, 8])
+                        .style(button::secondary)
+                        .on_press(Message::AnalysisQueueStop),
+                );
+            }
+            lines.into()
         }
         Toast::Done { message, .. } => row![text(message).size(14).width(Fill), close()]
             .spacing(8)
@@ -150,6 +172,8 @@ mod tests {
         let running = Toast::Analysing {
             library: "/lib".into(),
             title: "Song".into(),
+            position: None,
+            stoppable: false,
         };
         assert!(running.running() && !running.expired(later));
         assert!(!done.running());

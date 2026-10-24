@@ -8,6 +8,8 @@ pub(crate) mod cue_bar;
 pub(crate) mod cue_editor;
 pub(crate) mod deck;
 pub(crate) mod error_text;
+pub(crate) mod folder_menu;
+pub(crate) mod import_view;
 pub(crate) mod library_sync_view;
 pub(crate) mod loop_bar;
 pub(crate) mod loop_editor;
