@@ -408,6 +408,7 @@ mod tests {
             rating: None,
             lighting: Lighting::default(),
             has_stems: false,
+            analysis: 0,
         }
     }
 

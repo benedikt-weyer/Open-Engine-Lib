@@ -1059,6 +1059,7 @@ fn track_message(
         soundswitch: track.lighting.state.into(),
         soundswitch_projects: track.lighting.projects.clone(),
         has_stems: track.has_stems,
+        analysis: track.analysis,
         path: track.relative_path.clone(),
         origin,
         cue_count,

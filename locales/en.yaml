@@ -115,6 +115,14 @@ lighting_rendered: "SoundSwitch lighting is rendered ({projects})"
 lighting_analysed: "Analysed in SoundSwitch, but no lighting is rendered"
 lighting_none: "Not in SoundSwitch"
 col_stems: Stems
+col_analysis: Analysis
+analysis_present: "Analysis the library has for this track ({count} of {total}): {parts}"
+analysis_none: "Not analysed: the library has no track data, waveform or beatgrid for this track"
+analysis_track_data: "track data"
+analysis_waveform: waveform
+analysis_beatgrid: beatgrid
+columns_button: Columns
+columns_hint: "Tick the columns to show"
 stems_rendered: "Stems are rendered for this track"
 stems_none: "No stems rendered"
 col_location: Location

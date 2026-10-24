@@ -53,6 +53,14 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::ColumnsMenuToggle => state.columns_menu = !state.columns_menu,
+        Message::ColumnShown(column, shown) => {
+            state.columns.hidden.set(column, !shown);
+            // Not being able to remember the choice is not worth bothering the user about.
+            if let Err(error) = state.columns.save() {
+                eprintln!("could not save the hidden columns: {error}");
+            }
+        }
         Message::WaveformGainDragged(band, gain) => state.gain_draft = Some((band, gain)),
         Message::WaveformGainReleased => {
             if let Some((band, gain)) = state.gain_draft.take() {

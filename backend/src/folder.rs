@@ -307,6 +307,7 @@ fn track(index: usize, dir: &Path, file: PathBuf, meta: Meta) -> Track {
         rating: None,
         lighting: Lighting::default(),
         has_stems: false,
+        analysis: 0,
     }
 }
 

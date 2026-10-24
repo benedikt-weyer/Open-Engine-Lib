@@ -187,6 +187,8 @@ struct State {
     columns: ColumnStore,
     /// The column whose width is being dragged.
     resize: Option<Resize>,
+    /// The menu to show and hide columns is open.
+    columns_menu: bool,
     /// The DJ controller: what its controls do, what is connected, what it said last.
     controller: Controller,
     /// How to tell the desktop what plays (MPRIS), once the service is up, and what it was
@@ -237,6 +239,10 @@ pub enum Message {
     /// The pointer moved, to this x, while a column was being resized.
     ResizeMoved(f32),
     ResizeEnded,
+    /// The "Columns" button over the track list: open or close the menu of columns.
+    ColumnsMenuToggle,
+    /// A column was ticked (shown) or unticked (hidden) in that menu.
+    ColumnShown(Column, bool),
 
     /// The Sync button: open the window and compare (also "Compare again").
     SyncOpen,
@@ -523,6 +529,7 @@ impl State {
             reload_result: None,
             columns: ColumnStore::discover(),
             resize: None,
+            columns_menu: false,
             controller: Controller::default(),
             mpris: None,
             mpris_told: None,
@@ -1194,6 +1201,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::CopyText(text) => iced::clipboard::write(text),
         Message::BackendStarted(..)
         | Message::CloseRequested(..)
+        | Message::ColumnShown(..)
+        | Message::ColumnsMenuToggle
         | Message::LanguageSelected(..)
         | Message::Navigate(..)
         | Message::ReopenLibraryToggled(..)
@@ -1675,7 +1684,11 @@ fn open_library<'a>(
             state.playing_row(browser),
             &state.covers,
             &state.reachable,
-            &state.columns.widths,
+            browser::Columns {
+                widths: &state.columns.widths,
+                hidden: &state.columns.hidden,
+                picking: state.columns_menu,
+            },
             language,
         ),
     ]
@@ -1763,6 +1776,7 @@ mod tests {
             has_stems: false,
             cue_count: 0,
             loop_count: 0,
+            analysis: 0,
             origin: None,
         }
     }
@@ -1862,6 +1876,7 @@ mod tests {
             reload_result: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
             resize: None,
+            columns_menu: false,
             controller: Controller::default(),
             mpris: None,
             mpris_told: None,
@@ -2381,6 +2396,43 @@ mod tests {
         let _ = handle(&mut state, Message::ResizeMoved(900.0));
         let _ = handle(&mut state, Message::ResizeEnded);
         assert_eq!(state.columns.widths, before);
+    }
+
+    #[test]
+    fn columns_are_hidden_and_shown_from_the_columns_menu_and_remembered() {
+        let mut state = state();
+        assert!(!state.columns_menu);
+        let _ = handle(&mut state, Message::ColumnsMenuToggle);
+        assert!(state.columns_menu);
+
+        let _ = handle(&mut state, Message::ColumnShown(Column::Genre, false));
+        let _ = handle(&mut state, Message::ColumnShown(Column::Analysis, false));
+        let _ = handle(&mut state, Message::ColumnShown(Column::Genre, true));
+        assert!(!state.columns.hidden.contains(Column::Genre));
+        assert!(state.columns.hidden.contains(Column::Analysis));
+        assert!(state.columns_menu, "ticking a column leaves the menu open");
+
+        let temp = temp_dir();
+        let saved = ColumnStore::load(temp.join("track-columns.toml"));
+        assert!(saved.hidden.contains(Column::Analysis));
+        assert!(!saved.hidden.contains(Column::Genre));
+        let _ = std::fs::remove_dir_all(temp);
+
+        let _ = handle(&mut state, Message::ColumnsMenuToggle);
+        assert!(!state.columns_menu);
+    }
+
+    #[test]
+    fn the_analysis_of_a_track_is_counted_without_cues_and_loops() {
+        let mut track = track(0);
+        assert_eq!(track.analysis_count(), 0);
+        track.analysis = model::ANALYSIS_TRACK_DATA | model::ANALYSIS_BEATGRID;
+        assert_eq!(track.analysis_count(), 2);
+        track.analysis |= model::ANALYSIS_WAVEFORM;
+        assert_eq!(track.analysis_count(), model::ANALYSIS_KINDS);
+        // (Bits the UI doesn't know are a newer backend's: they don't count.)
+        track.analysis = 8;
+        assert_eq!(track.analysis_count(), 0);
     }
 
     fn smart(title: &str, tracks: &[usize]) -> Playlist {

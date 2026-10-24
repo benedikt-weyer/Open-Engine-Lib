@@ -9,16 +9,20 @@ use std::sync::Arc;
 use iced::widget::canvas::{Frame, Geometry, Path};
 use iced::widget::image::Handle;
 use iced::widget::{
-    Space, button, canvas, column, container, image, mouse_area, row, scrollable, text, tooltip,
+    Space, button, canvas, checkbox, column, container, image, mouse_area, row, scrollable, text,
+    tooltip,
 };
 use iced::{Color, ContentFit, Element, Fill, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use crate::Message;
-use crate::columns::{Column, ColumnWidths};
+use crate::columns::{Column, ColumnWidths, Hidden};
 use crate::config::Language;
 use crate::covers::Covers;
 use crate::i18n::fill;
-use crate::model::{Kind, Library, Lighting, Playlist, Track, stars_of};
+use crate::model::{
+    ANALYSIS_BEATGRID, ANALYSIS_KINDS, ANALYSIS_TRACK_DATA, ANALYSIS_WAVEFORM, Kind, Library,
+    Lighting, Playlist, Track, stars_of,
+};
 use crate::reachable::Reachability;
 use crate::right_click::right_click;
 
@@ -302,6 +306,7 @@ impl Browser {
                     .and_then(|rating| number(rating.into())),
                 Column::Cues => number(self.cue_count(track.id).into()),
                 Column::Loops => number(self.loop_count(track.id).into()),
+                Column::Analysis => number(track.analysis_count().into()),
                 Column::Lighting if track.streaming => None,
                 Column::Lighting => number(match track.lighting {
                     Lighting::Rendered => 2,
@@ -646,6 +651,8 @@ const HANDLE_HEIGHT: f32 = 24.0;
 #[derive(Clone, Copy)]
 struct Layout<'a> {
     widths: &'a ColumnWidths,
+    /// The columns the user hid.
+    hidden: &'a Hidden,
     /// What the library is made of, which decides the columns.
     kind: Kind,
 }
@@ -663,7 +670,11 @@ fn line<'a>(
     layout: Layout<'_>,
     gap: impl Fn(Option<Column>) -> Element<'a, Message>,
 ) -> row::Row<'a, Message> {
-    let Layout { widths, kind } = layout;
+    let Layout {
+        widths,
+        hidden,
+        kind,
+    } = layout;
     let mut line = row![].align_y(iced::Center).padding([0, 8]);
     if let Some(number) = number {
         line = line
@@ -676,8 +687,7 @@ fn line<'a>(
         .push(container(cover).width(THUMBNAIL))
         .push(gap(None));
     for (column, cell) in Column::ALL.into_iter().zip(cells) {
-        // A folder of music has no ratings, cues and so on to show.
-        if kind == Kind::Folder && column.is_engine_only() {
+        if !shown(column, kind, hidden) {
             continue;
         }
         line = line
@@ -685,6 +695,12 @@ fn line<'a>(
             .push(gap(Some(column)));
     }
     line.push(container(location).width(Fill).clip(true))
+}
+
+/// Whether the track list has the column: not if the user hid it, and not an Engine
+/// library's column in a folder of music, which has no ratings, cues and so on to show.
+pub fn shown(column: Column, kind: Kind, hidden: &Hidden) -> bool {
+    !hidden.contains(column) && !(kind == Kind::Folder && column.is_engine_only())
 }
 
 /// The empty gap of a track row.
@@ -764,6 +780,7 @@ fn header<'a>(
             by(Column::Rating, &strings.col_rating),
             by(Column::Cues, &strings.col_cues),
             by(Column::Loops, &strings.col_loops),
+            by(Column::Analysis, &strings.col_analysis),
             by(Column::Lighting, &strings.col_lighting),
             by(Column::Stems, &strings.col_stems),
             by(Column::Origin, &strings.col_origin),
@@ -778,27 +795,109 @@ fn header<'a>(
     .into()
 }
 
+/// What decides the columns of the track list.
+#[derive(Clone, Copy)]
+pub struct Columns<'a> {
+    pub widths: &'a ColumnWidths,
+    /// The columns the user hid.
+    pub hidden: &'a Hidden,
+    /// Whether the menu to show and hide columns is open.
+    pub picking: bool,
+}
+
+/// The name of a column in the UI language.
+fn column_name(column: Column, language: Language) -> &'static str {
+    // (The strings live as long as the program: `Language::strings` hands out statics.)
+    let strings = language.strings();
+    match column {
+        Column::Title => &strings.col_title,
+        Column::Artist => &strings.col_artist,
+        Column::Album => &strings.col_album,
+        Column::Genre => &strings.col_genre,
+        Column::Bpm => &strings.col_bpm,
+        Column::Length => &strings.col_length,
+        Column::Rating => &strings.col_rating,
+        Column::Cues => &strings.col_cues,
+        Column::Loops => &strings.col_loops,
+        Column::Analysis => &strings.col_analysis,
+        Column::Lighting => &strings.col_lighting,
+        Column::Stems => &strings.col_stems,
+        Column::Origin => &strings.col_origin,
+    }
+}
+
+/// A tick for each column that the library has, to choose which ones the list shows. (The
+/// location, which takes the rest of the width, is always there.)
+fn column_picker<'a>(kind: Kind, hidden: &Hidden, language: Language) -> Element<'a, Message> {
+    let strings = language.strings();
+    let mut ticks = row![].spacing(18).width(Fill);
+    for column in Column::ALL {
+        if kind == Kind::Folder && column.is_engine_only() {
+            continue;
+        }
+        ticks = ticks.push(
+            checkbox(!hidden.contains(column))
+                .label(column_name(column, language))
+                .size(16)
+                .text_size(14)
+                .on_toggle(move |shown| Message::ColumnShown(column, shown)),
+        );
+    }
+    container(
+        column![
+            text(&strings.columns_hint).size(13).style(text::secondary),
+            ticks.wrap().vertical_spacing(6)
+        ]
+        .spacing(6),
+    )
+    .padding([8, 12])
+    .width(Fill)
+    .style(container::bordered_box)
+    .into()
+}
+
 /// The tracks of the shown list. `playing` is the row that is playing, if it is in this list.
 pub fn tracks<'a>(
     browser: &'a Browser,
     playing: Option<usize>,
     covers: &Covers,
     reachable: &Reachability,
-    widths: &ColumnWidths,
+    columns: Columns<'_>,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
     let list = browser.tracks();
+    let Columns {
+        widths,
+        hidden,
+        picking,
+    } = columns;
 
-    let heading = text(fill(
+    let kind = browser.library.kind;
+    let title = text(fill(
         &strings.tracks_heading,
         &[("name", &browser.title(language)), ("count", &list.len())],
     ))
     .size(20);
+    let columns_button = button(text(format!(
+        "{} {}",
+        strings.columns_button,
+        if picking { "▴" } else { "▾" }
+    )))
+    .padding([2, 10])
+    .style(button::secondary)
+    .on_press(Message::ColumnsMenuToggle);
+    let mut heading =
+        column![row![title, Space::new().width(Fill), columns_button].align_y(iced::Center)]
+            .spacing(8);
+    if picking {
+        heading = heading.push(column_picker(kind, hidden, language));
+    }
 
     let layout = Layout {
         widths,
-        kind: browser.library.kind,
+        hidden,
+        kind,
     };
     let numbered = browser.numbered();
     let header = header(language, layout, browser.sort(), numbered);
@@ -900,6 +999,47 @@ fn cues_cell<'a>(count: u32) -> Element<'a, Message> {
     } else {
         cell(count.to_string()).into()
     }
+}
+
+/// How many of the kinds of analysis (track data, waveform, beatgrid; the cues and loops
+/// have columns of their own) the library has for the track, like `2/3`. Pointing at it
+/// says which.
+fn analysis_cell<'a>(track: &Track, language: Language) -> Element<'a, Message> {
+    let strings = language.strings();
+    let count = track.analysis_count();
+    let parts: Vec<&str> = [
+        (ANALYSIS_TRACK_DATA, &strings.analysis_track_data),
+        (ANALYSIS_WAVEFORM, &strings.analysis_waveform),
+        (ANALYSIS_BEATGRID, &strings.analysis_beatgrid),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| track.analysis & bit != 0)
+    .map(|(_, name)| name.as_str())
+    .collect();
+    let tip = if count == 0 {
+        strings.analysis_none.clone()
+    } else {
+        fill(
+            &strings.analysis_present,
+            &[
+                ("count", &count),
+                ("total", &ANALYSIS_KINDS),
+                ("parts", &parts.join(", ")),
+            ],
+        )
+    };
+    let style: fn(&Theme) -> text::Style = match count {
+        ANALYSIS_KINDS => text::success,
+        0 => text::secondary,
+        _ => text::warning,
+    };
+    tooltip(
+        cell(format!("{count}/{ANALYSIS_KINDS}")).style(style),
+        text(tip).size(13),
+        tooltip::Position::FollowCursor,
+    )
+    .style(container::rounded_box)
+    .into()
 }
 
 /// Whether SoundSwitch has lighting for the track: a filled dot for rendered, a ring for
@@ -1139,6 +1279,7 @@ fn track_row<'a>(
             stars_cell(track, stars, track.streaming),
             cues_cell(cues),
             cues_cell(loops),
+            analysis_cell(track, language),
             lighting_cell(track, language),
             stems_cell(track, language),
             origin_cell(origin, origin_reachable, language),
@@ -1204,8 +1345,10 @@ mod tests {
 
         for language in Language::ALL {
             let widths = ColumnWidths::default();
+            let hidden = Hidden::default();
             let layout = Layout {
                 widths: &widths,
+                hidden: &hidden,
                 kind: Kind::Engine,
             };
             for numbered in [false, true] {

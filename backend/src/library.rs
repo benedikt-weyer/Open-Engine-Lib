@@ -190,7 +190,22 @@ pub struct Track {
     pub lighting: Lighting,
     /// The library's `Stems` folder has the track's stems, as it had when it was opened.
     pub has_stems: bool,
+    /// Which analysis results the track has, as the `ANALYSIS_*` bits.
+    pub analysis: u32,
 }
+
+/// The track has `trackData` (sample rate, key, band levels).
+pub const ANALYSIS_TRACK_DATA: u32 = 1;
+/// The track has an overview waveform.
+pub const ANALYSIS_WAVEFORM: u32 = 2;
+/// The track has a beatgrid.
+pub const ANALYSIS_BEATGRID: u32 = 4;
+/// The analysis blobs counted besides the cues and loops, and their bits.
+const ANALYSIS_COLUMNS: [(&str, u32); 3] = [
+    ("trackData", ANALYSIS_TRACK_DATA),
+    ("overviewWaveFormData", ANALYSIS_WAVEFORM),
+    ("beatData", ANALYSIS_BEATGRID),
+];
 
 /// A playlist or playlist folder. The playlists are stored depth first in display
 /// order, so a flat list is enough to draw the tree.
@@ -1389,10 +1404,31 @@ fn load_tracks(
                 .map(|rating| rating as u32),
             lighting,
             has_stems,
+            analysis: 0,
         });
     }
+    mark_analysis(connection, &by_id, &mut tracks);
 
     Ok((tracks, by_id, by_origin))
+}
+
+/// Sets `analysis` of the tracks: which of the blobs of `ANALYSIS_COLUMNS` their
+/// `PerformanceData` row holds. A library without that table, or without a column, has
+/// none of it.
+fn mark_analysis(connection: &Connection, by_id: &TrackIds, tracks: &mut [Track]) {
+    for (column, bit) in ANALYSIS_COLUMNS {
+        let Ok(mut statement) = connection.prepare(&format!(
+            "SELECT trackId FROM PerformanceData WHERE length({column}) > 0"
+        )) else {
+            continue;
+        };
+        let ids = statement.query_map([], |row| row.get::<_, i64>(0));
+        for id in ids.into_iter().flatten().flatten() {
+            if let Some(&index) = by_id.get(&id) {
+                tracks[index].analysis |= bit;
+            }
+        }
+    }
 }
 
 /// How many cues or loops each track has set, by index in the tracks: `count` says how many
@@ -2884,6 +2920,35 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_analysis_a_track_has_is_told_without_cues_and_loops() {
+        let connection = database();
+        connection
+            .execute_batch(
+                "CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB,
+                    overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB);
+                 INSERT INTO PerformanceData VALUES
+                    (1, x'01', x'02', x'03', x'04', x'05'),
+                    (2, x'01', NULL, x'03', NULL, NULL),
+                    (3, NULL, NULL, NULL, NULL, NULL);",
+            )
+            .unwrap();
+        let library = Library::load(connection, PathBuf::from("/lib"), PathBuf::new()).unwrap();
+        let analysis: Vec<u32> = library.tracks.iter().map(|track| track.analysis).collect();
+        assert_eq!(
+            analysis,
+            [
+                ANALYSIS_TRACK_DATA | ANALYSIS_WAVEFORM | ANALYSIS_BEATGRID,
+                ANALYSIS_TRACK_DATA | ANALYSIS_BEATGRID,
+                0
+            ]
+        );
+
+        // No analysis table at all: nothing is analysed, and that is no error.
+        let library = Library::load(database(), PathBuf::from("/lib"), PathBuf::new()).unwrap();
+        assert!(library.tracks.iter().all(|track| track.analysis == 0));
     }
 
     /// A `trackData` blob that starts the way Engine's does: the sample rate and the

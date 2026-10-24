@@ -312,6 +312,7 @@ async fn load_library(
                 has_stems: track.has_stems,
                 cue_count: track.cue_count,
                 loop_count: track.loop_count,
+                analysis: track.analysis,
                 origin: track.origin,
                 path: track.path,
             }

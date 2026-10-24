@@ -1,9 +1,11 @@
-//! The columns of the track list and how wide the user made them.
+//! The columns of the track list, how wide the user made them and which ones they hid.
 //!
-//! The widths are a preference the user sets by dragging, so they are remembered in
-//! their own file in the user state dir (`<state dir>/open-engine-lib/track-columns.toml`).
+//! The widths are a preference the user sets by dragging, and the hidden columns one they
+//! set in the "Columns" menu, so both are remembered in their own file in the user state
+//! dir (`<state dir>/open-engine-lib/track-columns.toml`).
 //! The last column, the file's location, is not listed: it takes what the others leave.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -17,7 +19,7 @@ pub const MIN_WIDTH: f32 = 40.0;
 /// Nor wider than this.
 pub const MAX_WIDTH: f32 = 1200.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Column {
     Title,
     Artist,
@@ -28,6 +30,8 @@ pub enum Column {
     Rating,
     Cues,
     Loops,
+    /// How many of the analysis results besides cues and loops the track has.
+    Analysis,
     Lighting,
     Stems,
     Origin,
@@ -35,13 +39,15 @@ pub enum Column {
 
 impl Column {
     /// Whether the column is about what an Engine library has (ratings, cues, loops,
-    /// SoundSwitch lighting, where a track came from), so a plain folder of music has none.
+    /// analysis, SoundSwitch lighting, where a track came from), so a plain folder of music
+    /// has none.
     pub fn is_engine_only(self) -> bool {
         matches!(
             self,
             Column::Rating
                 | Column::Cues
                 | Column::Loops
+                | Column::Analysis
                 | Column::Lighting
                 | Column::Stems
                 | Column::Origin
@@ -49,7 +55,7 @@ impl Column {
     }
 
     /// How many there are.
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
     /// In the order they are shown.
     pub const ALL: [Column; Column::COUNT] = [
         Column::Title,
@@ -61,10 +67,69 @@ impl Column {
         Column::Rating,
         Column::Cues,
         Column::Loops,
+        Column::Analysis,
         Column::Lighting,
         Column::Stems,
         Column::Origin,
     ];
+
+    /// What the column is called in the file of hidden columns.
+    fn key(self) -> &'static str {
+        match self {
+            Column::Title => "title",
+            Column::Artist => "artist",
+            Column::Album => "album",
+            Column::Genre => "genre",
+            Column::Bpm => "bpm",
+            Column::Length => "length",
+            Column::Rating => "rating",
+            Column::Cues => "cues",
+            Column::Loops => "loops",
+            Column::Analysis => "analysis",
+            Column::Lighting => "lighting",
+            Column::Stems => "stems",
+            Column::Origin => "origin",
+        }
+    }
+}
+
+/// The columns the user hid. A column that is not in it is shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Hidden(HashSet<Column>);
+
+impl Hidden {
+    pub fn contains(&self, column: Column) -> bool {
+        self.0.contains(&column)
+    }
+
+    /// Hides the column, or shows it again.
+    pub fn set(&mut self, column: Column, hidden: bool) {
+        if hidden {
+            self.0.insert(column);
+        } else {
+            self.0.remove(&column);
+        }
+    }
+
+    /// The names in the file, in the order of the columns.
+    fn keys(&self) -> Vec<String> {
+        Column::ALL
+            .into_iter()
+            .filter(|column| self.contains(*column))
+            .map(|column| column.key().to_owned())
+            .collect()
+    }
+
+    /// The columns the names in the file stand for. A name that is not one (a file from a
+    /// later version, or hand-edited) is skipped.
+    fn from_keys(keys: &[String]) -> Self {
+        Self(
+            Column::ALL
+                .into_iter()
+                .filter(|column| keys.iter().any(|key| key == column.key()))
+                .collect(),
+        )
+    }
 }
 
 /// The width in pixels of each column that can be resized.
@@ -80,6 +145,7 @@ pub struct ColumnWidths {
     rating: f32,
     cues: f32,
     loops: f32,
+    analysis: f32,
     lighting: f32,
     stems: f32,
     origin: f32,
@@ -97,6 +163,7 @@ impl Default for ColumnWidths {
             rating: 80.0,
             cues: 56.0,
             loops: 56.0,
+            analysis: 72.0,
             lighting: 72.0,
             stems: 64.0,
             origin: 260.0,
@@ -116,6 +183,7 @@ impl ColumnWidths {
             Column::Rating => self.rating,
             Column::Cues => self.cues,
             Column::Loops => self.loops,
+            Column::Analysis => self.analysis,
             Column::Lighting => self.lighting,
             Column::Stems => self.stems,
             Column::Origin => self.origin,
@@ -135,6 +203,7 @@ impl ColumnWidths {
             Column::Rating => self.rating = width,
             Column::Cues => self.cues = width,
             Column::Loops => self.loops = width,
+            Column::Analysis => self.analysis = width,
             Column::Lighting => self.lighting = width,
             Column::Stems => self.stems = width,
             Column::Origin => self.origin = width,
@@ -156,10 +225,20 @@ impl ColumnWidths {
     }
 }
 
-/// The widths and the file they are saved in.
+/// What the file holds: the widths, and the names of the hidden columns.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Saved {
+    #[serde(flatten)]
+    widths: ColumnWidths,
+    hidden: Vec<String>,
+}
+
+/// The widths, the hidden columns and the file they are saved in.
 pub struct ColumnStore {
     file: PathBuf,
     pub widths: ColumnWidths,
+    pub hidden: Hidden,
 }
 
 impl ColumnStore {
@@ -172,22 +251,30 @@ impl ColumnStore {
         Self::load(file)
     }
 
-    /// Reads the file. A missing or unreadable one gives the default widths: they are
-    /// only a convenience, so they must never stop the app from starting.
+    /// Reads the file. A missing or unreadable one gives the default widths and every
+    /// column shown: they are only a convenience, so they must never stop the app from
+    /// starting.
     pub fn load(file: PathBuf) -> Self {
-        let widths = fs::read_to_string(&file)
+        let saved = fs::read_to_string(&file)
             .ok()
-            .and_then(|text| toml::from_str::<ColumnWidths>(&text).ok())
-            .map(ColumnWidths::sanitized)
+            .and_then(|text| toml::from_str::<Saved>(&text).ok())
             .unwrap_or_default();
-        Self { file, widths }
+        Self {
+            file,
+            widths: saved.widths.sanitized(),
+            hidden: Hidden::from_keys(&saved.hidden),
+        }
     }
 
     pub fn save(&self) -> io::Result<()> {
         if let Some(parent) = self.file.parent() {
             fs::create_dir_all(parent)?;
         }
-        let text = toml::to_string(&self.widths).map_err(io::Error::other)?;
+        let saved = Saved {
+            widths: self.widths,
+            hidden: self.hidden.keys(),
+        };
+        let text = toml::to_string(&saved).map_err(io::Error::other)?;
         // Write beside the file and move it into place, so a crash can't leave half of it.
         let temporary = self.file.with_extension("toml.tmp");
         fs::write(&temporary, text)?;
@@ -230,11 +317,63 @@ mod tests {
                 Column::Rating,
                 Column::Cues,
                 Column::Loops,
+                Column::Analysis,
                 Column::Lighting,
                 Column::Stems,
                 Column::Origin
             ]
         );
+    }
+
+    #[test]
+    fn hidden_columns_are_remembered_between_runs() {
+        let file = TempFile::new("hidden");
+        let mut store = ColumnStore::load(file.0.clone());
+        assert!(
+            Column::ALL
+                .into_iter()
+                .all(|column| !store.hidden.contains(column))
+        );
+
+        store.hidden.set(Column::Genre, true);
+        store.hidden.set(Column::Analysis, true);
+        store.hidden.set(Column::Origin, true);
+        store.hidden.set(Column::Origin, false);
+        store.widths.set(Column::Title, 410.0);
+        store.save().unwrap();
+
+        let again = ColumnStore::load(file.0.clone());
+        let hidden: Vec<Column> = Column::ALL
+            .into_iter()
+            .filter(|column| again.hidden.contains(*column))
+            .collect();
+        assert_eq!(hidden, [Column::Genre, Column::Analysis]);
+        assert_eq!(again.widths.get(Column::Title), 410.0, "the widths too");
+    }
+
+    #[test]
+    fn a_file_of_only_widths_shows_every_column() {
+        // What an earlier version wrote.
+        let file = TempFile::new("old");
+        fs::create_dir_all(file.0.parent().unwrap()).unwrap();
+        fs::write(&file.0, "title = 300.0\n").unwrap();
+        let store = ColumnStore::load(file.0.clone());
+        assert_eq!(store.widths.get(Column::Title), 300.0);
+        assert!(
+            Column::ALL
+                .into_iter()
+                .all(|column| !store.hidden.contains(column))
+        );
+    }
+
+    #[test]
+    fn column_names_that_are_not_known_are_skipped() {
+        let file = TempFile::new("unknown");
+        fs::create_dir_all(file.0.parent().unwrap()).unwrap();
+        fs::write(&file.0, "hidden = [\"album\", \"from-the-future\"]\n").unwrap();
+        let store = ColumnStore::load(file.0.clone());
+        assert!(store.hidden.contains(Column::Album));
+        assert!(!store.hidden.contains(Column::Title));
     }
 
     #[test]

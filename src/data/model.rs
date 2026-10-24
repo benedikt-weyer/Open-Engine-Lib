@@ -39,6 +39,8 @@ pub struct Track {
     pub cue_count: u32,
     /// The same for saved loops.
     pub loop_count: u32,
+    /// Which analysis results the library has for the track, as the `ANALYSIS_*` bits.
+    pub analysis: u32,
     /// Where the file was when its origin was saved, in Open Engine Lib's own database.
     pub origin: Option<String>,
 }
@@ -54,7 +56,21 @@ pub enum Lighting {
     Rendered,
 }
 
+/// The analysis results counted besides the cues and loops, as the bits of
+/// `Track::analysis`.
+pub const ANALYSIS_TRACK_DATA: u32 = 1;
+pub const ANALYSIS_WAVEFORM: u32 = 2;
+pub const ANALYSIS_BEATGRID: u32 = 4;
+/// How many kinds of analysis a track can have.
+pub const ANALYSIS_KINDS: u32 = 3;
+
 impl Track {
+    /// How many of the `ANALYSIS_KINDS` kinds of analysis the track has: 0 for a track that
+    /// was not analysed.
+    pub fn analysis_count(&self) -> u32 {
+        (self.analysis & (ANALYSIS_TRACK_DATA | ANALYSIS_WAVEFORM | ANALYSIS_BEATGRID)).count_ones()
+    }
+
     /// The rating as 0 to 5 stars. A rating that is not a multiple of 20 (libraries that
     /// were imported can have any) is rounded to the nearest star.
     pub fn stars(&self) -> u8 {
@@ -354,6 +370,7 @@ mod tests {
             has_stems: false,
             cue_count: 0,
             loop_count: 0,
+            analysis: 0,
             origin: None,
         }
     }
@@ -400,6 +417,7 @@ mod tests {
             has_stems: false,
             cue_count: 0,
             loop_count: 0,
+            analysis: 0,
             origin: None,
         };
         let library = Library::new(

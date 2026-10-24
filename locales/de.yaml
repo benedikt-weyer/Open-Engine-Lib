@@ -114,6 +114,14 @@ col_lighting: Licht
 lighting_rendered: "SoundSwitch-Lichtshow ist berechnet ({projects})"
 lighting_analysed: "In SoundSwitch analysiert, aber keine Lichtshow berechnet"
 col_stems: Stems
+col_analysis: Analyse
+analysis_present: "Analyse, die die Bibliothek für diesen Titel hat ({count} von {total}): {parts}"
+analysis_none: "Nicht analysiert: Die Bibliothek hat weder Trackdaten, Wellenform noch Beatgrid für diesen Titel"
+analysis_track_data: Trackdaten
+analysis_waveform: Wellenform
+analysis_beatgrid: Beatgrid
+columns_button: Spalten
+columns_hint: "Spalten zum Anzeigen ankreuzen"
 stems_rendered: "Für diesen Titel sind Stems gerendert"
 stems_none: "Keine Stems gerendert"
 lighting_none: "Nicht in SoundSwitch"
