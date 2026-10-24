@@ -116,6 +116,23 @@ lighting_analysed: "Analysed in SoundSwitch, but no lighting is rendered"
 lighting_none: "Not in SoundSwitch"
 col_stems: Stems
 col_analysis: Analysis
+col_analysis_origin: "Analysis origin"
+analysis_origin_engine: Engine
+analysis_origin_ours: "Open Engine Lib"
+analysis_origin_engine_tip: "The library's analysis of this track was not made by Open Engine Lib (Engine's own)"
+analysis_origin_ours_tip: "Analysed by Open Engine Lib: {note}"
+analysis_origin_none_tip: "Not analysed"
+track_menu_analyse: "Analyse track"
+track_menu_analyse_again: "Analyse again (replaces the analysis)"
+track_menu_analysing: "Analysing another track…"
+toast_analysing: "Analysing {title}"
+toast_stage_decoding: "Reading the audio…"
+toast_stage_beats: "Finding the beats…"
+toast_stage_key: "Finding the key…"
+toast_analysed: "{title} analysed: {bpm} BPM, {key}"
+toast_analysed_no_key: "{title} analysed: {bpm} BPM, no key found"
+toast_analysis_failed: "Could not analyse {title}: {error}"
+toast_close: Close
 analysis_present: "Analysis the library has for this track ({count} of {total}): {parts}"
 analysis_none: "Not analysed: the library has no track data, waveform or beatgrid for this track"
 analysis_track_data: "track data"

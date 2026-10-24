@@ -23,6 +23,7 @@ use crate::origins::{self, Origins, TrackKey};
 use crate::progress::Progress;
 use crate::smartlist::Rules;
 use crate::soundswitch::{Lighting, SoundSwitch};
+use crate::track_analysis::{self, Found};
 
 const DATABASE: &str = "Database2/m.db";
 const LIBRARY_DIR: &str = "Engine Library";
@@ -109,6 +110,12 @@ pub enum EditError {
     UnreadableLoops,
     /// The loops are not valid; says what is wrong.
     BadLoop(String),
+    /// A streaming track has no audio file to analyse.
+    Streaming,
+    /// The track has an analysis and the analysis was not asked to replace it.
+    AlreadyAnalysed,
+    /// No steady beat was found in the track.
+    NoBeats,
     /// The edit could not be noted in the cache.
     Cache(std::io::Error),
     Database(rusqlite::Error),
@@ -129,6 +136,11 @@ impl fmt::Display for EditError {
             EditError::NotEngine => {
                 write!(f, "this is a folder of music, not an Engine library")
             }
+            EditError::Streaming => {
+                write!(f, "a streaming track has no audio file to analyse")
+            }
+            EditError::AlreadyAnalysed => write!(f, "the track is analysed already"),
+            EditError::NoBeats => write!(f, "no steady beat was found in the track"),
             EditError::NoAnalysis => {
                 write!(f, "the track has not been analysed, so it has no cues")
             }
@@ -253,9 +265,35 @@ pub struct Library {
     cue_counts: Mutex<Vec<u32>>,
     /// The same for loops.
     loop_counts: Mutex<Vec<u32>>,
+    /// What the tracks that were analysed since the library was opened have now.
+    analysed: Mutex<HashMap<usize, Analysed>>,
     /// Kept open to read what is not loaded with the tracks (covers, beatgrids) on demand,
     /// and to write the edits.
     connection: Mutex<Connection>,
+}
+
+/// What a track has after it was analysed here, in place of what the library said when it was
+/// opened.
+#[derive(Debug, Clone, Copy)]
+struct Analysed {
+    /// The `ANALYSIS_*` bits.
+    bits: u32,
+    bpm: f64,
+}
+
+/// What `Library::apply_analysis` did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Applied {
+    /// The track's `ANALYSIS_*` bits now.
+    pub bits: u32,
+    /// The tempo of the beatgrid written.
+    pub bpm: f64,
+    /// The name of the key written, if one was heard.
+    pub key: Option<&'static str>,
+    /// How many beats the network found.
+    pub beats: usize,
+    /// What is saved about the analysis, for the track's tooltip.
+    pub note: String,
 }
 
 /// A cover image as the file it is stored as.
@@ -313,6 +351,7 @@ impl Library {
             folder: true,
             cue_counts: Mutex::new(counts.clone()),
             loop_counts: Mutex::new(counts),
+            analysed: Mutex::default(),
             connection: Mutex::new(Connection::open_in_memory()?),
         })
     }
@@ -363,6 +402,7 @@ impl Library {
             folder: false,
             cue_counts: Mutex::new(cue_counts),
             loop_counts: Mutex::new(loop_counts),
+            analysed: Mutex::default(),
             connection: Mutex::new(connection),
         })
     }
@@ -1047,6 +1087,186 @@ impl Library {
             .expect("ratings lock")
             .insert(index, rating);
         Ok(())
+    }
+
+    /// Which analysis results the track at `index` in `tracks` has (the `ANALYSIS_*` bits),
+    /// as it is now.
+    pub fn analysis(&self, index: usize) -> u32 {
+        let analysed = self.analysed.lock().expect("analysed lock");
+        analysed
+            .get(&index)
+            .map(|now| now.bits)
+            .or_else(|| self.tracks.get(index).map(|track| track.analysis))
+            .unwrap_or(0)
+    }
+
+    /// The tempo of the track at `index` in `tracks`, if it was analysed here since the
+    /// library was opened (else the one it had then is in the track).
+    pub fn analysed_bpm(&self, index: usize) -> Option<f64> {
+        let analysed = self.analysed.lock().expect("analysed lock");
+        analysed.get(&index).map(|now| now.bpm)
+    }
+
+    /// The tracks (by index in `tracks`) whose analysis is the one Open Engine Lib made, with
+    /// what it says about it. A track that Engine analysed again since is not one of them: its
+    /// grid is no longer the one that was written.
+    pub fn analysed_by_us(&self) -> HashMap<usize, String> {
+        let mut ours = HashMap::new();
+        if self.folder {
+            return ours;
+        }
+        let Some(origins) = Origins::open_existing(&self.origins_path()).ok().flatten() else {
+            return ours;
+        };
+        let records = origins.analyses();
+        if records.is_empty() {
+            return ours;
+        }
+        let connection = self.connection.lock().expect("database lock");
+        for (key, record) in records {
+            let Some(&index) = self.by_origin.get(&key) else {
+                continue;
+            };
+            let blob = connection
+                .query_row(
+                    "SELECT beatData FROM PerformanceData WHERE trackId = ?1",
+                    [self.tracks[index].db_id],
+                    |row| row.get::<_, Option<Vec<u8>>>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .flatten();
+            if blob.is_some_and(|blob| track_analysis::fingerprint(&blob) == record.beat_data) {
+                ours.insert(
+                    index,
+                    format!("{}, {} UTC", record.tool, record.analysed_at),
+                );
+            }
+        }
+        ours
+    }
+
+    /// Writes what the analysis found for the track at `index` in `tracks` to the working
+    /// copy: the beatgrid, the track data (rate, length, key), the tempo (`bpmAnalyzed`, and
+    /// `bpm` rounded), the key, and the flag that the track is analysed. The overview
+    /// waveform, the cues and the loops are left as they are. It is saved that Open Engine
+    /// Lib made the analysis. A track that has an analysis is only analysed again with
+    /// `overwrite`. The source only gets the result when the working copy is written to it.
+    pub fn apply_analysis(
+        &self,
+        index: usize,
+        found: &Found,
+        overwrite: bool,
+    ) -> Result<Applied, EditError> {
+        let track = self.tracks.get(index).ok_or(EditError::NoSuchTrack)?;
+        if self.folder {
+            return Err(EditError::NotEngine);
+        }
+        if track.streaming {
+            return Err(EditError::Streaming);
+        }
+        let before = self.analysis(index);
+        if before != 0 && !overwrite {
+            return Err(EditError::AlreadyAnalysed);
+        }
+        let grid = track_analysis::fit_grid(
+            &found.beats,
+            &found.downbeats,
+            found.sample_rate,
+            found.frames,
+        )
+        .ok_or(EditError::NoBeats)?;
+        let key = found.key.and_then(track_analysis::engine_key);
+        let beat_data = track_analysis::beat_data(found.sample_rate, found.frames, &grid);
+
+        let connection = self.connection.lock().expect("database lock");
+        let existing: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT trackData FROM PerformanceData WHERE trackId = ?1",
+                [track.db_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let track_data =
+            track_analysis::track_data(existing.as_deref(), found.sample_rate, found.frames, key);
+        let has_loop_flag = connection
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('PerformanceData') WHERE name = 'activeOnLoadLoops'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
+
+        // Noted first, like a rating: see `set_rating`.
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let seconds = (found.frames as f64 / f64::from(found.sample_rate)).round() as i64;
+        let transaction = connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE PerformanceData SET trackData = ?1, beatData = ?2 WHERE trackId = ?3",
+            (&track_data, &beat_data, track.db_id),
+        )?;
+        if changed == 0 {
+            transaction.execute(
+                "INSERT INTO PerformanceData (trackId, trackData, beatData) VALUES (?1, ?2, ?3)",
+                (track.db_id, &track_data, &beat_data),
+            )?;
+        }
+        if has_loop_flag {
+            transaction.execute(
+                "UPDATE PerformanceData SET activeOnLoadLoops = 0 \
+                 WHERE trackId = ?1 AND activeOnLoadLoops IS NULL",
+                [track.db_id],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE Track SET bpmAnalyzed = ?1, bpm = ?2, isAnalyzed = 1, \
+                length = COALESCE(length, ?3) WHERE id = ?4",
+            (grid.bpm, grid.bpm.round() as i64, seconds, track.db_id),
+        )?;
+        if let Some(key) = key {
+            transaction.execute(
+                "UPDATE Track SET key = ?1 WHERE id = ?2",
+                (key, track.db_id),
+            )?;
+        }
+        transaction.commit()?;
+
+        // Saved in Open Engine Lib's own database, which the working copy has beside Engine's.
+        let note = match &track.origin_key {
+            Some(origin) => {
+                let origins = Origins::open(&self.origins_path())
+                    .map_err(|error| EditError::Cache(std::io::Error::other(error)))?;
+                origins.record_analysis(
+                    origin,
+                    track_analysis::TOOL,
+                    track_analysis::fingerprint(&beat_data),
+                )?;
+                origins
+                    .analyses()
+                    .remove(origin)
+                    .map(|record| format!("{}, {} UTC", record.tool, record.analysed_at))
+                    .unwrap_or_default()
+            }
+            None => track_analysis::TOOL.to_owned(),
+        };
+
+        let bits = before | ANALYSIS_TRACK_DATA | ANALYSIS_BEATGRID;
+        self.analysed.lock().expect("analysed lock").insert(
+            index,
+            Analysed {
+                bits,
+                bpm: grid.bpm,
+            },
+        );
+        Ok(Applied {
+            bits,
+            bpm: grid.bpm,
+            key: found.key.and_then(track_analysis::key_name),
+            beats: found.beats.len(),
+            note,
+        })
     }
 
     /// How many cues the track at `index` in `tracks` has set, as it is now.
@@ -2949,6 +3169,144 @@ mod tests {
         // No analysis table at all: nothing is analysed, and that is no error.
         let library = Library::load(database(), PathBuf::from("/lib"), PathBuf::new()).unwrap();
         assert!(library.tracks.iter().all(|track| track.analysis == 0));
+    }
+
+    #[test]
+    fn a_track_is_analysed_into_the_working_copy_and_remembered_as_ours() {
+        let cache = std::env::temp_dir().join(format!(
+            "open-engine-lib-library-analyse-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).unwrap();
+
+        // Track 1 has an analysis of Engine's (a grid), track 2 an empty row, track 3 is a
+        // streaming track.
+        let connection = database();
+        connection
+            .execute_batch(
+                "ALTER TABLE Track ADD COLUMN isAnalyzed INTEGER;
+                 ALTER TABLE Track ADD COLUMN key INTEGER;
+                 UPDATE Track SET isAnalyzed = 1, key = 7 WHERE id = 1;
+                 UPDATE Track SET isAnalyzed = 0, key = -1 WHERE id > 1;
+                 CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB,
+                    overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB,
+                    activeOnLoadLoops INTEGER);
+                 INSERT INTO PerformanceData (trackId, beatData, overviewWaveFormData,
+                    activeOnLoadLoops) VALUES (1, x'0102', x'03', 0);
+                 INSERT INTO PerformanceData (trackId) VALUES (2), (3);",
+            )
+            .unwrap();
+        let library = Library::load(connection, PathBuf::from("/lib"), cache.clone()).unwrap();
+        assert_eq!(library.analysis(0), ANALYSIS_BEATGRID | ANALYSIS_WAVEFORM);
+        assert_eq!(library.analysis(1), 0);
+        assert!(library.analysed_by_us().is_empty());
+
+        let beats: Vec<f64> = (0..120).map(|k| 0.25 + k as f64 * 0.5).collect();
+        let found = Found {
+            beats: beats.clone(),
+            downbeats: beats.iter().copied().step_by(4).collect(),
+            sample_rate: 44_100,
+            frames: 44_100 * 60,
+            key: Some(1), // A minor
+        };
+
+        // An analysis is not replaced unless that is asked for, a streaming track has no file,
+        // and no beats is no grid.
+        assert!(matches!(
+            library.apply_analysis(0, &found, false),
+            Err(EditError::AlreadyAnalysed)
+        ));
+        assert!(matches!(
+            library.apply_analysis(2, &found, true),
+            Err(EditError::Streaming)
+        ));
+        let silent = Found {
+            beats: Vec::new(),
+            downbeats: Vec::new(),
+            ..found.clone()
+        };
+        assert!(matches!(
+            library.apply_analysis(1, &silent, false),
+            Err(EditError::NoBeats)
+        ));
+        assert!(!cache.join("edited").exists(), "nothing was written");
+
+        let applied = library.apply_analysis(1, &found, false).unwrap();
+        assert!((applied.bpm - 120.0).abs() < 1e-6);
+        assert_eq!(applied.key, Some("A minor"));
+        assert_eq!(applied.beats, 120);
+        assert_eq!(applied.bits, ANALYSIS_TRACK_DATA | ANALYSIS_BEATGRID);
+        assert!(applied.note.starts_with(track_analysis::TOOL));
+        assert!(cache.join("edited").exists(), "noted for the cache");
+
+        // What the working copy has now.
+        {
+            let connection = library.connection.lock().unwrap();
+            let (bpm_analysed, bpm, analysed, key, length): (f64, i64, i64, i64, Option<i64>) =
+                connection
+                    .query_row(
+                        "SELECT bpmAnalyzed, bpm, isAnalyzed, key, length FROM Track WHERE id = 2",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+            assert!((bpm_analysed - 120.0).abs() < 1e-6);
+            assert_eq!((bpm, analysed, key, length), (120, 1, 1, Some(60)));
+            let (track_data, beat_data, loops): (Vec<u8>, Vec<u8>, Option<i64>) = connection
+                .query_row(
+                    "SELECT trackData, beatData, activeOnLoadLoops FROM PerformanceData WHERE trackId = 2",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(cues::sample_rate(&track_data), Some(44_100.0));
+            assert_eq!(cues::sample_count(&track_data), Some(44_100.0 * 60.0));
+            assert_eq!(beatgrid::parse(&beat_data).unwrap().len(), 2);
+            assert_eq!(loops, Some(0));
+        }
+        // The other tracks are as they were.
+        assert_eq!(library.analysis(0), ANALYSIS_BEATGRID | ANALYSIS_WAVEFORM);
+        assert_eq!(library.analysis(1), applied.bits);
+        assert!((library.analysed_bpm(1).unwrap() - 120.0).abs() < 1e-6);
+        assert_eq!(library.analysed_bpm(0), None);
+
+        // It is remembered that we made it, and only that.
+        let ours = library.analysed_by_us();
+        assert_eq!(ours.keys().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(ours[&1], applied.note);
+
+        // Replacing Engine's analysis, with the overview it has kept.
+        let again = library.apply_analysis(0, &found, true).unwrap();
+        assert_eq!(
+            again.bits,
+            ANALYSIS_TRACK_DATA | ANALYSIS_BEATGRID | ANALYSIS_WAVEFORM
+        );
+        assert_eq!(library.analysed_by_us().len(), 2);
+
+        // If Engine analyses the track again, it is Engine's analysis again.
+        library
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE PerformanceData SET beatData = x'ff' WHERE trackId = 2",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            library.analysed_by_us().keys().copied().collect::<Vec<_>>(),
+            [0]
+        );
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     /// A `trackData` blob that starts the way Engine's does: the sample rate and the

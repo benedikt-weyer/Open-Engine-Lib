@@ -30,6 +30,11 @@ pub enum Phase {
     Scanning,
     /// Reading the tags and length of the files found.
     ReadingTags,
+    /// Analysing a track (`done_bytes` of `total_bytes` is how far, in thousandths):
+    /// decoding it, finding its beats, finding its key.
+    AnalysingDecoding,
+    AnalysingBeats,
+    AnalysingKey,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,6 +71,30 @@ impl Progress {
             };
         });
         Running(self.clone())
+    }
+
+    /// Like `begin`, but `None` if an operation is running already (which this one would
+    /// confuse the progress of).
+    pub fn try_begin(&self) -> Option<Running> {
+        let mut state = self.0.lock().expect("progress lock");
+        if state.running {
+            return None;
+        }
+        *state = Snapshot {
+            running: true,
+            ..Snapshot::default()
+        };
+        Some(Running(self.clone()))
+    }
+
+    /// An analysis is in `phase` and has got this far, in thousandths of the whole.
+    pub fn analysing(&self, phase: Phase, thousandths: u64, track: &str) {
+        self.update(|state| {
+            state.phase = phase;
+            state.done_bytes = thousandths;
+            state.total_bytes = 1000;
+            state.current = track.to_owned();
+        });
     }
 
     /// The next phase starts, with this much to copy.
@@ -141,6 +170,26 @@ impl Drop for Running {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_operation_runs_at_a_time() {
+        let progress = Progress::default();
+        let first = progress.try_begin().expect("nothing is running");
+        assert!(progress.try_begin().is_none(), "one is");
+        progress.analysing(Phase::AnalysingBeats, 400, "Song");
+        let seen = progress.snapshot();
+        assert_eq!(
+            (
+                seen.phase,
+                seen.done_bytes,
+                seen.total_bytes,
+                seen.current.as_str()
+            ),
+            (Phase::AnalysingBeats, 400, 1000, "Song")
+        );
+        drop(first);
+        assert!(progress.try_begin().is_some(), "free again");
+    }
 
     #[test]
     fn a_copy_is_counted_in_chunks_and_an_operation_ends_with_its_guard() {

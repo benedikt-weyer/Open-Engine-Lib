@@ -37,6 +37,54 @@ service AudioService {
   // call is dropped (which is also when the process stops listening). The audio process
   // only reports what the hardware sends; what it means is for the library process to say.
   rpc WatchMidi(WatchMidiRequest) returns (stream MidiEvent);
+  // Analyses an audio file: its beats and downbeats (Beat This!) and its key (libKeyFinder).
+  // Streams how far it is, then the result as the last message. The weights of Beat This!
+  // are files that have to be installed (see docs/architecture.md).
+  // Errors: NOT_FOUND if there is no file at `path` or at `fallback_path`,
+  // FAILED_PRECONDITION if the models are not installed (the message lists where they are
+  // looked for) or this build has no analysis, INTERNAL if it can't be decoded or analysed.
+  rpc AnalyzeTrack(AudioAnalyzeTrackRequest) returns (stream AudioAnalyzeTrackEvent);
+}
+
+message AudioAnalyzeTrackRequest {
+  string path = 1;
+  // As in `QueueEntry`.
+  string fallback_path = 2;
+}
+
+message AudioAnalyzeTrackEvent {
+  oneof event {
+    AudioAnalysisProgress progress = 1;
+    AudioFound found = 2;
+  }
+}
+
+enum AudioAnalysisStage {
+  AUDIO_ANALYSIS_STAGE_UNSPECIFIED = 0;
+  AUDIO_ANALYSIS_STAGE_DECODING = 1;
+  AUDIO_ANALYSIS_STAGE_BEATS = 2;
+  AUDIO_ANALYSIS_STAGE_KEY = 3;
+}
+
+message AudioAnalysisProgress {
+  AudioAnalysisStage stage = 1;
+  // How far the whole analysis is, 0 to 1. Only goes up.
+  float fraction = 2;
+}
+
+// What the analysis found.
+message AudioFound {
+  // The time of every beat, in seconds.
+  repeated double beats = 1;
+  // The time of the beats that start a bar.
+  repeated double downbeats = 2;
+  // The file's sample rate and how many samples (per channel) it has.
+  uint32 sample_rate = 3;
+  uint64 frames = 4;
+  // libKeyFinder's key, 0 to 23: pairs of major and minor by the semitone from A (0 A
+  // major, 1 A minor, 2 B-flat major, 3 B-flat minor, ... 22 A-flat major, 23 A-flat
+  // minor). Not set if it heard none (silence).
+  optional uint32 key = 5;
 }
 
 message WatchMidiRequest {}

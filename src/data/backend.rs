@@ -19,6 +19,7 @@ use open_engine_api::v1::controller_service_client::ControllerServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
+    AnalysisOrigin as AnalysisOriginState, AnalyzeTrackRequest, AnalyzeTrackResponse,
     BeginScratchRequest, CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest,
     ControllerAction, ControllerState, CreatePlaylistRequest, CreateProfileRequest,
     CreateSmartPlaylistRequest, DeletePlaylistRequest, DeleteProfileRequest, EndScratchRequest,
@@ -46,7 +47,7 @@ use tonic::{Request, Status};
 
 use crate::cues::Cue;
 use crate::loops::Loop;
-use crate::model::{Kind, Library, Lighting, Playlist, Track};
+use crate::model::{AnalysisOrigin, Kind, Library, Lighting, Playlist, Track};
 use crate::waveform::{BeatGrid, Marker, Waveform};
 
 /// Overrides where to find the backend executable.
@@ -291,6 +292,11 @@ async fn load_library(
                 SoundSwitchState::Analysed => Lighting::Analysed,
                 SoundSwitchState::Unspecified => Lighting::None,
             };
+            let analysis_origin = match track.analysis_origin() {
+                AnalysisOriginState::Engine => AnalysisOrigin::Engine,
+                AnalysisOriginState::OpenEngineLib => AnalysisOrigin::OpenEngineLib,
+                AnalysisOriginState::Unspecified => AnalysisOrigin::None,
+            };
             Track {
                 id: track.id,
                 title: track.title,
@@ -313,6 +319,8 @@ async fn load_library(
                 cue_count: track.cue_count,
                 loop_count: track.loop_count,
                 analysis: track.analysis,
+                analysis_origin,
+                analysis_note: track.analysis_note,
                 origin: track.origin,
                 path: track.path,
             }
@@ -809,6 +817,24 @@ pub async fn sync_to_library(
             copy_stems: options.copy_stems,
             reverse: options.reverse,
             create_if_missing: true,
+        })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// Analyses the track with the audio process and writes the result to the working copy (the
+/// progress is asked with `progress` meanwhile).
+pub async fn analyze_track(
+    mut backend: Backend,
+    track_id: u32,
+    overwrite: bool,
+) -> Result<AnalyzeTrackResponse, String> {
+    backend
+        .library
+        .analyze_track(AnalyzeTrackRequest {
+            track_id,
+            overwrite,
         })
         .await
         .map(|response| response.into_inner())

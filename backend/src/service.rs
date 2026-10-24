@@ -23,6 +23,7 @@ use crate::repair;
 use crate::save::{self, SaveError};
 use crate::smartlist::Rules;
 use crate::sync::{self, SyncError};
+use crate::track_analysis::Found;
 
 mod controller;
 
@@ -617,6 +618,9 @@ impl LibraryService for Service {
                 Phase::Pulling => api::ProgressPhase::Pulling,
                 Phase::Scanning => api::ProgressPhase::Scanning,
                 Phase::ReadingTags => api::ProgressPhase::ReadingTags,
+                Phase::AnalysingDecoding => api::ProgressPhase::AnalysingDecoding,
+                Phase::AnalysingBeats => api::ProgressPhase::AnalysingBeats,
+                Phase::AnalysingKey => api::ProgressPhase::AnalysingKey,
             }
             .into(),
             done_bytes: snapshot.done_bytes,
@@ -645,10 +649,11 @@ impl LibraryService for Service {
         let (sender, receiver) = mpsc::channel(4);
 
         tokio::spawn(async move {
-            // (Read off the async threads; a library without origins just has none.)
-            let origins = {
+            // (Read off the async threads; a library without origins just has none, nor
+            // analyses that Open Engine Lib made.)
+            let (origins, ours) = {
                 let library = Arc::clone(&library);
-                tokio::task::spawn_blocking(move || library.origins())
+                tokio::task::spawn_blocking(move || (library.origins(), library.analysed_by_us()))
                     .await
                     .unwrap_or_default()
             };
@@ -664,12 +669,18 @@ impl LibraryService for Service {
                             .as_ref()
                             .and_then(|key| origins.get(key))
                             .cloned();
+                        let analysis = library.analysis(id);
                         track_message(
                             id as u32,
                             track,
-                            library.rating(id),
-                            library.cue_count(id),
-                            library.loop_count(id),
+                            Counts {
+                                rating: library.rating(id),
+                                cues: library.cue_count(id),
+                                loops: library.loop_count(id),
+                                bpm: library.analysed_bpm(id),
+                                analysis,
+                                analysis_note: ours.get(&id).cloned(),
+                            },
                             origin,
                         )
                     })
@@ -776,6 +787,105 @@ impl LibraryService for Service {
                     })
                     .collect(),
             }),
+        }))
+    }
+
+    async fn analyze_track(
+        &self,
+        request: Request<api::AnalyzeTrackRequest>,
+    ) -> Result<Response<api::AnalyzeTrackResponse>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        let id = request.track_id;
+        let index = id as usize;
+        let track = library
+            .tracks
+            .get(index)
+            .ok_or_else(|| Status::invalid_argument(format!("unknown track id {id}")))?;
+        if library.is_folder() {
+            return Err(edit_status(EditError::NotEngine));
+        }
+        if track.streaming {
+            return Err(edit_status(EditError::Streaming));
+        }
+        if library.analysis(index) != 0 && !request.overwrite {
+            return Err(edit_status(EditError::AlreadyAnalysed));
+        }
+        let path = track.path.display().to_string();
+        let title = track.title.clone();
+        let mut audio = self.audio()?;
+        // (Taken after the checks, which need no progress; ends when this call does.)
+        let progress = self.0.progress.clone();
+        let _running = progress.try_begin().ok_or_else(|| {
+            Status::failed_precondition("another operation is running, try again when it is done")
+        })?;
+        progress.analysing(Phase::AnalysingDecoding, 0, &title);
+
+        let origin = {
+            let library = Arc::clone(&library);
+            tokio::task::spawn_blocking(move || {
+                library.tracks[index]
+                    .origin_key
+                    .as_ref()
+                    .and_then(|key| library.origins().remove(key))
+            })
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+        };
+
+        // The audio process decodes the file and finds the beats and the key, and says how
+        // far it is; its errors (no file, no models) say what is wrong and are passed on.
+        let mut events = audio
+            .analyze_track(api::AudioAnalyzeTrackRequest {
+                path,
+                fallback_path: origin.unwrap_or_default(),
+            })
+            .await?
+            .into_inner();
+        let found = loop {
+            let event = events.message().await?.ok_or_else(|| {
+                Status::internal("the audio process ended the analysis without a result")
+            })?;
+            match event.event {
+                Some(api::audio_analyze_track_event::Event::Progress(step)) => {
+                    let phase = match step.stage() {
+                        api::AudioAnalysisStage::Beats => Phase::AnalysingBeats,
+                        api::AudioAnalysisStage::Key => Phase::AnalysingKey,
+                        _ => Phase::AnalysingDecoding,
+                    };
+                    progress.analysing(
+                        phase,
+                        (step.fraction.clamp(0.0, 1.0) * 1000.0) as u64,
+                        &title,
+                    );
+                }
+                Some(api::audio_analyze_track_event::Event::Found(found)) => break found,
+                None => {}
+            }
+        };
+        progress.analysing(Phase::AnalysingKey, 1000, &title);
+
+        let found = Found {
+            beats: found.beats,
+            downbeats: found.downbeats,
+            sample_rate: found.sample_rate,
+            frames: found.frames,
+            key: found.key,
+        };
+        let overwrite = request.overwrite;
+        // Writes the database: not on the async threads.
+        let applied =
+            tokio::task::spawn_blocking(move || library.apply_analysis(index, &found, overwrite))
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+                .map_err(edit_status)?;
+        Ok(Response::new(api::AnalyzeTrackResponse {
+            analysis: applied.bits,
+            analysis_origin: api::AnalysisOrigin::OpenEngineLib.into(),
+            analysis_note: Some(applied.note),
+            bpm: Some(applied.bpm),
+            key: applied.key.map(str::to_owned),
+            beats: applied.beats as u32,
         }))
     }
 
@@ -1030,6 +1140,9 @@ fn edit_status(error: EditError) -> Status {
         EditError::TitleTaken => Status::already_exists(error.to_string()),
         EditError::NoSmartlists
         | EditError::NotEngine
+        | EditError::Streaming
+        | EditError::AlreadyAnalysed
+        | EditError::NoBeats
         | EditError::NoAnalysis
         | EditError::UnreadableCues
         | EditError::UnreadableLoops => Status::failed_precondition(error.to_string()),
@@ -1037,21 +1150,45 @@ fn edit_status(error: EditError) -> Status {
     }
 }
 
+/// What a track has now, which may differ from what it was opened with.
+struct Counts {
+    rating: Option<u32>,
+    cues: u32,
+    loops: u32,
+    /// The tempo of an analysis made since the library was opened.
+    bpm: Option<f64>,
+    /// The `ANALYSIS_*` bits.
+    analysis: u32,
+    /// What is saved about an analysis that Open Engine Lib made.
+    analysis_note: Option<String>,
+}
+
 fn track_message(
     id: u32,
     track: &library::Track,
-    rating: Option<u32>,
-    cue_count: u32,
-    loop_count: u32,
+    now: Counts,
     origin: Option<String>,
 ) -> api::Track {
+    let Counts {
+        rating,
+        cues: cue_count,
+        loops: loop_count,
+        bpm,
+        analysis,
+        analysis_note,
+    } = now;
+    let analysis_origin = match (analysis, &analysis_note) {
+        (0, _) => api::AnalysisOrigin::Unspecified,
+        (_, Some(_)) => api::AnalysisOrigin::OpenEngineLib,
+        (_, None) => api::AnalysisOrigin::Engine,
+    };
     api::Track {
         id,
         title: track.title.clone(),
         artist: track.artist.clone(),
         album: track.album.clone(),
         genre: track.genre.clone(),
-        bpm: track.bpm,
+        bpm: bpm.or(track.bpm),
         length_seconds: track.length,
         streaming: track.streaming,
         album_art_id: track.album_art,
@@ -1059,7 +1196,9 @@ fn track_message(
         soundswitch: track.lighting.state.into(),
         soundswitch_projects: track.lighting.projects.clone(),
         has_stems: track.has_stems,
-        analysis: track.analysis,
+        analysis,
+        analysis_origin: analysis_origin.into(),
+        analysis_note,
         path: track.relative_path.clone(),
         origin,
         cue_count,

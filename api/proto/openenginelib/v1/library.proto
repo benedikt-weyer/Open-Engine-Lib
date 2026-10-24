@@ -215,6 +215,38 @@ service LibraryService {
   // Errors: as for `SetCues`, with INVALID_ARGUMENT also for a loop whose end is not after
   // its start.
   rpc SetLoops(SetLoopsRequest) returns (LoopsResponse);
+  // Analyses a track's audio with the audio process (the beats with Beat This!, the key
+  // with libKeyFinder) and writes the result to the working copy: the beatgrid, the BPM,
+  // the key and the track data, marked as analysed by Open Engine Lib (`Track.analysis_origin`).
+  // The waveform overview, the cues and the loops are left as they are. It takes seconds to
+  // minutes; `GetProgress` says how far it is (the `ANALYSING_*` phases) while it runs. The
+  // source only gets the result when the working copy is written to it.
+  // Errors: FAILED_PRECONDITION if no library is open, it is a folder of music or a
+  // streaming track, the track is analysed already and `overwrite` is not set, the models
+  // of Beat This! are not installed (the message says where they are looked for), another
+  // operation is running or this build has no analysis; INVALID_ARGUMENT for an unknown
+  // track id; NOT_FOUND if the audio file does not exist; INTERNAL if it can't be decoded
+  // or the result can't be written.
+  rpc AnalyzeTrack(AnalyzeTrackRequest) returns (AnalyzeTrackResponse);
+}
+
+message AnalyzeTrackRequest {
+  uint32 track_id = 1;
+  // Analyse a track that has an analysis already, replacing its beatgrid, BPM and key.
+  bool overwrite = 2;
+}
+
+message AnalyzeTrackResponse {
+  // The track as it is now.
+  uint32 analysis = 1;
+  AnalysisOrigin analysis_origin = 2;
+  optional string analysis_note = 3;
+  // The tempo the beatgrid has, in beats per minute. Not set if no beats were found.
+  optional double bpm = 4;
+  // The key written, in the name of libKeyFinder (`A♭ minor`). Not set if none was heard.
+  optional string key = 5;
+  // How many beats were found.
+  uint32 beats = 6;
 }
 
 message OpenLibraryRequest {
@@ -505,6 +537,12 @@ enum ProgressPhase {
   // Reading the tags and length of the files found (`OpenLocalFolder`), counted in
   // `done_files` of `total_files`. No bytes.
   PROGRESS_PHASE_READING_TAGS = 7;
+  // The analysis of a track (`AnalyzeTrack`): decoding it, finding the beats, finding the
+  // key. `done_bytes` of `total_bytes` (always 1000) is how far the whole analysis is, in
+  // thousandths, and `current` the track's title.
+  PROGRESS_PHASE_ANALYSING_DECODING = 8;
+  PROGRESS_PHASE_ANALYSING_BEATS = 9;
+  PROGRESS_PHASE_ANALYSING_KEY = 10;
 }
 
 message CloseLibraryRequest {}
@@ -563,6 +601,19 @@ message Track {
   // overview waveform, 4 the beatgrid. Cues and loops are not counted, they have their
   // own counts. 0 for a track that was not analysed, and for a folder of music.
   uint32 analysis = 18;
+  // Who made the analysis the library has for the track.
+  AnalysisOrigin analysis_origin = 19;
+  // More about an analysis made by Open Engine Lib: what was used and when.
+  optional string analysis_note = 20;
+}
+
+enum AnalysisOrigin {
+  // The track has no analysis.
+  ANALYSIS_ORIGIN_UNSPECIFIED = 0;
+  // The library has an analysis that Open Engine Lib did not make: Engine's own.
+  ANALYSIS_ORIGIN_ENGINE = 1;
+  // Open Engine Lib analysed the track (`AnalyzeTrack`).
+  ANALYSIS_ORIGIN_OPEN_ENGINE_LIB = 2;
 }
 
 enum SoundSwitchState {

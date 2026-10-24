@@ -7,7 +7,8 @@ use crate::*;
 pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::TrackMenuOpen { row, at } => {
-            if state.locked() {
+            // (While a track is analysed the menu opens, with what changes the library greyed out.)
+            if state.locked() && !state.analysing() {
                 return Task::none();
             }
             let LibraryState::Open(browser) = &mut state.library else {
@@ -47,9 +48,112 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 playlist,
                 at,
                 confirm_library: false,
+                can_analyse: !track.streaming,
+                analysed: browser.analysis(track) != 0,
             });
         }
         Message::TrackMenuClose => state.track_menu = None,
+        Message::TrackMenuAnalyse => {
+            let Some(menu) = state.track_menu.take() else {
+                return Task::none();
+            };
+            if !menu.can_analyse || state.locked() {
+                return Task::none();
+            }
+            let (LibraryState::Open(browser), Some(backend)) = (&state.library, state.backend())
+            else {
+                return Task::none();
+            };
+            let library = browser.library.path.clone();
+            let (track, title, overwrite) = (menu.track, menu.title, menu.analysed);
+            state.toast = Some(toast::Toast::Analysing {
+                library: library.clone(),
+                title: title.clone(),
+            });
+            state.progress = None;
+            return Task::perform(
+                backend::analyze_track(backend, track, overwrite),
+                move |result| Message::AnalysisFinished {
+                    library: library.clone(),
+                    track,
+                    title: title.clone(),
+                    result,
+                },
+            );
+        }
+        Message::AnalysisFinished {
+            library,
+            track,
+            title,
+            result,
+        } => {
+            state.progress = None;
+            let strings = state.config.effective().language.strings();
+            // The answer is only for the toast that waits for it (another library may have
+            // been opened since).
+            let waiting = matches!(
+                &state.toast,
+                Some(toast::Toast::Analysing { library: waiting, .. }) if *waiting == library
+            );
+            if !waiting {
+                return Task::none();
+            }
+            state.toast = Some(match result {
+                Ok(done) => {
+                    if let LibraryState::Open(browser) = &mut state.library
+                        && browser.library.path == library
+                    {
+                        browser.set_analysed(
+                            track,
+                            browser::Analysed {
+                                bits: done.analysis,
+                                origin: model::AnalysisOrigin::OpenEngineLib,
+                                note: done.analysis_note.clone(),
+                                bpm: done.bpm,
+                            },
+                        );
+                    }
+                    let bpm = done.bpm.map_or(String::new(), |bpm| format!("{bpm:.1}"));
+                    toast::Toast::Done {
+                        message: match &done.key {
+                            Some(key) => fill(
+                                &strings.toast_analysed,
+                                &[("title", &title), ("bpm", &bpm), ("key", key)],
+                            ),
+                            None => fill(
+                                &strings.toast_analysed_no_key,
+                                &[("title", &title), ("bpm", &bpm)],
+                            ),
+                        },
+                        since: std::time::Instant::now(),
+                    }
+                }
+                Err(error) => toast::Toast::Failed {
+                    message: fill(
+                        &strings.toast_analysis_failed,
+                        &[("title", &title), ("error", &error)],
+                    ),
+                },
+            });
+        }
+        Message::ToastClose => {
+            // (A running one can't be closed: the analysis can't be stopped.)
+            if state.toast.as_ref().is_some_and(|toast| !toast.running()) {
+                state.toast = None;
+            }
+        }
+        Message::ToastTick => {
+            if state
+                .toast
+                .as_ref()
+                .is_some_and(|toast| toast.expired(std::time::Instant::now()))
+            {
+                state.toast = None;
+            }
+        }
+        // The analysis writes to the library when it is done: nothing else changes it meanwhile.
+        Message::TrackMenuRemoveFromPlaylist | Message::TrackMenuRemoveFromLibrary
+            if state.analysing() => {}
         Message::TrackMenuRemoveFromPlaylist => {
             let (Some(menu), LibraryState::Open(browser)) = (&state.track_menu, &state.library)
             else {

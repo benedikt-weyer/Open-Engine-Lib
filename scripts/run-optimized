@@ -6,4 +6,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 echo "Build: release profile, opt-level 3 for dependencies and our own code (use run for a quicker, unoptimised build)"
 cargo build --release
+# The weights of Beat This! for analysing tracks, if `fetch-models` has downloaded them.
+if [ -d models ]; then export OPEN_ENGINE_LIB_MODELS="$PWD/models"; fi
 exec ./target/release/open-engine-lib "$@"

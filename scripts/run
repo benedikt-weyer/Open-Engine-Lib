@@ -9,4 +9,6 @@ cd "$(dirname "$0")/.."
 dependencies=$(sed -n '/^\[profile\.dev\.package\."\*"\]/,/^\[/{s/^opt-level *= *//p}' Cargo.toml)
 echo "Build: dev profile, opt-level ${dependencies:-0} for dependencies, 0 for our own code (use run-optimized for 3 everywhere)"
 cargo build
+# The weights of Beat This! for analysing tracks, if `fetch-models` has downloaded them.
+if [ -d models ]; then export OPEN_ENGINE_LIB_MODELS="$PWD/models"; fi
 exec ./target/debug/open-engine-lib "$@"

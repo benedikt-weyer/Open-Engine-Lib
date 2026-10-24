@@ -47,8 +47,10 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
 
+      # Without the analysis of tracks (libKeyFinder, which these builds do not have installed,
+      # and the weights of Beat This!): that is in the Nix package and in builds from source.
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --no-default-features
 
       - name: Package tarball
         env:
@@ -127,8 +129,9 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: sed -i "0,/^version = .*/s//version = \"${TAG#v}\"/" Cargo.toml
 
+      # Without the analysis of tracks, see the Linux build.
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --no-default-features
 
       - name: Package
         env:

@@ -11,6 +11,7 @@
 //! - it exits when its stdin is closed, which is how it notices that the library process is
 //!   gone.
 
+mod analysis;
 mod engine;
 mod midi;
 mod player;

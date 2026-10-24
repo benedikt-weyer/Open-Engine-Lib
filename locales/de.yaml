@@ -115,6 +115,23 @@ lighting_rendered: "SoundSwitch-Lichtshow ist berechnet ({projects})"
 lighting_analysed: "In SoundSwitch analysiert, aber keine Lichtshow berechnet"
 col_stems: Stems
 col_analysis: Analyse
+col_analysis_origin: "Analyse-Herkunft"
+analysis_origin_engine: Engine
+analysis_origin_ours: "Open Engine Lib"
+analysis_origin_engine_tip: "Die Analyse dieses Titels in der Bibliothek stammt nicht von Open Engine Lib (sondern von Engine)"
+analysis_origin_ours_tip: "Von Open Engine Lib analysiert: {note}"
+analysis_origin_none_tip: "Nicht analysiert"
+track_menu_analyse: "Titel analysieren"
+track_menu_analyse_again: "Erneut analysieren (ersetzt die Analyse)"
+track_menu_analysing: "Ein anderer Titel wird analysiert…"
+toast_analysing: "{title} wird analysiert"
+toast_stage_decoding: "Audio wird gelesen…"
+toast_stage_beats: "Beats werden gesucht…"
+toast_stage_key: "Tonart wird gesucht…"
+toast_analysed: "{title} analysiert: {bpm} BPM, {key}"
+toast_analysed_no_key: "{title} analysiert: {bpm} BPM, keine Tonart gefunden"
+toast_analysis_failed: "{title} konnte nicht analysiert werden: {error}"
+toast_close: Schließen
 analysis_present: "Analyse, die die Bibliothek für diesen Titel hat ({count} von {total}): {parts}"
 analysis_none: "Nicht analysiert: Die Bibliothek hat weder Trackdaten, Wellenform noch Beatgrid für diesen Titel"
 analysis_track_data: Trackdaten

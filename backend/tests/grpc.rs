@@ -12,16 +12,17 @@ use open_engine_api::v1::controller_service_client::ControllerServiceClient;
 use open_engine_api::v1::library_service_client::LibraryServiceClient;
 use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
-    CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest, ControllerAction,
-    CreateProfileRequest, CreateSmartPlaylistRequest, Cue, DeleteProfileRequest,
-    GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLoopsRequest, GetOriginPrefixRequest,
-    GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest, LearnRequest, ListPlaylistsRequest,
-    ListTracksRequest, Loop, MigrateOriginsRequest, OpenLibraryRequest, OpenLocalFolderRequest,
-    PlayRequest, PlaybackErrorKind, PlaybackState, PullFromSourceRequest,
-    RemoveStreamingTracksRequest, RemoveTrackFromPlaylistRequest, RemoveTracksRequest,
-    RenameProfileRequest, ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
-    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule,
-    SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
+    AnalysisOrigin, AnalyzeTrackRequest, CancelLearnRequest, ClearBindingRequest,
+    CloseLibraryRequest, ControllerAction, CreateProfileRequest, CreateSmartPlaylistRequest, Cue,
+    DeleteProfileRequest, GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLoopsRequest,
+    GetOriginPrefixRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest,
+    LearnRequest, ListPlaylistsRequest, ListTracksRequest, Loop, MigrateOriginsRequest,
+    OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest, PlaybackErrorKind, PlaybackState,
+    PullFromSourceRequest, RemoveStreamingTracksRequest, RemoveTrackFromPlaylistRequest,
+    RemoveTracksRequest, RenameProfileRequest, ReplaceOriginPrefixRequest, SaveLibraryAsRequest,
+    SelectProfileRequest, SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest,
+    SetRatingRequest, SmartRule, SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest,
+    WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::service::interceptor::InterceptedService;
@@ -90,6 +91,10 @@ fn start(cache: &Path) -> Running {
         .env("OPEN_ENGINE_LIB_DATA", cache.with_file_name("origins-data"))
         // Likewise for the DJ controller's bindings.
         .env("XDG_STATE_HOME", cache.with_file_name("state"))
+        // And so that the models of Beat This! that the user may have installed are not
+        // found (a test that needs them says where they are).
+        .env("XDG_DATA_HOME", cache.with_file_name("data"))
+        .env_remove("OPEN_ENGINE_LIB_MODELS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -1615,6 +1620,249 @@ fn beat_blob() -> Vec<u8> {
     let mut blob = (data.len() as u32).to_be_bytes().to_vec();
     blob.extend(encoder.finish().unwrap());
     blob
+}
+
+/// A library with the track at `audio` (copied to its `Music` folder) as the track after the
+/// fixture's three, with the analysis tables of an Engine library and no analysis.
+fn library_with_unanalysed_track(root: &Path, audio: &Path) -> PathBuf {
+    let library_dir = fixture_library(root);
+    std::fs::create_dir_all(root.join("Music")).unwrap();
+    let name = audio.file_name().unwrap().to_str().unwrap().to_owned();
+    std::fs::copy(audio, root.join("Music").join(&name)).unwrap();
+    let db = rusqlite::Connection::open(library_dir.join("Database2/m.db")).unwrap();
+    db.execute_batch(
+        "ALTER TABLE Track ADD COLUMN isAnalyzed INTEGER;
+         ALTER TABLE Track ADD COLUMN key INTEGER;
+         UPDATE Track SET isAnalyzed = 0, key = -1;
+         CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB,
+            overviewWaveFormData BLOB, beatData BLOB, quickCues BLOB, loops BLOB,
+            thirdPartySourceId INTEGER, activeOnLoadLoops INTEGER);
+         INSERT INTO PerformanceData (trackId) VALUES (1), (2), (3);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO Track (id, title, artist, album, genre, path, originDatabaseUuid, \
+            originTrackId, isAnalyzed, key) VALUES (4, 'Real', 'R', 'R', 'Test', ?1, 'db', 4, 0, -1)",
+        [format!("../Music/{name}")],
+    )
+    .unwrap();
+    db.execute("INSERT INTO PerformanceData (trackId) VALUES (4)", [])
+        .unwrap();
+    library_dir
+}
+
+#[tokio::test]
+async fn will_not_analyse_what_it_can_not_and_says_why() {
+    let temp = TempDir::new("analyse-refused");
+    // A file that is only a tone: the refusals come before it is listened to, except that
+    // the models are missing (and the audio process says where it looked).
+    wav(&temp.0.join("tone.wav"), &[(440.0, 1.0)]);
+    library_with_unanalysed_track(&temp.0, &temp.0.join("tone.wav"));
+
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    let request = |track_id, overwrite| AnalyzeTrackRequest {
+        track_id,
+        overwrite,
+    };
+    assert_eq!(
+        code(library.analyze_track(request(0, false)).await),
+        Code::FailedPrecondition,
+        "no library open"
+    );
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        code(library.analyze_track(request(99, false)).await),
+        Code::InvalidArgument,
+        "unknown track"
+    );
+    // Track 2 is the streaming one.
+    let streaming = library.analyze_track(request(2, false)).await.unwrap_err();
+    assert_eq!(streaming.code(), Code::FailedPrecondition);
+    assert!(streaming.message().contains("streaming"), "{streaming:?}");
+
+    // The file is there, but not the network that listens to it.
+    let missing = library.analyze_track(request(3, false)).await.unwrap_err();
+    assert_eq!(missing.code(), Code::FailedPrecondition, "{missing:?}");
+    assert!(missing.message().contains("beat_this.onnx"), "{missing:?}");
+    // Nothing was written and nothing is left running.
+    let progress = library
+        .get_progress(GetProgressRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!progress.running);
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let tracks = stream.message().await.unwrap().unwrap().tracks;
+    assert!(tracks.iter().all(|track| track.analysis == 0));
+    assert!(
+        tracks
+            .iter()
+            .all(|track| track.analysis_origin() == AnalysisOrigin::Unspecified)
+    );
+}
+
+/// Analyses a real track with the real audio process and the real models, and watches the
+/// progress while it runs.
+/// `OPEN_ENGINE_LIB_MODELS=/folder/with/the/onnx/files OPEN_ENGINE_TEST_AUDIO=/path/to/track.flac cargo test -p open-engine-backend --test grpc analyses_a_real -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs the models of Beat This! (OPEN_ENGINE_LIB_MODELS) and an audio file (OPEN_ENGINE_TEST_AUDIO)"]
+async fn analyses_a_real_track_into_the_working_copy() {
+    let models = std::env::var("OPEN_ENGINE_LIB_MODELS").expect("OPEN_ENGINE_LIB_MODELS");
+    let audio =
+        PathBuf::from(std::env::var("OPEN_ENGINE_TEST_AUDIO").expect("OPEN_ENGINE_TEST_AUDIO"));
+    let temp = TempDir::new("analyse-real");
+    library_with_unanalysed_track(&temp.0, &audio);
+
+    let cache = temp.0.join("cache");
+    // (The audio process finds the models by the variable it inherits.)
+    let running = {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_open-engine-backend"));
+        command
+            .env(TOKEN_ENV, TOKEN)
+            .env("OPEN_ENGINE_LIB_CACHE", &cache)
+            .env("OPEN_ENGINE_LIB_DATA", cache.with_file_name("origins-data"))
+            .env("XDG_STATE_HOME", cache.with_file_name("state"))
+            .env("OPEN_ENGINE_LIB_MODELS", &models)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let address = line
+            .strip_prefix(LISTENING_PREFIX)
+            .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
+            .trim()
+            .to_owned();
+        Running {
+            child,
+            stdin,
+            address,
+        }
+    };
+    let channel = channel(&running).await;
+    let mut library = LibraryServiceClient::new(InterceptedService::new(
+        channel.clone(),
+        with_token as fn(_) -> _,
+    ));
+    library
+        .open_library(OpenLibraryRequest {
+            path: temp.0.display().to_string(),
+        })
+        .await
+        .unwrap();
+
+    let started = Instant::now();
+    let mut worker = library.clone();
+    let analysis = tokio::spawn(async move {
+        worker
+            .analyze_track(AnalyzeTrackRequest {
+                track_id: 3,
+                overwrite: false,
+            })
+            .await
+    });
+    // The progress, as the UI asks for it.
+    let mut seen = Vec::new();
+    while !analysis.is_finished() {
+        let progress = library
+            .get_progress(GetProgressRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+        if progress.running {
+            assert_eq!(progress.current, "Real");
+            seen.push((progress.phase(), progress.done_bytes, progress.total_bytes));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let done = analysis.await.unwrap().unwrap().into_inner();
+    println!("analysed in {:?}: {done:?}", started.elapsed());
+    println!("{} progress readings, last {:?}", seen.len(), seen.last());
+
+    assert!(done.beats > 20 && done.bpm.is_some_and(|bpm| (50.0..220.0).contains(&bpm)));
+    assert_eq!(done.analysis_origin(), AnalysisOrigin::OpenEngineLib);
+    assert!(
+        seen.windows(2)
+            .all(|pair| pair[0].0 <= pair[1].0 || pair[0].0 != pair[1].0),
+        "phases only go on"
+    );
+    let totals: Vec<u64> = seen.iter().map(|reading| reading.2).collect();
+    assert!(totals.iter().all(|total| *total == 1000));
+    assert!(
+        seen.iter()
+            .any(|reading| reading.0 == open_engine_api::v1::ProgressPhase::AnalysingBeats),
+        "the beats stage was seen"
+    );
+    let fractions: Vec<u64> = seen.iter().map(|reading| reading.1).collect();
+    assert!(
+        fractions.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{fractions:?}"
+    );
+    let progress = library
+        .get_progress(GetProgressRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!progress.running, "over");
+
+    // The list says who analysed it, and the tempo.
+    let mut stream = library
+        .list_tracks(ListTracksRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    let tracks = stream.message().await.unwrap().unwrap().tracks;
+    let track = &tracks[3];
+    assert_eq!(track.analysis_origin(), AnalysisOrigin::OpenEngineLib);
+    assert_eq!(track.analysis, done.analysis);
+    assert!(
+        track
+            .analysis_note
+            .as_deref()
+            .unwrap()
+            .contains("Beat This!")
+    );
+    assert!((track.bpm.unwrap() - done.bpm.unwrap()).abs() < 1e-9);
+    assert_eq!(tracks[0].analysis_origin(), AnalysisOrigin::Unspecified);
+
+    // And it can't be analysed again without saying so.
+    let again = library
+        .analyze_track(AnalyzeTrackRequest {
+            track_id: 3,
+            overwrite: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(again.code(), Code::FailedPrecondition);
+
+    // The waveform of the track has the grid that was written.
+    let waveform = library
+        .get_waveform(GetWaveformRequest {
+            track_id: 3,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let grid = waveform.beat_grid.expect("the grid that was written");
+    assert_eq!(grid.markers.len(), 2);
+    assert!(grid.markers[0].position_seconds < 0.0);
+    assert_eq!(grid.markers[0].beat_number % 4, 0);
 }
 
 #[tokio::test]

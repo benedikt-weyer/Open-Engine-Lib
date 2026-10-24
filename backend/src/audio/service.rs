@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+use crate::analysis::{self, Stage};
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::midi;
 use crate::player::Start;
@@ -22,6 +23,9 @@ use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 /// How many MIDI messages wait for the library process before the ones of a busy control
 /// (a jog wheel) are dropped.
 const MIDI_EVENTS_BUFFERED: usize = 256;
+
+/// How many progress messages wait for the library process.
+const ANALYSIS_EVENTS_BUFFERED: usize = 64;
 
 /// Waveforms are kept for the tracks used last, so skipping back to a track is instant.
 const WAVEFORMS_KEPT: usize = 8;
@@ -220,6 +224,67 @@ impl AudioService for Service {
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
 
+    type AnalyzeTrackStream = ReceiverStream<Result<api::AudioAnalyzeTrackEvent, Status>>;
+
+    async fn analyze_track(
+        &self,
+        request: Request<api::AudioAnalyzeTrackRequest>,
+    ) -> Result<Response<Self::AnalyzeTrackStream>, Status> {
+        let request = request.into_inner();
+        let path = resolve(&request.path, &request.fallback_path);
+        let (events, receiver) = mpsc::channel(ANALYSIS_EVENTS_BUFFERED);
+        // Decoding and the network take seconds to minutes: a thread of their own, which
+        // stops when the call is dropped (its sends fail, and the progress goes nowhere).
+        std::thread::Builder::new()
+            .name("analysis".into())
+            .spawn(move || {
+                let progress = |stage: Stage, fraction: f32| {
+                    let stage = match stage {
+                        Stage::Decoding => api::AudioAnalysisStage::Decoding,
+                        Stage::Beats => api::AudioAnalysisStage::Beats,
+                        Stage::Key => api::AudioAnalysisStage::Key,
+                    };
+                    // A full buffer only drops a step of the bar.
+                    let _ = events.try_send(Ok(api::AudioAnalyzeTrackEvent {
+                        event: Some(api::audio_analyze_track_event::Event::Progress(
+                            api::AudioAnalysisProgress {
+                                stage: stage.into(),
+                                fraction,
+                            },
+                        )),
+                    }));
+                };
+                let last = match analysis::analyze(&path, &analysis::model_dirs(), &progress) {
+                    Ok(found) => Ok(api::AudioAnalyzeTrackEvent {
+                        event: Some(api::audio_analyze_track_event::Event::Found(
+                            api::AudioFound {
+                                beats: found.beats,
+                                downbeats: found.downbeats,
+                                sample_rate: found.sample_rate,
+                                frames: found.frames,
+                                key: found.key,
+                            },
+                        )),
+                    }),
+                    Err(analysis::Error::NotFound) => Err(Status::not_found(format!(
+                        "{} does not exist",
+                        path.display()
+                    ))),
+                    Err(analysis::Error::NoModels(searched)) => {
+                        Err(Status::failed_precondition(no_models_message(&searched)))
+                    }
+                    Err(analysis::Error::Unavailable) => Err(Status::failed_precondition(
+                        "this build of Open Engine Lib has no track analysis",
+                    )),
+                    Err(analysis::Error::Failed(error)) => Err(Status::internal(error)),
+                };
+                // (Sent after the last progress, even if the buffer was full for a moment.)
+                let _ = events.blocking_send(last);
+            })
+            .map_err(|error| Status::internal(format!("could not start the analysis: {error}")))?;
+        Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+
     async fn close(
         &self,
         _: Request<api::CloseRequest>,
@@ -285,6 +350,21 @@ impl AudioService for Service {
             columns: peaks.scaled(gains).iter().flatten().copied().collect(),
         }))
     }
+}
+
+/// What is said when the files of the beat network are not installed.
+fn no_models_message(searched: &[PathBuf]) -> String {
+    let folders: Vec<String> = searched
+        .iter()
+        .map(|folder| folder.display().to_string())
+        .collect();
+    format!(
+        "the models of Beat This! ({}, and {} or {}) were not found in: {}",
+        analysis::MEL_MODEL,
+        analysis::BEAT_MODELS[0],
+        analysis::BEAT_MODELS[1],
+        folders.join(", ")
+    )
 }
 
 fn status_message(status: crate::engine::Status) -> api::PlaybackStatus {

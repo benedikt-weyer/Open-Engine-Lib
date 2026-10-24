@@ -96,6 +96,18 @@ pub fn replace_prefix(path: &str, from: &str, to: &str) -> Option<String> {
         .filter(|_| !from.is_empty() || path.starts_with('/'))
 }
 
+/// A track that Open Engine Lib analysed (see `track_analysis`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnalysisRecord {
+    /// What made the analysis.
+    pub tool: String,
+    /// When, as `datetime('now')` writes it (UTC).
+    pub analysed_at: String,
+    /// `track_analysis::fingerprint` of the `beatData` that was written. If the track has
+    /// another now (Engine analysed it again), it is no longer ours.
+    pub beat_data: i64,
+}
+
 pub struct Origins {
     connection: Mutex<Connection>,
 }
@@ -140,6 +152,57 @@ impl Origins {
         } else {
             Ok(None)
         }
+    }
+
+    /// The tracks that Open Engine Lib analysed. The table is made when the first one is
+    /// recorded (so that a database that is only read is never changed), so a database
+    /// without it has none.
+    pub fn analyses(&self) -> HashMap<TrackKey, AnalysisRecord> {
+        let connection = self.connection.lock().expect("origins lock");
+        let Ok(mut statement) = connection
+            .prepare("SELECT databaseUuid, trackId, tool, analysedAt, beatData FROM Analysis")
+        else {
+            return HashMap::new();
+        };
+        statement
+            .query_map([], |row| {
+                Ok((
+                    (row.get(0)?, row.get(1)?),
+                    AnalysisRecord {
+                        tool: row.get(2)?,
+                        analysed_at: row.get(3)?,
+                        beat_data: row.get(4)?,
+                    },
+                ))
+            })
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Records that Open Engine Lib analysed the track, replacing an earlier record of it.
+    pub fn record_analysis(
+        &self,
+        track: &TrackKey,
+        tool: &str,
+        beat_data: i64,
+    ) -> rusqlite::Result<()> {
+        let connection = self.connection.lock().expect("origins lock");
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS Analysis (
+                databaseUuid TEXT NOT NULL,
+                trackId INTEGER NOT NULL,
+                tool TEXT NOT NULL,
+                analysedAt TEXT NOT NULL DEFAULT (datetime('now')),
+                beatData INTEGER NOT NULL,
+                PRIMARY KEY (databaseUuid, trackId)
+             )",
+        )?;
+        connection.execute(
+            "INSERT OR REPLACE INTO Analysis (databaseUuid, trackId, tool, beatData) \
+             VALUES (?1, ?2, ?3, ?4)",
+            (&track.0, track.1, tool, beat_data),
+        )?;
+        Ok(())
     }
 
     /// Every origin that is saved.
@@ -301,6 +364,45 @@ mod tests {
         // The same again, or the same place, changes nothing.
         assert_eq!(origins.replace_prefix("/old", "/new").unwrap(), 0);
         assert_eq!(origins.replace_prefix("/new", "/new").unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn analysed_tracks_are_recorded_without_changing_a_database_that_is_only_read() {
+        let folder = std::env::temp_dir().join(format!(
+            "open-engine-lib-origins-analysis-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&folder);
+        let path = folder.join(FILE);
+        let origins = Origins::open(&path).unwrap();
+        origins
+            .save_missing(&[(key("a", 1), "/music/one.flac".into())])
+            .unwrap();
+        assert!(origins.analyses().is_empty(), "no table is no analysis");
+        drop(origins);
+
+        // Reading the analyses leaves the file as it is.
+        let before = std::fs::read(&path).unwrap();
+        let origins = Origins::open(&path).unwrap();
+        assert!(origins.analyses().is_empty());
+        drop(origins);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let origins = Origins::open(&path).unwrap();
+        origins.record_analysis(&key("a", 1), "tool", 7).unwrap();
+        origins.record_analysis(&key("a", 2), "tool", 8).unwrap();
+        origins
+            .record_analysis(&key("a", 1), "newer tool", 9)
+            .unwrap();
+        let analyses = origins.analyses();
+        assert_eq!(analyses.len(), 2);
+        assert_eq!(analyses[&key("a", 1)].tool, "newer tool");
+        assert_eq!(analyses[&key("a", 1)].beat_data, 9);
+        assert_eq!(analyses[&key("a", 2)].beat_data, 8);
+        assert!(!analyses[&key("a", 2)].analysed_at.is_empty());
+        // The origins are still there.
+        assert_eq!(origins.all().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&folder);
     }
 

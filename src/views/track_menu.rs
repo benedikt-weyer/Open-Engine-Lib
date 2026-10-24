@@ -31,11 +31,15 @@ pub struct Menu {
     pub at: Point,
     /// Deleting from the library was clicked once and waits for a second click.
     pub confirm_library: bool,
+    /// The track can be analysed: it is a file, not a streaming track.
+    pub can_analyse: bool,
+    /// The track has an analysis already, which analysing it again replaces.
+    pub analysed: bool,
 }
 
 /// The menu in a layer over the window, whose clicks outside the menu close it.
-pub fn layer(menu: &Menu, language: Language) -> Element<'_, Message> {
-    let lines = 1 + usize::from(menu.playlist.is_some());
+pub fn layer(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message> {
+    let lines = 1 + usize::from(menu.playlist.is_some()) + usize::from(menu.can_analyse);
     let height = TITLE_HEIGHT + lines as f32 * LINE_HEIGHT;
     let at = menu.at;
     responsive(move |size| {
@@ -47,7 +51,7 @@ pub fn layer(menu: &Menu, language: Language) -> Element<'_, Message> {
             bottom: 0.0,
         };
         mouse_area(
-            container(view(menu, language))
+            container(view(menu, analysing, language))
                 .padding(padding)
                 .width(Fill)
                 .height(Fill),
@@ -59,7 +63,7 @@ pub fn layer(menu: &Menu, language: Language) -> Element<'_, Message> {
     .into()
 }
 
-fn view(menu: &Menu, language: Language) -> Element<'_, Message> {
+fn view(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message> {
     let strings = language.strings();
 
     let title = container(
@@ -73,14 +77,32 @@ fn view(menu: &Menu, language: Language) -> Element<'_, Message> {
     .clip(true);
     let mut items = column![title].width(WIDTH);
 
+    if menu.can_analyse {
+        // One track at a time: the progress shown is that of one.
+        items = items.push(if analysing {
+            disabled_item(&strings.track_menu_analysing)
+        } else {
+            item(
+                if menu.analysed {
+                    &strings.track_menu_analyse_again
+                } else {
+                    &strings.track_menu_analyse
+                },
+                Message::TrackMenuAnalyse,
+                false,
+            )
+        });
+    }
     if menu.playlist.is_some() {
-        items = items.push(item(
+        items = items.push(item_if(
             &strings.track_menu_playlist,
             Message::TrackMenuRemoveFromPlaylist,
             false,
+            !analysing,
         ));
     }
-    items = items.push(item(
+    // (What changes the library waits for the analysis, which writes to it when it is done.)
+    items = items.push(item_if(
         if menu.confirm_library {
             &strings.track_menu_library_confirm
         } else {
@@ -88,6 +110,7 @@ fn view(menu: &Menu, language: Language) -> Element<'_, Message> {
         },
         Message::TrackMenuRemoveFromLibrary,
         menu.confirm_library,
+        !analysing,
     ));
     // (No padding, so that a click on the menu is always on one of its lines.)
     container(items)
@@ -97,12 +120,22 @@ fn view(menu: &Menu, language: Language) -> Element<'_, Message> {
 }
 
 fn item(label: &str, message: Message, danger: bool) -> Element<'_, Message> {
+    item_if(label, message, danger, true)
+}
+
+/// A line that does something only if `enabled`.
+fn item_if(label: &str, message: Message, danger: bool, enabled: bool) -> Element<'_, Message> {
     button(text(label).size(14))
         .width(Fill)
         .padding([7, 12])
         .style(move |theme: &Theme, status| style(theme, status, danger))
-        .on_press(message)
+        .on_press_maybe(enabled.then_some(message))
         .into()
+}
+
+/// A line that is there but can't be used now.
+fn disabled_item(label: &str) -> Element<'_, Message> {
+    item_if(label, Message::TrackMenuClose, false, false)
 }
 
 fn style(theme: &Theme, status: button::Status, danger: bool) -> button::Style {

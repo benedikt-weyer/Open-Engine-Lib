@@ -7,6 +7,8 @@ Developer commands (scripts/ is on PATH via .envrc):
                         code (quick to build) and run the app; an optional path opens that
                         Engine library
   run-optimized [path]  The same as a release build (slow to build, smooth to run)
+  fetch-models          Download the weights of Beat This! into models/ (needed to analyse
+                        tracks; `run` and `run-optimized` use them from there)
   help                  Show this list
 
 Cargo shortcuts:

@@ -5,6 +5,15 @@
 members = ["api", "backend"]
 default-members = [".", "backend"]
 
+# `rten-gemm` (the neural network runtime under Beat This!, the beat tracking of the analysis)
+# uses an AVX-512 intrinsic that the standard library of the Nix toolchain declares for a
+# newer LLVM than the toolchain has, so that it does not compile there. `vendor/rten-gemm` is
+# 0.24.0 with that one call written as the instruction it is (and a warning about an
+# unneeded `unsafe` block silenced), nothing else changed. Remove
+# the patch once the toolchain compiles the original.
+[patch.crates-io]
+rten-gemm = { path = "vendor/rten-gemm" }
+
 # The audio decoders are far too slow without optimisation, which would make waveforms
 # take many seconds in a debug build. Dependencies are built optimised, our own code isn't.
 [profile.dev.package."*"]

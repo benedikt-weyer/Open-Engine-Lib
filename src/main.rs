@@ -41,7 +41,7 @@ use sync_view::Stage as SyncStage;
 use views::{
     browser, cue_bar, cue_editor, deck, error_text, library_sync_view, loop_bar, loop_editor,
     menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog, progress_view, repair_view,
-    right_click, settings, sidebar, smart_editor, sync_view, track_menu,
+    right_click, settings, sidebar, smart_editor, sync_view, toast, track_menu,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -182,6 +182,8 @@ struct State {
     streaming_confirm: bool,
     /// The context menu of a track of the list, while it is open.
     track_menu: Option<track_menu::Menu>,
+    /// The toast in the corner: the analysis of a track that runs, or how it ended.
+    toast: Option<toast::Toast>,
     reload_result: Option<(String, bool)>,
     /// How wide the user made the track list's columns.
     columns: ColumnStore,
@@ -312,6 +314,19 @@ pub enum Message {
         at: iced::Point,
     },
     TrackMenuClose,
+    /// "Analyse track" (or "Analyse again") in the context menu.
+    TrackMenuAnalyse,
+    /// The analysis of a track (in the library at `library`) ended.
+    AnalysisFinished {
+        library: String,
+        track: u32,
+        title: String,
+        result: Result<open_engine_api::v1::AnalyzeTrackResponse, String>,
+    },
+    /// The close button of the toast.
+    ToastClose,
+    /// Time to look whether a finished toast has been shown long enough.
+    ToastTick,
     TrackMenuRemoveFromPlaylist,
     TrackMenuRemoveFromLibrary,
     TrackRemovedFromPlaylist(Result<backend::PlaylistsEdited, String>),
@@ -526,6 +541,7 @@ impl State {
             reloading: false,
             streaming_confirm: false,
             track_menu: None,
+            toast: None,
             reload_result: None,
             columns: ColumnStore::discover(),
             resize: None,
@@ -578,7 +594,13 @@ impl State {
         } else {
             Subscription::none()
         };
-        // While a sync is writing or a library is opening, ask how far it is.
+        // A finished toast goes away after a while.
+        let toast_clock = if matches!(self.toast, Some(toast::Toast::Done { .. })) {
+            iced::time::every(toast::CHECK_EVERY).map(|_| Message::ToastTick)
+        } else {
+            Subscription::none()
+        };
+        // While a sync is writing, a library is opening or a track is analysed, ask how far it is.
         let progress = if self.reporting_progress() {
             iced::time::every(progress_view::POLL_INTERVAL).map(|_| Message::ProgressTick)
         } else {
@@ -589,6 +611,7 @@ impl State {
             poll,
             resizing,
             progress,
+            toast_clock,
             iced::time::every(DRIVE_SCAN_INTERVAL).map(|_| Message::ScanDrives),
             iced::window::close_requests().map(Message::CloseRequested),
         ])
@@ -638,7 +661,12 @@ impl State {
     /// Whether the library is being saved or read again, so that nothing may replace or
     /// change it meanwhile.
     fn locked(&self) -> bool {
-        self.saving.is_some() || self.reloading
+        self.saving.is_some() || self.reloading || self.analysing()
+    }
+
+    /// Whether a track is being analysed, which writes to the working copy when it is done.
+    fn analysing(&self) -> bool {
+        self.toast.as_ref().is_some_and(toast::Toast::running)
     }
 
     /// Reads the open library from the disk again, replacing the working copy. The edits
@@ -677,7 +705,7 @@ impl State {
     /// Whether the backend is doing something it reports progress on: a sync writing, or a
     /// library being opened.
     fn reporting_progress(&self) -> bool {
-        self.syncing() || matches!(self.library, LibraryState::Opening(_))
+        self.syncing() || self.analysing() || matches!(self.library, LibraryState::Opening(_))
     }
 
     /// Whether one of the windows that lie over the app is open. Only one is at a time.
@@ -1250,6 +1278,10 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::OriginPrefixPicked(..) => handlers::origin_prefix::handle(state, message),
         Message::TrackMenuClose
         | Message::TrackMenuOpen { .. }
+        | Message::TrackMenuAnalyse
+        | Message::AnalysisFinished { .. }
+        | Message::ToastClose
+        | Message::ToastTick
         | Message::TrackMenuRemoveFromLibrary
         | Message::TrackMenuRemoveFromPlaylist
         | Message::TrackRemovedFromPlaylist(..)
@@ -1357,6 +1389,22 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
+    let content = view_page(state);
+    match &state.toast {
+        Some(toast) => iced::widget::stack![
+            content,
+            toast::layer(
+                toast,
+                state.progress.as_ref(),
+                state.config.effective().language
+            )
+        ]
+        .into(),
+        None => content,
+    }
+}
+
+fn view_page(state: &State) -> Element<'_, Message> {
     let language = state.config.effective().language;
     let page = match state.page {
         Page::Library => library_page(state, language),
@@ -1434,7 +1482,8 @@ fn view(state: &State) -> Element<'_, Message> {
         return iced::widget::stack![window, origin_prefix_dialog::modal(dialog, language)].into();
     }
     if let (Some(menu), LibraryState::Open(_)) = (&state.track_menu, &state.library) {
-        return iced::widget::stack![window, track_menu::layer(menu, language)].into();
+        return iced::widget::stack![window, track_menu::layer(menu, state.analysing(), language)]
+            .into();
     }
     match (&state.playlist_dialog, &state.library) {
         (Some(dialog), LibraryState::Open(browser)) => iced::widget::stack![
@@ -1777,6 +1826,8 @@ mod tests {
             cue_count: 0,
             loop_count: 0,
             analysis: 0,
+            analysis_origin: model::AnalysisOrigin::None,
+            analysis_note: None,
             origin: None,
         }
     }
@@ -1873,6 +1924,7 @@ mod tests {
             reloading: false,
             streaming_confirm: false,
             track_menu: None,
+            toast: None,
             reload_result: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
             resize: None,
@@ -2435,6 +2487,189 @@ mod tests {
         assert_eq!(track.analysis_count(), 0);
     }
 
+    fn analysis_response(bpm: f64, key: Option<&str>) -> open_engine_api::v1::AnalyzeTrackResponse {
+        open_engine_api::v1::AnalyzeTrackResponse {
+            analysis: model::ANALYSIS_TRACK_DATA | model::ANALYSIS_BEATGRID,
+            analysis_origin: open_engine_api::v1::AnalysisOrigin::OpenEngineLib.into(),
+            analysis_note: Some("a tool, today".into()),
+            bpm: Some(bpm),
+            key: key.map(str::to_owned),
+            beats: 400,
+        }
+    }
+
+    fn analysing(state: &mut State) {
+        state.toast = Some(toast::Toast::Analysing {
+            library: "/media/DRIVE/Engine Library".into(),
+            title: "Track 1".into(),
+        });
+    }
+
+    #[test]
+    fn the_context_menu_offers_analysing_and_says_whether_it_replaces_an_analysis() {
+        let mut state = state();
+        let at = iced::Point::new(10.0, 10.0);
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert_eq!(
+            (menu(&state).can_analyse, menu(&state).analysed),
+            (true, false)
+        );
+
+        // Once the track has an analysis, analysing it again replaces it.
+        let _ = handle(&mut state, Message::TrackMenuClose);
+        if let LibraryState::Open(browser) = &mut state.library {
+            browser.set_analysed(
+                1,
+                browser::Analysed {
+                    bits: model::ANALYSIS_BEATGRID,
+                    origin: model::AnalysisOrigin::Engine,
+                    note: None,
+                    bpm: None,
+                },
+            );
+        }
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert_eq!(
+            (menu(&state).can_analyse, menu(&state).analysed),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn while_a_track_is_analysed_the_menu_opens_but_changes_nothing() {
+        let mut state = state();
+        analysing(&mut state);
+        let at = iced::Point::new(10.0, 10.0);
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert!(state.track_menu.is_some(), "it can be looked at");
+
+        // Taking a track out of the library waits (it would not even ask for the second click).
+        let _ = handle(&mut state, Message::TrackMenuRemoveFromLibrary);
+        assert!(!menu(&state).confirm_library);
+        // And a second analysis does not start.
+        let _ = handle(&mut state, Message::TrackMenuAnalyse);
+        assert!(state.track_menu.is_none() || state.analysing());
+        assert!(matches!(
+            state.toast,
+            Some(toast::Toast::Analysing { ref title, .. }) if title == "Track 1"
+        ));
+    }
+
+    #[test]
+    fn a_track_that_was_analysed_shows_its_new_analysis_tempo_and_origin() {
+        let mut state = state();
+        analysing(&mut state);
+        assert!(
+            state.analysing() && state.locked(),
+            "nothing else writes meanwhile"
+        );
+        assert!(state.reporting_progress(), "the progress is asked for");
+
+        let _ = handle(
+            &mut state,
+            Message::AnalysisFinished {
+                library: "/media/DRIVE/Engine Library".into(),
+                track: 1,
+                title: "Track 1".into(),
+                result: Ok(analysis_response(126.04, Some("A♭ minor"))),
+            },
+        );
+        assert!(!state.analysing() && !state.locked());
+        match &state.toast {
+            Some(toast::Toast::Done { message, .. }) => {
+                assert!(
+                    message.contains("Track 1")
+                        && message.contains("126.0")
+                        && message.contains("A♭ minor"),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let browser = browser(&state);
+        let track = browser.library.track_by_id(1).unwrap();
+        assert_eq!(browser.analysis(track), 5);
+        assert_eq!(
+            browser.analysis_origin(track),
+            model::AnalysisOrigin::OpenEngineLib
+        );
+        assert_eq!(browser.analysis_note(track), Some("a tool, today"));
+        assert_eq!(browser.bpm(track), Some(126.04));
+        // The other tracks are as they were.
+        let other = browser.library.track_by_id(0).unwrap();
+        assert_eq!(browser.analysis(other), 0);
+        assert_eq!(browser.analysis_origin(other), model::AnalysisOrigin::None);
+
+        // A key that was not heard is said.
+        analysing(&mut state);
+        let _ = handle(
+            &mut state,
+            Message::AnalysisFinished {
+                library: "/media/DRIVE/Engine Library".into(),
+                track: 1,
+                title: "Track 1".into(),
+                result: Ok(analysis_response(90.0, None)),
+            },
+        );
+        match &state.toast {
+            Some(toast::Toast::Done { message, .. }) => assert!(message.contains("no key")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_analysis_is_shown_until_it_is_closed_and_a_late_answer_is_dropped() {
+        let mut state = state();
+        analysing(&mut state);
+        // A running toast can't be closed.
+        let _ = handle(&mut state, Message::ToastClose);
+        assert!(state.analysing());
+
+        // The answer for another library than the one open is not for this toast.
+        let _ = handle(
+            &mut state,
+            Message::AnalysisFinished {
+                library: "/elsewhere".into(),
+                track: 1,
+                title: "Track 1".into(),
+                result: Ok(analysis_response(100.0, None)),
+            },
+        );
+        assert!(state.analysing());
+        assert_eq!(
+            browser(&state).bpm(browser(&state).library.track_by_id(1).unwrap()),
+            None
+        );
+
+        let _ = handle(
+            &mut state,
+            Message::AnalysisFinished {
+                library: "/media/DRIVE/Engine Library".into(),
+                track: 1,
+                title: "Track 1".into(),
+                result: Err("the models were not found".into()),
+            },
+        );
+        match &state.toast {
+            Some(toast::Toast::Failed { message }) => {
+                assert!(
+                    message.contains("Track 1") && message.contains("models"),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // The track keeps what it had, and the list can be used again.
+        assert!(!state.locked());
+        let browser = browser(&state);
+        assert_eq!(browser.analysis(browser.library.track_by_id(1).unwrap()), 0);
+
+        let _ = handle(&mut state, Message::ToastTick);
+        assert!(state.toast.is_some(), "a failure stays");
+        let _ = handle(&mut state, Message::ToastClose);
+        assert!(state.toast.is_none());
+    }
+
     fn smart(title: &str, tracks: &[usize]) -> Playlist {
         Playlist {
             is_smart: true,
@@ -2762,6 +2997,8 @@ mod tests {
                 playlist: None,
                 at,
                 confirm_library: false,
+                can_analyse: true,
+                analysed: false,
             }
         );
         assert_eq!(browser(&state).selected, Some(1), "the row is selected");

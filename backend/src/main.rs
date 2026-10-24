@@ -29,6 +29,7 @@ mod smartlist;
 mod soundswitch;
 mod sync;
 mod tag_cache;
+mod track_analysis;
 mod track_sync;
 
 use std::process::ExitCode;

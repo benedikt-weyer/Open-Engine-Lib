@@ -20,8 +20,8 @@ use crate::config::Language;
 use crate::covers::Covers;
 use crate::i18n::fill;
 use crate::model::{
-    ANALYSIS_BEATGRID, ANALYSIS_KINDS, ANALYSIS_TRACK_DATA, ANALYSIS_WAVEFORM, Kind, Library,
-    Lighting, Playlist, Track, stars_of,
+    ANALYSIS_BEATGRID, ANALYSIS_KINDS, ANALYSIS_TRACK_DATA, ANALYSIS_WAVEFORM, AnalysisOrigin,
+    Kind, Library, Lighting, Playlist, Track, analysis_count, stars_of,
 };
 use crate::reachable::Reachability;
 use crate::right_click::right_click;
@@ -118,6 +118,18 @@ impl Change {
 struct SavedCounts {
     cues: HashMap<u32, u32>,
     loops: HashMap<u32, u32>,
+    /// The tracks analysed since the library was fetched.
+    analysed: HashMap<u32, Analysed>,
+}
+
+/// What a track has after Open Engine Lib analysed it, in place of what the library said when
+/// it was fetched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Analysed {
+    pub bits: u32,
+    pub origin: AnalysisOrigin,
+    pub note: Option<String>,
+    pub bpm: Option<f64>,
 }
 
 #[derive(Default)]
@@ -201,6 +213,46 @@ impl Browser {
 
     pub fn set_loop_count(&mut self, id: u32, count: u32) {
         self.counts.loops.insert(id, count);
+    }
+
+    /// Which analysis results (the `ANALYSIS_*` bits) the track has, as it is now.
+    pub fn analysis(&self, track: &Track) -> u32 {
+        self.counts
+            .analysed
+            .get(&track.id)
+            .map_or(track.analysis, |now| now.bits)
+    }
+
+    /// Who made the analysis the track has.
+    pub fn analysis_origin(&self, track: &Track) -> AnalysisOrigin {
+        self.counts
+            .analysed
+            .get(&track.id)
+            .map_or(track.analysis_origin, |now| now.origin)
+    }
+
+    /// What is known about an analysis that Open Engine Lib made.
+    pub fn analysis_note<'a>(&'a self, track: &'a Track) -> Option<&'a str> {
+        match self.counts.analysed.get(&track.id) {
+            Some(now) => now.note.as_deref(),
+            None => track.analysis_note.as_deref(),
+        }
+    }
+
+    /// The tempo of the track, as it is now (an analysis changes it).
+    pub fn bpm(&self, track: &Track) -> Option<f64> {
+        self.counts
+            .analysed
+            .get(&track.id)
+            .and_then(|now| now.bpm)
+            .or(track.bpm)
+    }
+
+    /// The track was analysed here: this is what it has now. The shown list is put in order
+    /// again, as it may be sorted by what changed.
+    pub fn set_analysed(&mut self, id: u32, now: Analysed) {
+        self.counts.analysed.insert(id, now);
+        self.resort();
     }
 
     /// Where the file of `track` was when its origin was saved.
@@ -297,8 +349,8 @@ impl Browser {
                 Column::Artist => text_value(&track.artist),
                 Column::Album => text_value(&track.album),
                 Column::Genre => text_value(&track.genre),
-                Column::Bpm => track
-                    .bpm
+                Column::Bpm => self
+                    .bpm(track)
                     .and_then(|bpm| number((bpm * 100.0).round() as u64)),
                 Column::Length => track.length.and_then(|length| number(length.into())),
                 Column::Rating => self
@@ -306,7 +358,12 @@ impl Browser {
                     .and_then(|rating| number(rating.into())),
                 Column::Cues => number(self.cue_count(track.id).into()),
                 Column::Loops => number(self.loop_count(track.id).into()),
-                Column::Analysis => number(track.analysis_count().into()),
+                Column::Analysis => number(analysis_count(self.analysis(track)).into()),
+                Column::AnalysisOrigin => number(match self.analysis_origin(track) {
+                    AnalysisOrigin::OpenEngineLib => 2,
+                    AnalysisOrigin::Engine => 1,
+                    AnalysisOrigin::None => 0,
+                }),
                 Column::Lighting if track.streaming => None,
                 Column::Lighting => number(match track.lighting {
                     Lighting::Rendered => 2,
@@ -781,6 +838,7 @@ fn header<'a>(
             by(Column::Cues, &strings.col_cues),
             by(Column::Loops, &strings.col_loops),
             by(Column::Analysis, &strings.col_analysis),
+            by(Column::AnalysisOrigin, &strings.col_analysis_origin),
             by(Column::Lighting, &strings.col_lighting),
             by(Column::Stems, &strings.col_stems),
             by(Column::Origin, &strings.col_origin),
@@ -820,6 +878,7 @@ fn column_name(column: Column, language: Language) -> &'static str {
         Column::Cues => &strings.col_cues,
         Column::Loops => &strings.col_loops,
         Column::Analysis => &strings.col_analysis,
+        Column::AnalysisOrigin => &strings.col_analysis_origin,
         Column::Lighting => &strings.col_lighting,
         Column::Stems => &strings.col_stems,
         Column::Origin => &strings.col_origin,
@@ -932,6 +991,10 @@ pub fn tracks<'a>(
                 stars: stars_of(browser.rating(track.id)),
                 cues: browser.cue_count(track.id),
                 loops: browser.loop_count(track.id),
+                analysis: browser.analysis(track),
+                analysis_origin: browser.analysis_origin(track),
+                analysis_note: browser.analysis_note(track),
+                bpm: browser.bpm(track),
                 number: numbered.then(|| browser.position(row_index) + 1),
             },
             track.album_art.and_then(|id| covers.get(id)),
@@ -1004,16 +1067,16 @@ fn cues_cell<'a>(count: u32) -> Element<'a, Message> {
 /// How many of the kinds of analysis (track data, waveform, beatgrid; the cues and loops
 /// have columns of their own) the library has for the track, like `2/3`. Pointing at it
 /// says which.
-fn analysis_cell<'a>(track: &Track, language: Language) -> Element<'a, Message> {
+fn analysis_cell<'a>(bits: u32, language: Language) -> Element<'a, Message> {
     let strings = language.strings();
-    let count = track.analysis_count();
+    let count = analysis_count(bits);
     let parts: Vec<&str> = [
         (ANALYSIS_TRACK_DATA, &strings.analysis_track_data),
         (ANALYSIS_WAVEFORM, &strings.analysis_waveform),
         (ANALYSIS_BEATGRID, &strings.analysis_beatgrid),
     ]
     .into_iter()
-    .filter(|(bit, _)| track.analysis & bit != 0)
+    .filter(|(bit, _)| bits & bit != 0)
     .map(|(_, name)| name.as_str())
     .collect();
     let tip = if count == 0 {
@@ -1035,6 +1098,43 @@ fn analysis_cell<'a>(track: &Track, language: Language) -> Element<'a, Message> 
     };
     tooltip(
         cell(format!("{count}/{ANALYSIS_KINDS}")).style(style),
+        text(tip).size(13),
+        tooltip::Position::FollowCursor,
+    )
+    .style(container::rounded_box)
+    .into()
+}
+
+/// Who made the track's analysis: Engine, Open Engine Lib (pointing at it says what was used
+/// and when), or a dash for none.
+fn analysis_origin_cell<'a>(
+    origin: AnalysisOrigin,
+    note: Option<&str>,
+    language: Language,
+) -> Element<'a, Message> {
+    let strings = language.strings();
+    let (label, style, tip): (&str, fn(&Theme) -> text::Style, String) = match origin {
+        AnalysisOrigin::OpenEngineLib => (
+            &strings.analysis_origin_ours,
+            text::primary,
+            fill(
+                &strings.analysis_origin_ours_tip,
+                &[("note", &note.unwrap_or_default())],
+            ),
+        ),
+        AnalysisOrigin::Engine => (
+            &strings.analysis_origin_engine,
+            text::base,
+            strings.analysis_origin_engine_tip.clone(),
+        ),
+        AnalysisOrigin::None => (
+            "–",
+            text::secondary,
+            strings.analysis_origin_none_tip.clone(),
+        ),
+    };
+    tooltip(
+        cell(label.to_owned()).style(style),
         text(tip).size(13),
         tooltip::Position::FollowCursor,
     )
@@ -1209,6 +1309,13 @@ struct RowState<'a> {
     cues: u32,
     /// How many loops the track has saved.
     loops: u32,
+    /// Which analysis results the track has (the `ANALYSIS_*` bits).
+    analysis: u32,
+    /// Who made them, and what is known about an analysis of Open Engine Lib's.
+    analysis_origin: AnalysisOrigin,
+    analysis_note: Option<&'a str>,
+    /// The track's tempo, as it is now.
+    bpm: Option<f64>,
     /// The number of the track in its playlist, if the list has numbers.
     number: Option<usize>,
 }
@@ -1230,6 +1337,10 @@ fn track_row<'a>(
         stars,
         cues,
         loops,
+        analysis,
+        analysis_origin,
+        analysis_note,
+        bpm,
         number,
     } = state;
     let kind = layout.kind;
@@ -1242,7 +1353,7 @@ fn track_row<'a>(
         }
     };
 
-    let bpm = track.bpm.map(|bpm| format!("{bpm:.1}")).unwrap_or_default();
+    let bpm = bpm.map(|bpm| format!("{bpm:.1}")).unwrap_or_default();
     let length = track.length.map(format_time).unwrap_or_default();
 
     // Covers that are still loading, or that don't exist, leave the space empty.
@@ -1279,7 +1390,8 @@ fn track_row<'a>(
             stars_cell(track, stars, track.streaming),
             cues_cell(cues),
             cues_cell(loops),
-            analysis_cell(track, language),
+            analysis_cell(analysis, language),
+            analysis_origin_cell(analysis_origin, analysis_note, language),
             lighting_cell(track, language),
             stems_cell(track, language),
             origin_cell(origin, origin_reachable, language),

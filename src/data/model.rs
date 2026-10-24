@@ -41,6 +41,10 @@ pub struct Track {
     pub loop_count: u32,
     /// Which analysis results the library has for the track, as the `ANALYSIS_*` bits.
     pub analysis: u32,
+    /// Who made that analysis.
+    pub analysis_origin: AnalysisOrigin,
+    /// What was used and when, for an analysis made by Open Engine Lib.
+    pub analysis_note: Option<String>,
     /// Where the file was when its origin was saved, in Open Engine Lib's own database.
     pub origin: Option<String>,
 }
@@ -56,6 +60,23 @@ pub enum Lighting {
     Rendered,
 }
 
+/// Who made the analysis a track has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnalysisOrigin {
+    /// The track has none.
+    #[default]
+    None,
+    /// The library has one that Open Engine Lib did not make: Engine's own.
+    Engine,
+    /// Open Engine Lib analysed the track.
+    OpenEngineLib,
+}
+
+/// How many of the `ANALYSIS_KINDS` kinds of analysis the `ANALYSIS_*` bits have.
+pub fn analysis_count(bits: u32) -> u32 {
+    (bits & (ANALYSIS_TRACK_DATA | ANALYSIS_WAVEFORM | ANALYSIS_BEATGRID)).count_ones()
+}
+
 /// The analysis results counted besides the cues and loops, as the bits of
 /// `Track::analysis`.
 pub const ANALYSIS_TRACK_DATA: u32 = 1;
@@ -68,7 +89,7 @@ impl Track {
     /// How many of the `ANALYSIS_KINDS` kinds of analysis the track has: 0 for a track that
     /// was not analysed.
     pub fn analysis_count(&self) -> u32 {
-        (self.analysis & (ANALYSIS_TRACK_DATA | ANALYSIS_WAVEFORM | ANALYSIS_BEATGRID)).count_ones()
+        analysis_count(self.analysis)
     }
 
     /// The rating as 0 to 5 stars. A rating that is not a multiple of 20 (libraries that
@@ -371,6 +392,8 @@ mod tests {
             cue_count: 0,
             loop_count: 0,
             analysis: 0,
+            analysis_origin: AnalysisOrigin::None,
+            analysis_note: None,
             origin: None,
         }
     }
@@ -418,6 +441,8 @@ mod tests {
             cue_count: 0,
             loop_count: 0,
             analysis: 0,
+            analysis_origin: AnalysisOrigin::None,
+            analysis_note: None,
             origin: None,
         };
         let library = Library::new(

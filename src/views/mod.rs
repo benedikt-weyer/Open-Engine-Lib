@@ -23,4 +23,5 @@ pub(crate) mod settings;
 pub(crate) mod sidebar;
 pub(crate) mod smart_editor;
 pub(crate) mod sync_view;
+pub(crate) mod toast;
 pub(crate) mod track_menu;

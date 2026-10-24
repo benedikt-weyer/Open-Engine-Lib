@@ -32,6 +32,8 @@ pub enum Column {
     Loops,
     /// How many of the analysis results besides cues and loops the track has.
     Analysis,
+    /// Who made the analysis: Engine or Open Engine Lib.
+    AnalysisOrigin,
     Lighting,
     Stems,
     Origin,
@@ -48,6 +50,7 @@ impl Column {
                 | Column::Cues
                 | Column::Loops
                 | Column::Analysis
+                | Column::AnalysisOrigin
                 | Column::Lighting
                 | Column::Stems
                 | Column::Origin
@@ -55,7 +58,7 @@ impl Column {
     }
 
     /// How many there are.
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 14;
     /// In the order they are shown.
     pub const ALL: [Column; Column::COUNT] = [
         Column::Title,
@@ -68,6 +71,7 @@ impl Column {
         Column::Cues,
         Column::Loops,
         Column::Analysis,
+        Column::AnalysisOrigin,
         Column::Lighting,
         Column::Stems,
         Column::Origin,
@@ -86,6 +90,7 @@ impl Column {
             Column::Cues => "cues",
             Column::Loops => "loops",
             Column::Analysis => "analysis",
+            Column::AnalysisOrigin => "analysis_origin",
             Column::Lighting => "lighting",
             Column::Stems => "stems",
             Column::Origin => "origin",
@@ -146,6 +151,7 @@ pub struct ColumnWidths {
     cues: f32,
     loops: f32,
     analysis: f32,
+    analysis_origin: f32,
     lighting: f32,
     stems: f32,
     origin: f32,
@@ -164,6 +170,7 @@ impl Default for ColumnWidths {
             cues: 56.0,
             loops: 56.0,
             analysis: 72.0,
+            analysis_origin: 130.0,
             lighting: 72.0,
             stems: 64.0,
             origin: 260.0,
@@ -184,6 +191,7 @@ impl ColumnWidths {
             Column::Cues => self.cues,
             Column::Loops => self.loops,
             Column::Analysis => self.analysis,
+            Column::AnalysisOrigin => self.analysis_origin,
             Column::Lighting => self.lighting,
             Column::Stems => self.stems,
             Column::Origin => self.origin,
@@ -204,6 +212,7 @@ impl ColumnWidths {
             Column::Cues => self.cues = width,
             Column::Loops => self.loops = width,
             Column::Analysis => self.analysis = width,
+            Column::AnalysisOrigin => self.analysis_origin = width,
             Column::Lighting => self.lighting = width,
             Column::Stems => self.stems = width,
             Column::Origin => self.origin = width,
@@ -318,6 +327,7 @@ mod tests {
                 Column::Cues,
                 Column::Loops,
                 Column::Analysis,
+                Column::AnalysisOrigin,
                 Column::Lighting,
                 Column::Stems,
                 Column::Origin

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Download the weights of Beat This! (MIT), which find the beats when a track is analysed, into
+# `models/` of the repository (git ignores it). `run` and `run-optimized` point the audio
+# process at that folder. The same files, at the same versions, are what the Nix package
+# installs. Needs curl and sha256sum.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mkdir -p models
+
+get() {
+  local name=$1 url=$2 sum=$3
+  if [ -f "models/$name" ] && echo "$sum  models/$name" | sha256sum --check --status; then
+    echo "models/$name is there"
+    return
+  fi
+  echo "Downloading $name..."
+  curl -fL --retry 3 -o "models/$name.part" "$url"
+  echo "$sum  models/$name.part" | sha256sum --check --status || {
+    rm -f "models/$name.part"
+    echo "$name does not have the expected checksum" >&2
+    exit 1
+  }
+  mv "models/$name.part" "models/$name"
+}
+
+repository=https://github.com/danigb/beat-this-rs
+get mel_spectrogram.onnx \
+  "https://raw.githubusercontent.com/danigb/beat-this-rs/1ae768e78f1ad83b0ed3886241dc29ffde853c40/models/mel_spectrogram.onnx" \
+  fdd59e65c515331308e4c8841edf99972deca646bdf6197744c2a5b7755e3de9
+get beat_this.onnx \
+  "$repository/releases/download/model-large/beat_this.onnx" \
+  5f810debe53459b559127fb55bbad40035bb47cc567b20e501670f968c770f02
+echo "Done: $(pwd)/models"
