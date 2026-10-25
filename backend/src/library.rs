@@ -95,6 +95,9 @@ pub enum EditError {
     EmptyTitle,
     /// Another playlist in the same place has the title.
     TitleTaken,
+    /// A playlist can't be moved into itself or into what is in it, or in front of a
+    /// playlist that is not in the place it is to be moved to.
+    BadMove,
     /// The library has no table for smart playlists (it is from an older version).
     NoSmartlists,
     /// The library is a plain folder of music, which has none of what an Engine library
@@ -130,6 +133,7 @@ impl fmt::Display for EditError {
             EditError::IsSmart => write!(f, "the playlist is a smart playlist"),
             EditError::EmptyTitle => write!(f, "a playlist needs a title"),
             EditError::TitleTaken => write!(f, "there is already a playlist with that title"),
+            EditError::BadMove => write!(f, "the playlist can't be moved there"),
             EditError::NoSmartlists => {
                 write!(f, "this library has no smart playlists (it is too old)")
             }
@@ -637,6 +641,196 @@ impl Library {
 
         self.reload_playlists(&connection)?;
         Ok(())
+    }
+
+    /// Moves the playlist at `index` in `playlists`, with the playlists and smart playlists in
+    /// it, to the end of the playlists of `parent` (an index into `playlists`; `None` for the
+    /// top level), or in front of the playlist `before` if there is one, which has to be one
+    /// of that parent's. Returns the playlist's index afterwards.
+    ///
+    /// The order of siblings is a linked list (`nextListId`), so the one in front of the
+    /// playlist is linked to the one after it, and the playlist is linked in where it goes.
+    /// Smart playlists name their place by path, so the ones in the playlist follow it, the
+    /// ones that stood in front of it go in front of the one after it (as when it is deleted),
+    /// and the ones in front of `before` stay in front of the playlist, which is what the
+    /// line between them shows.
+    pub fn move_playlist(
+        &self,
+        index: usize,
+        parent: Option<usize>,
+        before: Option<usize>,
+    ) -> Result<usize, EditError> {
+        struct Move {
+            id: i64,
+            old_parent: i64,
+            new_parent: i64,
+            before: i64,
+            old_path: String,
+            new_path: String,
+            old_parent_path: String,
+            new_parent_path: String,
+            before_path: String,
+        }
+        let plan = {
+            let playlists = self.playlists();
+            let playlist = playlists.get(index).ok_or(EditError::NoSuchPlaylist)?;
+            let id = playlist.db_id.ok_or(EditError::IsSmart)?;
+            // What is in it follows it.
+            let end = playlists[index + 1..]
+                .iter()
+                .position(|inner| inner.depth <= playlist.depth)
+                .map_or(playlists.len(), |offset| index + 1 + offset);
+            let new_parent = match parent {
+                Some(parent) => {
+                    let target = playlists.get(parent).ok_or(EditError::NoSuchPlaylist)?;
+                    if (index..end).contains(&parent) {
+                        return Err(EditError::BadMove);
+                    }
+                    target.db_id.ok_or(EditError::IsSmart)?
+                }
+                None => 0,
+            };
+            if playlists.iter().enumerate().any(|(other, sibling)| {
+                other != index
+                    && sibling.parent == parent
+                    && sibling.title == playlist.title
+                    && sibling.parent != playlist.parent
+            }) {
+                return Err(EditError::TitleTaken);
+            }
+            let (before_id, before_path) = match before {
+                Some(before) => {
+                    let target = playlists.get(before).ok_or(EditError::NoSuchPlaylist)?;
+                    if before == index || target.parent != parent {
+                        return Err(EditError::BadMove);
+                    }
+                    (
+                        target.db_id.ok_or(EditError::IsSmart)?,
+                        playlist_path(&playlists, before),
+                    )
+                }
+                None => (0, String::new()),
+            };
+            let path_of = |parent: Option<usize>| {
+                parent.map_or_else(String::new, |parent| playlist_path(&playlists, parent))
+            };
+            let new_parent_path = path_of(parent);
+            Move {
+                id,
+                old_parent: playlist
+                    .parent
+                    .map_or(0, |at| playlists[at].db_id.unwrap_or(0)),
+                new_parent,
+                before: before_id,
+                old_path: playlist_path(&playlists, index),
+                new_path: format!("{new_parent_path}{};", playlist.title),
+                old_parent_path: path_of(playlist.parent),
+                new_parent_path,
+                before_path,
+            }
+        };
+
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        let transaction = connection.unchecked_transaction()?;
+
+        let next: i64 = transaction.query_row(
+            "SELECT nextListId FROM Playlist WHERE id = ?1",
+            [plan.id],
+            |row| row.get(0),
+        )?;
+        if has_smartlists(&transaction) {
+            // The smart playlists that stood in front of it now stand in front of the one
+            // after it, if there is one.
+            let next_title: Option<String> = transaction
+                .query_row("SELECT title FROM Playlist WHERE id = ?1", [next], |row| {
+                    row.get(0)
+                })
+                .optional()?
+                .flatten();
+            let next_path = next_title.map_or_else(String::new, |title| {
+                format!("{}{title};", plan.old_parent_path)
+            });
+            transaction.execute(
+                "UPDATE OR IGNORE Smartlist SET nextPlaylistPath = ?1 \
+                 WHERE COALESCE(parentPlaylistPath, '') = ?2 AND nextPlaylistPath = ?3",
+                (next_path, &plan.old_parent_path, &plan.old_path),
+            )?;
+            // The ones in it, and in what is in it, follow it.
+            if plan.old_path != plan.new_path {
+                let length = plan.old_path.chars().count() as i64;
+                for column in ["parentPlaylistPath", "nextPlaylistPath"] {
+                    transaction.execute(
+                        &format!(
+                            "UPDATE Smartlist SET {column} = ?1 || substr({column}, ?2) \
+                             WHERE substr({column}, 1, ?3) = ?4"
+                        ),
+                        (&plan.new_path, length + 1, length, &plan.old_path),
+                    )?;
+                }
+            }
+            // The ones in front of the playlist it goes in front of stay in front of it.
+            if plan.before != 0 {
+                transaction.execute(
+                    "UPDATE OR IGNORE Smartlist SET nextPlaylistPath = ?1 \
+                     WHERE COALESCE(parentPlaylistPath, '') = ?2 AND nextPlaylistPath = ?3",
+                    (&plan.new_path, &plan.new_parent_path, &plan.before_path),
+                )?;
+            }
+        }
+
+        // Out of the old chain (parked on a link nobody else has, as the database's own
+        // triggers do, because a parent has no two playlists with the same next one) ...
+        transaction.execute(
+            "UPDATE Playlist SET nextListId = -(1 + id) WHERE id = ?1",
+            [plan.id],
+        )?;
+        transaction.execute(
+            "UPDATE Playlist SET nextListId = ?1 WHERE parentListId = ?2 AND nextListId = ?3",
+            (next, plan.old_parent, plan.id),
+        )?;
+        // ... and into the new one.
+        transaction.execute(
+            "UPDATE Playlist SET nextListId = ?1 \
+             WHERE parentListId = ?2 AND nextListId = ?3 AND id != ?1",
+            (plan.id, plan.new_parent, plan.before),
+        )?;
+        transaction.execute(
+            "UPDATE Playlist SET parentListId = ?1, nextListId = ?2, \
+                                 lastEditTime = datetime('now') WHERE id = ?3",
+            (plan.new_parent, plan.before, plan.id),
+        )?;
+        // A playlist in a playlist makes that one persisted too (what the insert trigger
+        // does for a new one).
+        let persisted: Option<bool> = transaction
+            .query_row(
+                "SELECT isPersisted FROM Playlist WHERE id = ?1",
+                [plan.id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if persisted == Some(true) {
+            let mut at = plan.new_parent;
+            while at != 0 {
+                transaction.execute("UPDATE Playlist SET isPersisted = 1 WHERE id = ?1", [at])?;
+                at = transaction
+                    .query_row(
+                        "SELECT parentListId FROM Playlist WHERE id = ?1",
+                        [at],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(0);
+            }
+        }
+        transaction.commit()?;
+
+        self.reload_playlists(&connection)?;
+        self.playlists()
+            .iter()
+            .position(|playlist| playlist.db_id == Some(plan.id))
+            .ok_or(EditError::NoSuchPlaylist)
     }
 
     /// Deletes the playlist at `index` in `playlists` with everything in it, the
@@ -2749,6 +2943,154 @@ mod tests {
             library.create_playlist("x", Some(smart)),
             Err(EditError::IsSmart)
         ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    fn index_of(library: &Library, title: &str) -> usize {
+        library
+            .playlists()
+            .iter()
+            .position(|playlist| playlist.title == title)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_playlist_moves_into_another_to_its_end() {
+        let (library, cache) = engine_library("playlist-move-into");
+        let beta = index_of(&library, "Beta");
+        let alpha = index_of(&library, "Alpha");
+        let moved = library.move_playlist(beta, Some(alpha), None).unwrap();
+        assert_eq!(
+            titles(&library),
+            ["Before", "Alpha", "Child", "In Child", "Beta", "In Alpha"]
+        );
+        assert_eq!(moved, 4);
+        assert_eq!(library.playlists()[moved].depth, 1);
+
+        // Out again, to the top level, where it is the last of the playlists.
+        library.move_playlist(moved, None, None).unwrap();
+        assert_eq!(
+            titles(&library),
+            ["Before", "Alpha", "Child", "In Child", "In Alpha", "Beta"]
+        );
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_playlist_moves_in_front_of_another_and_takes_what_is_in_it() {
+        let (library, cache) = engine_library("playlist-move-before");
+        // Child (with the smart playlist in it) goes to the top level, in front of Beta.
+        let child = index_of(&library, "Child");
+        let beta = index_of(&library, "Beta");
+        let moved = library.move_playlist(child, None, Some(beta)).unwrap();
+        assert_eq!(
+            titles(&library),
+            ["Child", "In Child", "Beta", "Before", "Alpha", "In Alpha"]
+        );
+        assert_eq!(moved, 0);
+        assert_eq!(
+            smartlist_paths(&library),
+            [
+                ("Before".into(), "".into(), "Alpha;".into()),
+                ("In Alpha".into(), "Alpha;".into(), "".into()),
+                ("In Child".into(), "Child;".into(), "".into()),
+            ]
+        );
+        assert_eq!(library.playlists()[1].parent, Some(0));
+
+        // In front of the playlist that a smart playlist stands in front of: the smart
+        // playlist stays above the playlist that is put there, where the line was.
+        let alpha = index_of(&library, "Alpha");
+        let beta = index_of(&library, "Beta");
+        library.move_playlist(beta, None, Some(alpha)).unwrap();
+        assert_eq!(
+            titles(&library),
+            ["Child", "In Child", "Before", "Beta", "Alpha", "In Alpha"]
+        );
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn the_smart_playlists_in_front_of_a_moved_playlist_stay_in_front_of_its_next() {
+        let (library, cache) = engine_library("playlist-move-smart");
+        // "Before" stands in front of Alpha, which is the last: it goes to the end then.
+        let alpha = index_of(&library, "Alpha");
+        let beta = index_of(&library, "Beta");
+        library.move_playlist(alpha, None, Some(beta)).unwrap();
+        assert_eq!(
+            titles(&library),
+            ["Alpha", "Child", "In Child", "In Alpha", "Beta", "Before"]
+        );
+        // What is in Alpha went with it.
+        assert_eq!(
+            smartlist_paths(&library)[1],
+            ("In Alpha".into(), "Alpha;".into(), "".into())
+        );
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_playlist_does_not_move_where_it_can_not() {
+        let (library, cache) = engine_library("playlist-move-refused");
+        let alpha = index_of(&library, "Alpha");
+        let child = index_of(&library, "Child");
+        let beta = index_of(&library, "Beta");
+        assert!(matches!(
+            library.move_playlist(alpha, Some(alpha), None),
+            Err(EditError::BadMove)
+        ));
+        assert!(matches!(
+            library.move_playlist(alpha, Some(child), None),
+            Err(EditError::BadMove)
+        ));
+        // In front of something that is not in the place.
+        assert!(matches!(
+            library.move_playlist(beta, Some(alpha), Some(beta)),
+            Err(EditError::BadMove)
+        ));
+        assert!(matches!(
+            library.move_playlist(beta, None, Some(child)),
+            Err(EditError::BadMove)
+        ));
+        // A smart playlist is not moved, and nothing is moved into one.
+        assert!(matches!(
+            library.move_playlist(index_of(&library, "Before"), None, None),
+            Err(EditError::IsSmart)
+        ));
+        assert!(matches!(
+            library.move_playlist(beta, Some(index_of(&library, "Before")), None),
+            Err(EditError::IsSmart)
+        ));
+        assert!(matches!(
+            library.move_playlist(99, None, None),
+            Err(EditError::NoSuchPlaylist)
+        ));
+        // A title the place has already.
+        {
+            let connection = library.connection.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO Playlist (title, parentListId, isPersisted, nextListId) \
+                     VALUES ('Beta', 1, 1, 0)",
+                    [],
+                )
+                .unwrap();
+        }
+        let connection = library.connection.lock().unwrap();
+        library.reload_playlists(&connection).unwrap();
+        drop(connection);
+        let beta = library
+            .playlists()
+            .iter()
+            .position(|p| p.title == "Beta" && p.depth == 0)
+            .unwrap();
+        let alpha = index_of(&library, "Alpha");
+        assert!(matches!(
+            library.move_playlist(beta, Some(alpha), None),
+            Err(EditError::TitleTaken)
+        ));
+        // Nothing changed.
+        assert_eq!(library.playlists()[beta].depth, 0);
         let _ = std::fs::remove_dir_all(&cache);
     }
 

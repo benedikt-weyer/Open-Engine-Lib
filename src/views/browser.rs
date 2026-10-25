@@ -23,6 +23,7 @@ use crate::model::{
     ANALYSIS_BEATGRID, ANALYSIS_KINDS, ANALYSIS_TRACK_DATA, ANALYSIS_WAVEFORM, AnalysisOrigin,
     Kind, Library, Lighting, Playlist, Track, analysis_count, stars_of,
 };
+use crate::playlist_drag::{self, Drag};
 use crate::reachable::Reachability;
 use crate::right_click::right_click;
 
@@ -93,6 +94,9 @@ pub enum Change {
     Inserted(usize),
     /// The playlists in this range were deleted, and the ones after it moved up.
     Removed(Range<usize>),
+    /// The playlists in `from` (one with what is in it) are now from `to` on, and the ones
+    /// between moved over by as many.
+    Moved { from: Range<usize>, to: usize },
 }
 
 impl Change {
@@ -107,6 +111,17 @@ impl Change {
             } else {
                 index
             }),
+            Change::Moved { from, to } if from.contains(&index) => Some(to + index - from.start),
+            Change::Moved { from, to } => {
+                // Its place among the playlists that did not move, which come before and
+                // after the ones that did.
+                let rank = if index >= from.end {
+                    index - from.len()
+                } else {
+                    index
+                };
+                Some(if rank < *to { rank } else { rank + from.len() })
+            }
         }
     }
 }
@@ -562,7 +577,11 @@ pub fn format_time(seconds: u32) -> String {
 }
 
 /// The playlist tree: pick what the track list shows.
-pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Message> {
+pub fn playlists<'a>(
+    browser: &'a Browser,
+    drag: Option<&'a Drag>,
+    language: Language,
+) -> Element<'a, Message> {
     let mut list = column![].spacing(2);
 
     list = list.push(
@@ -606,12 +625,15 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
         }
 
         let selected = browser.source == Source::Playlist(index);
+        let lifted = drag.is_some_and(|drag| drag.active && drag.playlist == index);
         let mut line = row![
             Space::new().width(playlist.depth as f32 * INDENT),
             toggle,
             button(text(&playlist.title))
                 .width(Fill)
-                .style(if selected {
+                .style(if lifted {
+                    button::secondary
+                } else if selected {
                     button::primary
                 } else {
                     button::text
@@ -648,9 +670,34 @@ pub fn playlists<'a>(browser: &'a Browser, language: Language) -> Element<'a, Me
                     Message::PlaylistDelete(index),
                 ));
         }
-        // The folders of a folder of music have a menu (import as a playlist).
+        // The folders of a folder of music have a menu (import as a playlist). The playlists
+        // of an Engine library can be dragged to another place in the tree.
         list = list.push(if browser.library.is_engine() {
-            Element::from(line)
+            let dragging = drag.is_some_and(|drag| drag.active);
+            let line_to_draw = drag
+                .filter(|drag| drag.active)
+                .and_then(|drag| Some((drag.over.filter(|over| over.row == index)?, drag)))
+                .and_then(|(over, drag)| {
+                    playlist_drag::line(
+                        &browser.library.playlists,
+                        |row| browser.is_expanded(row),
+                        drag.playlist,
+                        over,
+                    )
+                })
+                .map(|line| (line, line.level as f32 * INDENT + TOGGLE_WIDTH / 2.0));
+            Element::from(playlist_drag::drag_row(
+                line,
+                playlist_drag::Row {
+                    press: (!playlist.is_smart).then_some(Message::PlaylistDragPress(index)),
+                    over: (!playlist.is_smart).then(|| {
+                        Box::new(move |zone| Message::PlaylistDragOver(index, zone))
+                            as Box<dyn Fn(Option<playlist_drag::Zone>) -> Message>
+                    }),
+                    dragging,
+                    line: line_to_draw,
+                },
+            ))
         } else {
             right_click(line, move |at| Message::FolderMenuOpen {
                 playlist: index,

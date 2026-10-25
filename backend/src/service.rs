@@ -419,6 +419,24 @@ impl LibraryService for Service {
         .await
     }
 
+    async fn move_playlist(
+        &self,
+        request: Request<api::MovePlaylistRequest>,
+    ) -> Result<Response<api::PlaylistsEdited>, Status> {
+        let library = self.engine_library()?;
+        let request = request.into_inner();
+        playlists_edited(library, move |library| {
+            library
+                .move_playlist(
+                    request.playlist_id as usize,
+                    request.parent_id.map(|id| id as usize),
+                    request.before_id.map(|id| id as usize),
+                )
+                .map(Some)
+        })
+        .await
+    }
+
     async fn delete_playlist(
         &self,
         request: Request<api::DeletePlaylistRequest>,
@@ -1262,6 +1280,7 @@ fn edit_status(error: EditError) -> Status {
         | EditError::BadCue(_)
         | EditError::BadLoop(_) => Status::invalid_argument(error.to_string()),
         EditError::TitleTaken => Status::already_exists(error.to_string()),
+        EditError::BadMove => Status::invalid_argument(error.to_string()),
         EditError::NoSmartlists
         | EditError::NotEngine
         | EditError::Streaming

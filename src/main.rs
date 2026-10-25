@@ -41,8 +41,8 @@ use sync_view::Stage as SyncStage;
 use views::{
     browser, cue_bar, cue_editor, deck, error_text, folder_menu, import_view, library_sync_view,
     loop_bar, loop_editor, menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog,
-    progress_view, repair_view, right_click, settings, sidebar, smart_editor, sync_view, toast,
-    track_menu,
+    playlist_drag, progress_view, repair_view, right_click, settings, sidebar, smart_editor,
+    sync_view, toast, track_menu,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -117,6 +117,10 @@ struct State {
     /// and a folder of music can be open at the same time (one of each at most), and the
     /// sidebar brings this one back, which parks the shown one in its place.
     parked: Option<Browser>,
+    /// A playlist of the tree being dragged to another place.
+    playlist_drag: Option<playlist_drag::Drag>,
+    /// A playlist is being moved by the backend.
+    moving_playlist: bool,
     recents: Recents,
     /// The folders of music that were added to the "Local music" section.
     local_folders: LocalFolders,
@@ -399,6 +403,20 @@ pub enum Message {
     PlaylistConfirm,
     PlaylistCancel,
     PlaylistsEdited(Result<backend::PlaylistsEdited, String>),
+    /// A playlist of the tree: the button went down on it, the pointer moved (anywhere in the
+    /// window), is over a zone of a row (or left it), the button was let go, `Escape` was
+    /// pressed, time passed (to open a folder the pointer stays over), and the backend moved
+    /// it (`from` is where it and what was in it were).
+    PlaylistDragPress(usize),
+    PlaylistDragMoved(iced::Point),
+    PlaylistDragOver(usize, Option<playlist_drag::Zone>),
+    PlaylistDragEnd,
+    PlaylistDragCancel,
+    PlaylistDragTick,
+    PlaylistMoved {
+        from: std::ops::Range<usize>,
+        result: Result<backend::PlaylistsEdited, String>,
+    },
 
     /// A File menu entry was picked.
     MenuSelected(MenuItem),
@@ -551,6 +569,8 @@ impl State {
             session,
             library: LibraryState::Closed { error: None },
             parked: None,
+            playlist_drag: None,
+            moving_playlist: false,
             recents: Recents::discover(),
             local_folders: LocalFolders::discover(),
             drives: Vec::new(),
@@ -628,6 +648,30 @@ impl State {
         } else {
             Subscription::none()
         };
+        // While a playlist is dragged, follow the pointer wherever it goes, notice when the
+        // button is let go or the drag is given up, and now and then look at whether the pointer
+        // has stayed over a folder long enough to open it.
+        let dragging = if self.playlist_drag.is_some() {
+            let events = iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::PlaylistDragMoved(position))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::PlaylistDragEnd),
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::PlaylistDragCancel),
+                _ => None,
+            });
+            Subscription::batch([
+                events,
+                iced::time::every(playlist_drag::CHECK_EVERY).map(|_| Message::PlaylistDragTick),
+            ])
+        } else {
+            Subscription::none()
+        };
         // While a column is being resized, follow the pointer wherever it goes (it leaves
         // the thin handle at once) and notice when the button is let go.
         let resizing = if self.resize.is_some() {
@@ -659,6 +703,7 @@ impl State {
             mpris::subscription().map(Message::Mpris),
             poll,
             resizing,
+            dragging,
             progress,
             toast_clock,
             iced::time::every(DRIVE_SCAN_INTERVAL).map(|_| Message::ScanDrives),
@@ -689,6 +734,7 @@ impl State {
     /// Forgets what was fetched for the library that was shown and the player that played
     /// from it: the ids belong to one library.
     fn forget_shown_library(&mut self) {
+        self.playlist_drag = None;
         self.reset_playback();
         self.covers.clear();
         self.reachable.clear();
@@ -1446,6 +1492,13 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::SmartNew
         | Message::SmartSave
         | Message::SmartSaved(..) => handlers::playlists::handle(state, message),
+        Message::PlaylistDragCancel
+        | Message::PlaylistDragEnd
+        | Message::PlaylistDragMoved(..)
+        | Message::PlaylistDragOver(..)
+        | Message::PlaylistDragPress(..)
+        | Message::PlaylistDragTick
+        | Message::PlaylistMoved { .. } => handlers::playlist_drag::handle(state, message),
         Message::LibrarySyncAdd
         | Message::LibrarySyncAdded(..)
         | Message::LibrarySyncBack
@@ -1727,6 +1780,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
                 drive_error: state.drive_error.as_deref(),
                 drives: &state.drives,
                 local: &state.local_folders,
+                drag: state.playlist_drag.as_ref(),
             },
             sidebar::Open {
                 shown: browser.map(|browser| browser.library.path.as_str()),
@@ -2218,6 +2272,8 @@ mod tests {
             restore: None,
             session: SessionStore::load(temp.join("session.toml")),
             parked: None,
+            playlist_drag: None,
+            moving_playlist: false,
             library: LibraryState::Open(Browser::new(Arc::new(library))),
             recents: Recents::load(temp.join("recent.toml")),
             local_folders: LocalFolders::load(temp.join("local-folders.toml")),
@@ -4990,6 +5046,153 @@ mod tests {
     }
 
     #[test]
+    fn the_playlists_of_an_engine_library_can_be_dragged_in_the_tree() {
+        let state = state();
+        let LibraryState::Open(browser) = &state.library else {
+            unreachable!()
+        };
+        let at = iced::Point::new(100.0, 90.0);
+        let moved = iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: at });
+        let down = iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+
+        // The button going down on "Pop" (the third line) makes it a candidate.
+        let (messages, _) = press_on(
+            browser::playlists(browser, None, Language::English),
+            Default::default(),
+            &[moved.clone(), down],
+            at,
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, Message::PlaylistDragPress(2))),
+            "{messages:?}"
+        );
+
+        // While one is dragged, rows say which part of them the pointer is over.
+        let mut drag = playlist_drag::Drag::pressed(0);
+        drag.moved(iced::Point::new(0.0, 0.0));
+        drag.moved(iced::Point::new(40.0, 40.0));
+        let (messages, _) = press_on(
+            browser::playlists(browser, Some(&drag), Language::English),
+            Default::default(),
+            &[moved],
+            at,
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, Message::PlaylistDragOver(2, Some(_)))),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_drag_follows_the_pointer_and_ends_where_the_button_is_let_go() {
+        let mut state = state();
+        // A folder of music has playlists that can't be moved.
+        let mut folder = state_with_a_folder();
+        let _ = handle(&mut folder, Message::PlaylistDragPress(2));
+        assert!(folder.playlist_drag.is_none());
+
+        let _ = handle(&mut state, Message::PlaylistDragPress(2));
+        assert!(state.playlist_drag.is_some());
+        // (Not a drag until the pointer has gone some way.)
+        let _ = handle(
+            &mut state,
+            Message::PlaylistDragOver(0, Some(playlist_drag::Zone::Inside)),
+        );
+        assert_eq!(state.playlist_drag.as_ref().unwrap().over, None);
+        let _ = handle(
+            &mut state,
+            Message::PlaylistDragMoved(iced::Point::new(5.0, 5.0)),
+        );
+        let _ = handle(
+            &mut state,
+            Message::PlaylistDragMoved(iced::Point::new(5.0, 50.0)),
+        );
+        assert!(state.playlist_drag.as_ref().unwrap().active);
+        let _ = handle(
+            &mut state,
+            Message::PlaylistDragOver(0, Some(playlist_drag::Zone::Inside)),
+        );
+        assert_eq!(
+            state.playlist_drag.as_ref().unwrap().over,
+            Some(playlist_drag::Target {
+                row: 0,
+                zone: playlist_drag::Zone::Inside
+            })
+        );
+
+        // Escape gives it up; letting go ends it (here there is no backend to move anything).
+        let _ = handle(&mut state, Message::PlaylistDragCancel);
+        assert!(state.playlist_drag.is_none());
+        let _ = handle(&mut state, Message::PlaylistDragPress(2));
+        let _ = handle(&mut state, Message::PlaylistDragEnd);
+        assert!(state.playlist_drag.is_none());
+        // A window over the app takes the drag away too.
+        state.playlist_drag = Some(playlist_drag::Drag::pressed(2));
+        state.forget_shown_library();
+        assert!(state.playlist_drag.is_none());
+    }
+
+    #[test]
+    fn a_moved_playlist_keeps_what_was_shown_and_its_new_place_is_opened() {
+        let mut state = state();
+        // "House" (with "Deep") was shown; "Pop" goes into it.
+        let _ = handle(&mut state, Message::ShowPlaylist(1));
+        let moved = vec![
+            playlist("House", 0, true, &[]),
+            playlist("Deep", 1, false, &[1, 2]),
+            playlist("Pop", 1, false, &[0]),
+        ];
+        let _ = handle(
+            &mut state,
+            Message::PlaylistMoved {
+                from: 2..3,
+                result: Ok(backend::PlaylistsEdited {
+                    playlists: moved,
+                    playlist: Some(2),
+                }),
+            },
+        );
+        let LibraryState::Open(browser) = &state.library else {
+            unreachable!()
+        };
+        assert_eq!(browser.source, Source::Playlist(1), "Deep is still shown");
+        assert!(
+            browser.is_expanded(0),
+            "House is open to show where Pop went"
+        );
+
+        // A failure is told.
+        let _ = handle(
+            &mut state,
+            Message::PlaylistMoved {
+                from: 2..3,
+                result: Err("no".into()),
+            },
+        );
+        assert_eq!(state.backend_error.as_deref(), Some("no"));
+    }
+
+    #[test]
+    fn the_numbers_of_the_playlists_follow_a_move() {
+        // 0 A, 1 B, 2 C, 3 D: B and C (1..3) go to the end.
+        let down = Change::Moved { from: 1..3, to: 2 };
+        assert_eq!(
+            (0..4).map(|row| down.map(row)).collect::<Vec<_>>(),
+            [Some(0), Some(2), Some(3), Some(1)]
+        );
+        // D goes to the front.
+        let up = Change::Moved { from: 3..4, to: 0 };
+        assert_eq!(
+            (0..4).map(|row| up.map(row)).collect::<Vec<_>>(),
+            [Some(1), Some(2), Some(3), Some(0)]
+        );
+    }
+
+    #[test]
     fn right_clicking_a_folder_of_a_folder_of_music_opens_its_menu() {
         let folder = state_with_a_folder();
         let LibraryState::Open(browser) = &folder.library else {
@@ -5005,7 +5208,7 @@ mod tests {
             )),
         ];
         let (messages, _) = press_on(
-            browser::playlists(browser, Language::English),
+            browser::playlists(browser, None, Language::English),
             Default::default(),
             &events,
             at,
@@ -5025,7 +5228,7 @@ mod tests {
             unreachable!()
         };
         let (messages, _) = press_on(
-            browser::playlists(browser, Language::English),
+            browser::playlists(browser, None, Language::English),
             Default::default(),
             &events,
             at,

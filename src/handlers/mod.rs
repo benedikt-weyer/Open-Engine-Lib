@@ -10,6 +10,7 @@ pub(super) mod loops;
 pub(super) mod mpris;
 pub(super) mod origin_prefix;
 pub(super) mod playback;
+pub(super) mod playlist_drag;
 pub(super) mod playlists;
 pub(super) mod repair;
 pub(super) mod settings;

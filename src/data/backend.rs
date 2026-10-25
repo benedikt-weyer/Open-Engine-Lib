@@ -27,9 +27,9 @@ use open_engine_api::v1::{
     GetLibrarySyncDiffResponse, GetLoopsRequest, GetOriginPrefixRequest, GetOriginPrefixResponse,
     GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest,
     ImportFolderRequest, ImportFolderResponse, LearnRequest, ListPlaylistsRequest,
-    ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse, MoveScratchRequest,
-    NameOrder, NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress,
-    PlayRequest, PlaybackStatus, PreviewFolderImportRequest, PreviousRequest,
+    ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse, MovePlaylistRequest,
+    MoveScratchRequest, NameOrder, NextRequest, OpenLibraryRequest, OpenLocalFolderRequest,
+    OperationProgress, PlayRequest, PlaybackStatus, PreviewFolderImportRequest, PreviousRequest,
     PullFromSourceRequest, PullFromSourceResponse, RemoveStreamingTracksRequest,
     RemoveStreamingTracksResponse, RemoveTrackFromPlaylistRequest, RemoveTracksRequest,
     RemoveTracksResponse, RenamePlaylistRequest, RenameProfileRequest, RepairLibraryRequest,
@@ -509,6 +509,29 @@ pub async fn rename_playlist(
         .rename_playlist(RenamePlaylistRequest {
             playlist_id: playlist as u32,
             title,
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    Ok(playlists_edited_from(edited, &library))
+}
+
+/// Moves the playlist at index `playlist` (with what is in it) to the end of the playlists
+/// of `parent`, or in front of `before` if there is one (both are indices; no parent: the
+/// top level). `playlist` of the answer is where it is now.
+pub async fn move_playlist(
+    mut backend: Backend,
+    library: Arc<Library>,
+    playlist: usize,
+    parent: Option<usize>,
+    before: Option<usize>,
+) -> Result<PlaylistsEdited, String> {
+    let edited = backend
+        .library
+        .move_playlist(MovePlaylistRequest {
+            playlist_id: playlist as u32,
+            parent_id: parent.map(|parent| parent as u32),
+            before_id: before.map(|before| before as u32),
         })
         .await
         .map_err(describe)?

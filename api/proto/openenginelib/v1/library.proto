@@ -100,6 +100,17 @@ service LibraryService {
   // in it. Its tracks stay in the library. Playlist ids after it change. Errors as for
   // `RenamePlaylist`.
   rpc DeletePlaylist(DeletePlaylistRequest) returns (PlaylistsEdited);
+  // Moves a playlist in the working copy, with the playlists and smart playlists in it:
+  // to the end of the playlists of `parent_id` (the top level if unset), or in front of
+  // the playlist `before_id` if set, which has to be one of that parent's. The smart
+  // playlists that stood in front of the playlist are in front of the one after it now;
+  // the ones in front of `before_id` are in front of the playlist. The playlist's id
+  // changes (`playlist_id` of the answer has the new one), and so do others'.
+  // Errors: FAILED_PRECONDITION if no library is open or it is a folder of music,
+  // NOT_FOUND for an unknown id, INVALID_ARGUMENT for a smart playlist, a parent that is
+  // the playlist or in it, or a `before_id` that is not the parent's, ALREADY_EXISTS if
+  // the new parent has a playlist with the title, INTERNAL if the database can't be written.
+  rpc MovePlaylist(MovePlaylistRequest) returns (PlaylistsEdited);
   // Saves the location of each track's file as its origin in Open Engine Lib's own
   // database, for the tracks that have no origin saved yet (one that is saved is kept).
   // Tracks without a file here (streaming) or that don't say where they came from are
@@ -353,8 +364,14 @@ message RenamePlaylistRequest {
 message DeletePlaylistRequest {
   uint32 playlist_id = 1;
 }
+message MovePlaylistRequest {
+  // As in `DeletePlaylist`: an index into the playlists `ListPlaylists` gives.
+  uint32 playlist_id = 1;
+  optional uint32 parent_id = 2;
+  optional uint32 before_id = 3;
+}
 message PlaylistsEdited {
-  // The playlist that was added; unset after a rename or a delete.
+  // The playlist that was added or moved; unset after a rename or a delete.
   optional uint32 playlist_id = 1;
   // All playlists as `ListPlaylists` answers now.
   repeated Playlist playlists = 2;

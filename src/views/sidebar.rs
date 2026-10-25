@@ -13,6 +13,7 @@ use crate::config::Language;
 use crate::drives::Drive;
 use crate::error_text;
 use crate::local_folders::LocalFolders;
+use crate::playlist_drag::Drag;
 use crate::recent::{Recents, display_name};
 
 const WIDTH: f32 = 260.0;
@@ -33,6 +34,8 @@ pub struct Sources<'a> {
     pub drives: &'a [Drive],
     /// The folders of music that were added.
     pub local: &'a LocalFolders,
+    /// The playlist being dragged in the tree, if one is.
+    pub drag: Option<&'a Drag>,
 }
 
 /// The libraries that are open, to mark them in the list: the shown one, and the one of the
@@ -80,6 +83,7 @@ pub fn view<'a>(
         drive_error,
         drives,
         local,
+        drag,
     } = sources;
     let strings = language.strings();
 
@@ -120,13 +124,13 @@ pub fn view<'a>(
         // The folders of a folder of music, with the local music below them. There is
         // nothing to edit or sync.
         Some(browser) if !browser.library.is_engine() => column![
-            browser::playlists(browser, language),
+            browser::playlists(browser, drag, language),
             container(local_section).max_height(LOCAL_MAX_HEIGHT),
             container(drive_section).max_height(DRIVES_MAX_HEIGHT),
             container(section).max_height(RECENT_MAX_HEIGHT)
         ],
         Some(browser) => column![
-            browser::playlists(browser, language),
+            browser::playlists(browser, drag, language),
             button(text(&strings.playlist_new))
                 .width(Fill)
                 .style(button::secondary)
