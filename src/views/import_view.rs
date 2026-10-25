@@ -5,10 +5,11 @@
 use std::path::PathBuf;
 
 use iced::widget::{
-    Space, button, center, checkbox, column, container, opaque, row, text, text_input,
+    Space, button, center, checkbox, column, container, opaque, radio, row, scrollable, text,
+    text_input,
 };
 use iced::{Color, Element, Fill, Theme};
-use open_engine_api::v1::{ImportFolderResponse, OperationProgress};
+use open_engine_api::v1::{ImportFolderResponse, NameOrder, OperationProgress};
 
 use crate::Message;
 use crate::config::Language;
@@ -29,6 +30,8 @@ pub struct Options {
     pub copy_files: bool,
     /// The new tracks are analysed once the library is open.
     pub analyse: bool,
+    /// Whether the digits in the files' names count as numbers when they are put in order.
+    pub name_order: NameOrder,
 }
 
 /// A tick of the window.
@@ -73,6 +76,14 @@ impl Stage {
     pub fn can_close(&self) -> bool {
         !matches!(self, Stage::Importing { .. })
     }
+
+    /// What was chosen, while there is a choice or the work on it.
+    pub fn options(&self) -> Option<&Options> {
+        match self {
+            Stage::Options { options, .. } | Stage::Importing { options, .. } => Some(options),
+            Stage::Pick | Stage::Done { .. } => None,
+        }
+    }
 }
 
 /// The folder being imported, and the window's stage.
@@ -84,7 +95,60 @@ pub struct Import {
     pub name: String,
     /// How many tracks the folder has (with the folders below it).
     pub tracks: usize,
+    /// The files in the order the chosen `name_order` gives (as paths below the folder), or
+    /// why they could not be listed; `None` while they are asked for.
+    pub preview: Option<Result<Vec<String>, String>>,
     pub stage: Stage,
+}
+
+/// How many files the preview lists; the rest is only counted.
+const PREVIEW_ROWS: usize = 300;
+/// How tall the preview is.
+const PREVIEW_HEIGHT: f32 = 200.0;
+
+/// The files in the order they will have in the playlist.
+fn preview<'a>(
+    preview: Option<&'a Result<Vec<String>, String>>,
+    language: Language,
+) -> Element<'a, Message> {
+    let strings = language.strings();
+    let secondary = |content: String| text(content).size(13).style(text::secondary);
+    match preview {
+        None => secondary(strings.import_preview_loading.clone()).into(),
+        Some(Err(error)) => error_text::view(
+            fill(&strings.import_preview_failed, &[("error", error)]),
+            language,
+        ),
+        Some(Ok(paths)) => {
+            let mut rows = column![].spacing(2);
+            for (at, path) in paths.iter().take(PREVIEW_ROWS).enumerate() {
+                rows = rows.push(
+                    row![
+                        text(format!("{}", at + 1))
+                            .size(12)
+                            .width(44)
+                            .style(text::secondary),
+                        text(path).size(12),
+                    ]
+                    .spacing(8),
+                );
+            }
+            if paths.len() > PREVIEW_ROWS {
+                rows = rows.push(secondary(fill(
+                    &strings.import_preview_more,
+                    &[("count", &(paths.len() - PREVIEW_ROWS))],
+                )));
+            }
+            column![
+                secondary(fill(&strings.import_preview, &[("count", &paths.len())])),
+                container(scrollable(rows.padding(8)).width(Fill))
+                    .height(PREVIEW_HEIGHT)
+                    .style(container::bordered_box),
+            ]
+            .spacing(4)
+            .into()
+        }
+    }
 }
 
 /// The window, centred over a dimmed view of the app that can't be clicked.
@@ -132,6 +196,20 @@ pub fn modal<'a>(
                     .on_submit_maybe(
                         (!options.title.trim().is_empty()).then_some(Message::ImportStart)
                     ),
+                text(&strings.import_order).size(14),
+                radio(
+                    &strings.import_order_strict,
+                    NameOrder::Strict,
+                    Some(options.name_order),
+                    Message::ImportOrder
+                ),
+                radio(
+                    &strings.import_order_natural,
+                    NameOrder::Natural,
+                    Some(options.name_order),
+                    Message::ImportOrder
+                ),
+                preview(import.preview.as_ref(), language),
                 checkbox(options.copy_files)
                     .label(&strings.import_copy)
                     .on_toggle(|on| Message::ImportOption(Setting::CopyFiles, on)),

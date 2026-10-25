@@ -28,16 +28,16 @@ use open_engine_api::v1::{
     GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest,
     ImportFolderRequest, ImportFolderResponse, LearnRequest, ListPlaylistsRequest,
     ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse, MoveScratchRequest,
-    NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress, PlayRequest,
-    PlaybackStatus, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
-    RemoveStreamingTracksRequest, RemoveStreamingTracksResponse, RemoveTrackFromPlaylistRequest,
-    RemoveTracksRequest, RemoveTracksResponse, RenamePlaylistRequest, RenameProfileRequest,
-    RepairLibraryRequest, RepairLibraryResponse, ReplaceOriginPrefixRequest,
-    ReplaceOriginPrefixResponse, SaveLibraryAsRequest, SeekRequest, SelectProfileRequest,
-    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules,
-    SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
-    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
-    WatchControllerRequest,
+    NameOrder, NextRequest, OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress,
+    PlayRequest, PlaybackStatus, PreviewFolderImportRequest, PreviousRequest,
+    PullFromSourceRequest, PullFromSourceResponse, RemoveStreamingTracksRequest,
+    RemoveStreamingTracksResponse, RemoveTrackFromPlaylistRequest, RemoveTracksRequest,
+    RemoveTracksResponse, RenamePlaylistRequest, RenameProfileRequest, RepairLibraryRequest,
+    RepairLibraryResponse, ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse,
+    SaveLibraryAsRequest, SeekRequest, SelectProfileRequest, SetControllerEnabledRequest,
+    SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
+    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
+    TogglePauseRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
 use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
@@ -833,6 +833,7 @@ pub async fn import_folder(
     target: PathBuf,
     title: String,
     copy_files: bool,
+    name_order: NameOrder,
 ) -> Result<ImportFolderResponse, String> {
     backend
         .library
@@ -841,9 +842,28 @@ pub async fn import_folder(
             target_path: target.display().to_string(),
             copy_files,
             title,
+            name_order: name_order as i32,
         })
         .await
         .map(|response| response.into_inner())
+        .map_err(describe)
+}
+
+/// The files of the folder `playlist` in the order an import would put them in the
+/// playlist, as paths below the folder.
+pub async fn preview_import(
+    mut backend: Backend,
+    playlist: usize,
+    name_order: NameOrder,
+) -> Result<Vec<String>, String> {
+    backend
+        .library
+        .preview_folder_import(PreviewFolderImportRequest {
+            playlist_id: playlist as u32,
+            name_order: name_order as i32,
+        })
+        .await
+        .map(|response| response.into_inner().paths)
         .map_err(describe)
 }
 

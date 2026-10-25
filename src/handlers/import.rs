@@ -2,6 +2,7 @@
 //! window that imports that folder into an Engine library as a playlist.
 
 use import_view::{Import, Options, Stage};
+use open_engine_api::v1::NameOrder;
 
 use crate::*;
 
@@ -49,6 +50,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 name: folder.title.clone(),
                 tracks: folder.tracks.len(),
                 stage: Stage::Pick,
+                preview: None,
             });
         }
         Message::ImportAdd => {
@@ -84,15 +86,42 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             if let Some(import) = &mut state.import
                 && matches!(import.stage, Stage::Pick)
             {
+                let name_order = NameOrder::Strict;
                 import.stage = Stage::Options {
                     target,
                     options: Options {
                         title: import.name.clone(),
                         copy_files: true,
                         analyse: true,
+                        name_order,
                     },
                     error: None,
                 };
+                return fetch_preview(state, name_order);
+            }
+        }
+        Message::ImportOrder(name_order) => {
+            if let Some(Import {
+                stage: Stage::Options { options, .. },
+                preview,
+                ..
+            }) = &mut state.import
+                && options.name_order != name_order
+            {
+                options.name_order = name_order;
+                *preview = None;
+                return fetch_preview(state, name_order);
+            }
+        }
+        Message::ImportPreview(name_order, result) => {
+            // (An answer for an order that is not the chosen one any more is not wanted.)
+            if let Some(import) = &mut state.import
+                && import
+                    .stage
+                    .options()
+                    .is_some_and(|options| options.name_order == name_order)
+            {
+                import.preview = Some(result);
             }
         }
         Message::ImportTitle(title) => {
@@ -131,10 +160,11 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 && !options.title.trim().is_empty()
             {
                 let (target, options) = (target.clone(), options.clone());
-                let (playlist, title, copy_files) = (
+                let (playlist, title, copy_files, name_order) = (
                     import.playlist,
                     options.title.trim().to_owned(),
                     options.copy_files,
+                    options.name_order,
                 );
                 import.stage = Stage::Importing {
                     target: target.clone(),
@@ -142,7 +172,9 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 };
                 state.progress = None;
                 return Task::perform(
-                    backend::import_folder(backend, playlist, target, title, copy_files),
+                    backend::import_folder(
+                        backend, playlist, target, title, copy_files, name_order,
+                    ),
                     Message::ImportFinished,
                 );
             }
@@ -200,6 +232,18 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         _ => {}
     }
     Task::none()
+}
+
+/// Asks the backend for the files of the folder being imported in the order `name_order`
+/// gives them.
+fn fetch_preview(state: &State, name_order: NameOrder) -> Task<Message> {
+    let (Some(backend), Some(import)) = (state.backend(), &state.import) else {
+        return Task::none();
+    };
+    Task::perform(
+        backend::preview_import(backend, import.playlist, name_order),
+        move |result| Message::ImportPreview(name_order, result),
+    )
 }
 
 /// What follows the opening of the library that was imported into: its new playlist is

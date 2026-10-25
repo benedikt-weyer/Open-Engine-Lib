@@ -308,6 +308,10 @@ pub enum Message {
     ImportTarget(PathBuf),
     ImportTitle(String),
     ImportOption(import_view::Setting, bool),
+    /// How the files are put in order by name was chosen, and the preview of the order
+    /// for that choice (or why there is none) arrived.
+    ImportOrder(open_engine_api::v1::NameOrder),
+    ImportPreview(open_engine_api::v1::NameOrder, Result<Vec<String>, String>),
     ImportStart,
     ImportFinished(Result<open_engine_api::v1::ImportFolderResponse, String>),
     ImportBack,
@@ -1335,6 +1339,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::ImportFinished(..)
         | Message::ImportOpenLibrary
         | Message::ImportOption(..)
+        | Message::ImportOrder(..)
+        | Message::ImportPreview(..)
         | Message::ImportStart
         | Message::ImportTarget(..)
         | Message::ImportTitle(..) => handlers::import::handle(state, message),
@@ -4883,6 +4889,7 @@ mod tests {
     #[test]
     fn the_import_window_goes_from_the_library_to_the_options_to_the_end() {
         use import_view::{Setting, Stage};
+        use open_engine_api::v1::NameOrder;
         let mut state = state_with_a_folder();
         let at = iced::Point::new(10.0, 10.0);
         let _ = handle(&mut state, Message::FolderMenuOpen { playlist: 1, at });
@@ -4897,9 +4904,39 @@ mod tests {
                 // analysed unless that is taken back.
                 assert_eq!(options.title, "Deep");
                 assert!(options.copy_files && options.analyse);
+                // Digits are characters unless that is changed, as the folder is shown.
+                assert_eq!(options.name_order, NameOrder::Strict);
             }
             other => panic!("{other:?}"),
         }
+        // The files are listed in the order that is chosen; an answer for the order that
+        // was left is not wanted.
+        let preview = |order, names: &[&str]| {
+            Message::ImportPreview(order, Ok(names.iter().map(|n| (*n).to_owned()).collect()))
+        };
+        let _ = handle(&mut state, preview(NameOrder::Strict, &["1", "10", "2"]));
+        assert_eq!(
+            state.import.as_ref().unwrap().preview,
+            Some(Ok(vec!["1".to_owned(), "10".to_owned(), "2".to_owned()]))
+        );
+        let _ = handle(&mut state, Message::ImportOrder(NameOrder::Natural));
+        assert!(state.import.as_ref().unwrap().preview.is_none());
+        let _ = handle(&mut state, preview(NameOrder::Strict, &["late"]));
+        assert!(state.import.as_ref().unwrap().preview.is_none());
+        let _ = handle(&mut state, preview(NameOrder::Natural, &["1", "2", "10"]));
+        assert_eq!(
+            state
+                .import
+                .as_ref()
+                .unwrap()
+                .preview
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()[2],
+            "10"
+        );
+        let _ = handle(&mut state, Message::ImportOrder(NameOrder::Strict));
         let _ = handle(&mut state, Message::ImportTitle("Warm-up".into()));
         let _ = handle(&mut state, Message::ImportOption(Setting::Analyse, false));
         match stage(&state) {
@@ -4919,6 +4956,7 @@ mod tests {
             title: "Deep".into(),
             copy_files: true,
             analyse: true,
+            name_order: NameOrder::Strict,
         };
         state.import.as_mut().unwrap().stage = Stage::Importing {
             target: target.clone(),

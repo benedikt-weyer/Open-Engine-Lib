@@ -20,6 +20,7 @@ mod folder_import;
 mod library;
 mod loops;
 mod mirror;
+mod name_order;
 mod new_library;
 mod origins;
 mod progress;

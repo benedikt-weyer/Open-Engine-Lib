@@ -17,10 +17,10 @@ use open_engine_api::v1::{
     DeleteProfileRequest, GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLoopsRequest,
     GetOriginPrefixRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest,
     ImportFolderRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest, Loop,
-    MigrateOriginsRequest, OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest,
-    PlaybackErrorKind, PlaybackState, PullFromSourceRequest, RemoveStreamingTracksRequest,
-    RemoveTrackFromPlaylistRequest, RemoveTracksRequest, RenameProfileRequest,
-    ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
+    MigrateOriginsRequest, NameOrder, OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest,
+    PlaybackErrorKind, PlaybackState, PreviewFolderImportRequest, PullFromSourceRequest,
+    RemoveStreamingTracksRequest, RemoveTrackFromPlaylistRequest, RemoveTracksRequest,
+    RenameProfileRequest, ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
     SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule,
     SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
@@ -3745,6 +3745,7 @@ async fn imports_a_folder_of_music_into_an_engine_library_as_a_playlist() {
         target_path: stick.display().to_string(),
         copy_files: true,
         title: String::new(),
+        name_order: NameOrder::Strict as i32,
     };
     assert_eq!(
         code(library.import_folder_as_playlist(request(0)).await),
@@ -3785,6 +3786,29 @@ async fn imports_a_folder_of_music_into_an_engine_library_as_a_playlist() {
         code(library.import_folder_as_playlist(request(99)).await),
         Code::NotFound,
         "no such folder"
+    );
+    // What the playlist would hold, in either order, before anything is written.
+    for name_order in [NameOrder::Strict, NameOrder::Natural] {
+        let preview = library
+            .preview_folder_import(PreviewFolderImportRequest {
+                playlist_id: set,
+                name_order: name_order as i32,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(preview.paths, ["a.wav", "b.wav"]);
+    }
+    assert_eq!(
+        code(
+            library
+                .preview_folder_import(PreviewFolderImportRequest {
+                    playlist_id: 99,
+                    name_order: 0,
+                })
+                .await
+        ),
+        Code::NotFound
     );
     let nowhere = ImportFolderRequest {
         target_path: temp.0.join("nowhere").display().to_string(),

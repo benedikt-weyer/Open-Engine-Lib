@@ -184,6 +184,14 @@ service LibraryService {
   // is no Engine library at the path or no such playlist, INVALID_ARGUMENT if the playlist
   // has no tracks, INTERNAL if reading or writing fails.
   rpc ImportFolderAsPlaylist(ImportFolderRequest) returns (ImportFolderResponse);
+  // The files of a folder in the order `ImportFolderAsPlaylist` would put them in the
+  // playlist for the given `name_order`, as paths below the folder, so the order can be
+  // looked at (and chosen) before anything is written. Nothing is changed, and no Engine
+  // library is needed.
+  // Errors: FAILED_PRECONDITION if no library is open or the open library is not a folder
+  // of music, NOT_FOUND if there is no such playlist, INVALID_ARGUMENT if the playlist has
+  // no tracks.
+  rpc PreviewFolderImport(PreviewFolderImportRequest) returns (PreviewFolderImportResponse);
   // How far the sync (`SyncToSource`, `SyncToLibrary`) or the opening of a folder
   // (`OpenLocalFolder`) that is running has got, to be
   // asked again and again while it runs. Not running: `running` is false and the rest is
@@ -528,6 +536,26 @@ message ImportFolderRequest {
   bool copy_files = 3;
   // The playlist's title; empty for the folder's name.
   string title = 4;
+  // How the files are put in order by their names. Unset: strict, which is the order the
+  // folder is shown in.
+  NameOrder name_order = 5;
+}
+message PreviewFolderImportRequest {
+  // `Playlist.id` of the folder in the open folder library.
+  uint32 playlist_id = 1;
+  NameOrder name_order = 2;
+}
+message PreviewFolderImportResponse {
+  // The files, in the playlist's order, as paths below the folder (the folders in it are
+  // part of the path).
+  repeated string paths = 1;
+}
+// How names are compared where files are put in order.
+enum NameOrder {
+  // The digits are characters like the others: 1, 10, 11, 2. Capitals do not matter.
+  NAME_ORDER_STRICT = 0;
+  // The digits in a name are a number: 1, 2, 10, 11. Capitals do not matter.
+  NAME_ORDER_NATURAL = 1;
 }
 message ImportFolderResponse {
   // The other library's `Engine Library` folder.

@@ -19,6 +19,7 @@ use crate::folder_import;
 use crate::library::{self, EditError, Library, OpenError};
 use crate::loops::Loop;
 use crate::mirror::{self, MirrorError};
+use crate::name_order::NameOrder;
 use crate::progress::{Phase, Progress};
 use crate::repair;
 use crate::save::{self, SaveError};
@@ -641,6 +642,7 @@ impl LibraryService for Service {
                     playlist: index,
                     title: &title,
                     copy_files: request.copy_files,
+                    name_order: NameOrder::from_api(request.name_order),
                 },
                 &progress,
             )
@@ -649,6 +651,31 @@ impl LibraryService for Service {
         .await
         .map_err(|error| Status::internal(error.to_string()))?
         .map(Response::new)
+    }
+
+    async fn preview_folder_import(
+        &self,
+        request: Request<api::PreviewFolderImportRequest>,
+    ) -> Result<Response<api::PreviewFolderImportResponse>, Status> {
+        let library = self.library()?;
+        if !library.is_folder() {
+            return Err(Status::failed_precondition(
+                "the open library is not a folder of music",
+            ));
+        }
+        let request = request.into_inner();
+        // Sorting thousands of names is not for the async threads.
+        let paths = tokio::task::spawn_blocking(move || {
+            folder_import::preview(
+                &library,
+                request.playlist_id as usize,
+                NameOrder::from_api(request.name_order),
+            )
+            .map_err(mirror_status)
+        })
+        .await
+        .map_err(|error| Status::internal(error.to_string()))??;
+        Ok(Response::new(api::PreviewFolderImportResponse { paths }))
     }
 
     async fn get_progress(

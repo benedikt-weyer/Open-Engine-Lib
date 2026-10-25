@@ -25,6 +25,7 @@ use crate::library::{self, ARTWORK_DIR, EditError, Library, base64_url};
 use crate::mirror::{
     Databases, MAIN_DATABASE, MirrorError, Place, copy_databases, databases_size, install,
 };
+use crate::name_order::{self, NameOrder};
 use crate::origins;
 use crate::progress::{Phase, Progress};
 use crate::save::relative_path;
@@ -47,6 +48,8 @@ pub struct Request<'a> {
     pub title: &'a str,
     /// Copy the audio files into `Engine-Tracks` beside the library.
     pub copy_files: bool,
+    /// How the files are put in order by their names.
+    pub name_order: NameOrder,
 }
 
 /// What the import does to the copy of the library's database.
@@ -77,6 +80,38 @@ impl Outcome {
     }
 }
 
+/// The tracks of the folder `playlist` in the order they go in the playlist.
+fn wanted(open: &Library, playlist: usize, order: NameOrder) -> Result<Vec<usize>, MirrorError> {
+    let tracks = {
+        let playlists = open.playlists();
+        let folder = playlists
+            .get(playlist)
+            .ok_or(MirrorError::Edit(EditError::NoSuchPlaylist))?;
+        folder.tracks.clone()
+    };
+    if tracks.is_empty() {
+        return Err(MirrorError::NothingToImport);
+    }
+    Ok(name_order::ordered(&open.tracks, &tracks, order))
+}
+
+/// The files `import` would put in the playlist, in its order, as paths below the folder.
+pub fn preview(
+    open: &Library,
+    playlist: usize,
+    order: NameOrder,
+) -> Result<Vec<String>, MirrorError> {
+    let wanted = wanted(open, playlist, order)?;
+    let prefix = name_order::folder_prefix(&open.playlists(), playlist);
+    Ok(wanted
+        .into_iter()
+        .map(|index| {
+            let path = &open.tracks[index].relative_path;
+            path.strip_prefix(&prefix).unwrap_or(path).to_owned()
+        })
+        .collect())
+}
+
 /// Adds the tracks of the playlist `request.playlist` of the folder library `open` to the
 /// Engine library at `request.target` and puts them in a playlist there. `scratch_root` is
 /// where the copy of the database is made (and the old one kept), `progress` hears how far
@@ -86,16 +121,7 @@ pub fn import(
     request: &Request<'_>,
     progress: &Progress,
 ) -> Result<api::ImportFolderResponse, MirrorError> {
-    let wanted: Vec<usize> = {
-        let playlists = open.playlists();
-        let playlist = playlists
-            .get(request.playlist)
-            .ok_or(MirrorError::Edit(EditError::NoSuchPlaylist))?;
-        playlist.tracks.clone()
-    };
-    if wanted.is_empty() {
-        return Err(MirrorError::NothingToImport);
-    }
+    let wanted = wanted(open, request.playlist, request.name_order)?;
     let title = request.title.trim();
     if title.is_empty() {
         return Err(MirrorError::Edit(EditError::EmptyTitle));
@@ -744,6 +770,7 @@ mod tests {
                 playlist: set,
                 title: "Set",
                 copy_files: false,
+                name_order: NameOrder::Strict,
             },
             &Progress::default(),
         )
@@ -838,6 +865,7 @@ mod tests {
             playlist: set,
             title: "Warm-up",
             copy_files: true,
+            name_order: NameOrder::Strict,
         };
         let done = import(&open, &request, &Progress::default()).unwrap();
         assert_eq!((done.tracks_added, done.files_copied), (3, 3));
@@ -888,6 +916,7 @@ mod tests {
                     playlist,
                     title: "Set",
                     copy_files: false,
+                    name_order: NameOrder::Strict,
                 },
                 &progress,
             )
@@ -941,6 +970,7 @@ mod tests {
                 playlist: set,
                 title: "Taken",
                 copy_files: true,
+                name_order: NameOrder::Strict,
             },
             &Progress::default(),
         );
@@ -1026,6 +1056,7 @@ mod tests {
                 playlist: set,
                 title: "Set",
                 copy_files: false,
+                name_order: NameOrder::Strict,
             },
             &Progress::default(),
         )
@@ -1081,10 +1112,78 @@ mod tests {
                 playlist: set,
                 title: "Set",
                 copy_files: false,
+                name_order: NameOrder::Strict,
             },
             &Progress::default(),
         )
         .unwrap();
         assert_eq!(again.covers_added, 0);
+    }
+
+    #[test]
+    fn numbered_files_go_in_the_playlist_in_the_order_that_was_chosen() {
+        let temp = TempDir::new("order");
+        for file in [
+            "1. a.wav",
+            "2. b.wav",
+            "10. c.wav",
+            "11. d.wav",
+            "x/3. e.wav",
+        ] {
+            wav(&temp.0.join("pc/Music/Set").join(file));
+        }
+        let open = Library::open_folder(
+            &temp.0.join("pc/Music"),
+            temp.0.join("scratch"),
+            &Progress::default(),
+        )
+        .unwrap();
+        let set = open
+            .playlists()
+            .iter()
+            .position(|playlist| playlist.title == "Set")
+            .unwrap();
+
+        let strict = [
+            "1. a.wav",
+            "10. c.wav",
+            "11. d.wav",
+            "2. b.wav",
+            "x/3. e.wav",
+        ];
+        let natural = [
+            "1. a.wav",
+            "2. b.wav",
+            "10. c.wav",
+            "11. d.wav",
+            "x/3. e.wav",
+        ];
+        assert_eq!(preview(&open, set, NameOrder::Strict).unwrap(), strict);
+        assert_eq!(preview(&open, set, NameOrder::Natural).unwrap(), natural);
+
+        // The playlist has the tracks in the order of the preview.
+        let library = stick(&temp.0, None);
+        import(
+            &open,
+            &Request {
+                target: &library,
+                playlist: set,
+                title: "Set",
+                copy_files: false,
+                name_order: NameOrder::Natural,
+            },
+            &Progress::default(),
+        )
+        .unwrap();
+        let titles = rows(
+            &library,
+            "SELECT Track.title FROM PlaylistEntity \
+             JOIN Track ON Track.id = PlaylistEntity.trackId \
+             ORDER BY PlaylistEntity.id",
+        );
+        assert_eq!(
+            titles,
+            [["1. a"], ["2. b"], ["10. c"], ["11. d"], ["3. e"]].map(|row| row.map(text))
+        );
     }
 }
