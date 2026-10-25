@@ -41,8 +41,8 @@ use sync_view::Stage as SyncStage;
 use views::{
     browser, cue_bar, cue_editor, deck, error_text, folder_menu, import_view, library_sync_view,
     loop_bar, loop_editor, menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog,
-    playlist_drag, progress_view, repair_view, right_click, settings, sidebar, smart_editor,
-    sync_view, toast, track_menu,
+    playlist_drag, playlist_menu, progress_view, repair_view, right_click, settings, sidebar,
+    smart_editor, sync_view, toast, track_menu,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -206,6 +206,8 @@ struct State {
     streaming_confirm: bool,
     /// The context menu of a track of the list, while it is open.
     track_menu: Option<track_menu::Menu>,
+    /// The menu of a playlist of the tree.
+    playlist_menu: Option<playlist_menu::Menu>,
     /// The toast in the corner: the analysis of a track that runs, or how it ended.
     toast: Option<toast::Toast>,
     reload_result: Option<(String, bool)>,
@@ -315,6 +317,19 @@ pub enum Message {
     },
     FolderMenuClose,
     FolderMenuImport,
+    /// The playlist menu of the tree of an Engine library (right click on a playlist):
+    /// opened on a playlist at a place in the window, closed, and its lines. "Analyse all
+    /// again" asks for a second click.
+    PlaylistMenuOpen {
+        playlist: usize,
+        at: iced::Point,
+    },
+    PlaylistMenuClose,
+    PlaylistMenuRename,
+    PlaylistMenuDelete,
+    PlaylistMenuEdit,
+    PlaylistMenuAnalyse,
+    PlaylistMenuReanalyse,
     /// The import window: a folder was chosen to add a library by (`None`: the dialog was
     /// closed), the library was chosen, the playlist's title was typed, a tick was set, the
     /// buttons, and the end of the work.
@@ -630,6 +645,7 @@ impl State {
             reloading: false,
             streaming_confirm: false,
             track_menu: None,
+            playlist_menu: None,
             toast: None,
             reload_result: None,
             columns: ColumnStore::discover(),
@@ -791,6 +807,7 @@ impl State {
         self.streaming_confirm = false;
         self.track_menu = None;
         self.folder_menu = None;
+        self.playlist_menu = None;
     }
 
     /// Makes room for a library of `kind` to be opened: the shown library is parked if it is
@@ -1536,6 +1553,13 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::SmartNew
         | Message::SmartSave
         | Message::SmartSaved(..) => handlers::playlists::handle(state, message),
+        Message::PlaylistMenuAnalyse
+        | Message::PlaylistMenuClose
+        | Message::PlaylistMenuDelete
+        | Message::PlaylistMenuEdit
+        | Message::PlaylistMenuOpen { .. }
+        | Message::PlaylistMenuReanalyse
+        | Message::PlaylistMenuRename => handlers::playlist_menu::handle(state, message),
         Message::PlaylistDragCancel
         | Message::PlaylistDragEnd
         | Message::PlaylistDragMoved(..)
@@ -1758,6 +1782,13 @@ fn with_windows<'a>(
     if let (Some(menu), LibraryState::Open(_)) = (&state.track_menu, &state.library) {
         return iced::widget::stack![window, track_menu::layer(menu, state.analysing(), language)]
             .into();
+    }
+    if let (Some(menu), LibraryState::Open(_)) = (&state.playlist_menu, &state.library) {
+        return iced::widget::stack![
+            window,
+            playlist_menu::layer(menu, state.locked() || state.syncing(), language)
+        ]
+        .into();
     }
     if let (Some(menu), LibraryState::Open(_)) = (&state.folder_menu, &state.library) {
         return iced::widget::stack![
@@ -2506,6 +2537,7 @@ mod tests {
             reloading: false,
             streaming_confirm: false,
             track_menu: None,
+            playlist_menu: None,
             toast: None,
             reload_result: None,
             columns: ColumnStore::load(temp.join("track-columns.toml")),
@@ -5430,6 +5462,116 @@ mod tests {
                 .iter()
                 .any(|message| matches!(message, Message::FolderMenuOpen { .. }))
         );
+    }
+
+    #[test]
+    fn right_clicking_a_playlist_of_an_engine_library_opens_its_menu() {
+        let state = state();
+        let LibraryState::Open(browser) = &state.library else {
+            unreachable!()
+        };
+        // "Pop" is the third line of the tree, under "All tracks" and "House".
+        let at = iced::Point::new(100.0, 90.0);
+        let events = [
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: at }),
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                iced::mouse::Button::Right,
+            )),
+        ];
+        let (messages, _) = press_on(
+            browser::playlists(browser, None, Language::English),
+            Default::default(),
+            &events,
+            at,
+        );
+        let opened: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::PlaylistMenuOpen { playlist, at } => Some((*playlist, *at)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [(2, at)], "{messages:?}");
+        // The playlist has no rename and delete buttons of its own any more.
+        assert!(!messages.iter().any(|message| matches!(
+            message,
+            Message::PlaylistRename(_) | Message::PlaylistDelete(_)
+        )));
+    }
+
+    #[test]
+    fn the_playlist_menu_renames_deletes_and_analyses_the_tracks_of_the_playlist() {
+        let at = iced::Point::new(10.0, 10.0);
+        let mut state = state();
+        // Track 1 is a streaming track and track 2 has an analysis; "Deep" holds both and 0.
+        let mut tracks = vec![track(0), track(1), track(2)];
+        tracks[1].streaming = true;
+        tracks[2].analysis = model::ANALYSIS_TRACK_DATA;
+        let library = Library::new(
+            "/media/DRIVE/Engine Library".into(),
+            "/cache".into(),
+            tracks,
+            vec![
+                playlist("House", 0, true, &[]),
+                playlist("Deep", 1, false, &[0, 1, 2]),
+                Playlist {
+                    is_smart: true,
+                    ..playlist("Smart", 0, false, &[0, 1])
+                },
+            ],
+        );
+        state.library = LibraryState::Open(Browser::new(Arc::new(library)));
+
+        let _ = handle(&mut state, Message::PlaylistMenuOpen { playlist: 1, at });
+        let menu = state.playlist_menu.clone().expect("the menu is open");
+        assert_eq!(
+            (
+                menu.title.as_str(),
+                menu.smart,
+                menu.tracks,
+                menu.unanalysed
+            ),
+            ("Deep", false, 2, 1),
+            "files only, and the ones without an analysis"
+        );
+
+        // Rename and delete open their dialogs and close the menu.
+        let _ = handle(&mut state, Message::PlaylistMenuRename);
+        assert!(state.playlist_menu.is_none());
+        assert_eq!(
+            state.playlist_dialog.take().map(|dialog| dialog.kind),
+            Some(playlist_dialog::Kind::Rename(1))
+        );
+        let _ = handle(&mut state, Message::PlaylistMenuOpen { playlist: 1, at });
+        let _ = handle(&mut state, Message::PlaylistMenuDelete);
+        assert_eq!(
+            state.playlist_dialog.take().map(|dialog| dialog.kind),
+            Some(playlist_dialog::Kind::Delete(1))
+        );
+
+        // Analysing all again asks first, and only the second click goes on.
+        let _ = handle(&mut state, Message::PlaylistMenuOpen { playlist: 1, at });
+        let _ = handle(&mut state, Message::PlaylistMenuReanalyse);
+        assert!(state.playlist_menu.as_ref().unwrap().confirm_reanalyse);
+        let _ = handle(&mut state, Message::PlaylistMenuReanalyse);
+        assert!(state.playlist_menu.is_none());
+        let _ = handle(&mut state, Message::PlaylistMenuOpen { playlist: 1, at });
+        let _ = handle(&mut state, Message::PlaylistMenuAnalyse);
+        assert!(state.playlist_menu.is_none());
+
+        // A smart playlist is changed through its rules, not renamed or deleted.
+        let _ = handle(&mut state, Message::PlaylistMenuOpen { playlist: 2, at });
+        assert!(state.playlist_menu.as_ref().unwrap().smart);
+        let _ = handle(&mut state, Message::PlaylistMenuRename);
+        assert!(state.playlist_dialog.is_none());
+
+        // Another menu, a window and a folder of music take it away or keep it from opening.
+        let _ = handle(&mut state, Message::PlaylistMenuOpen { playlist: 1, at });
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
+        assert!(state.playlist_menu.is_none());
+        let mut folder = state_with_a_folder();
+        let _ = handle(&mut folder, Message::PlaylistMenuOpen { playlist: 1, at });
+        assert!(folder.playlist_menu.is_none());
     }
 
     #[test]

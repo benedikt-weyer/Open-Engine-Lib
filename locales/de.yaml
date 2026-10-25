@@ -251,8 +251,11 @@ smart_cancel: Abbrechen
 smart_name_missing: Bitte gib der Playlist einen Namen.
 smart_save_failed: "Die Smart-Playlist konnte nicht gespeichert werden: {error}"
 playlist_new: Neue Playlist…
-playlist_rename: Diese Playlist umbenennen
-playlist_delete: Diese Playlist löschen
+playlist_rename: Umbenennen…
+playlist_delete: Löschen…
+playlist_menu_analyse_all: "Die {count} nicht analysierten Titel analysieren"
+playlist_menu_reanalyse_all: "Alle {count} Titel erneut analysieren (ersetzt ihre Analysen)"
+playlist_menu_reanalyse_confirm: "Zum Ersetzen der Analysen von {count} Titeln erneut klicken"
 playlist_title_new: Neue Playlist
 playlist_title_rename: Playlist umbenennen
 playlist_title_delete: Playlist löschen

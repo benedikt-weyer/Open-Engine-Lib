@@ -655,34 +655,21 @@ pub fn playlists<'a>(
                 .on_press(Message::ShowPlaylist(index)),
         ]
         .align_y(iced::Center);
-        // A smart playlist always has its edit button. An ordinary one gets its buttons
-        // when it is the one shown, so the tree isn't full of them.
+        // A smart playlist always has its edit button. What an ordinary one can do (rename,
+        // delete, analyse) is in its context menu.
         let strings = language.strings();
-        let small = |label: &'static str, tip: &'a String, message: Message| {
-            tooltip(
-                button(text(label))
-                    .padding([4, 8])
-                    .style(button::text)
-                    .on_press(message),
-                text(tip),
-                tooltip::Position::Right,
-            )
-            .style(container::rounded_box)
-        };
         if playlist.is_smart {
-            line = line.push(small("✎", &strings.smart_edit, Message::SmartEdit(index)));
-        } else if selected && browser.library.is_engine() {
-            line = line
-                .push(small(
-                    "✎",
-                    &strings.playlist_rename,
-                    Message::PlaylistRename(index),
-                ))
-                .push(small(
-                    "×",
-                    &strings.playlist_delete,
-                    Message::PlaylistDelete(index),
-                ));
+            line = line.push(
+                tooltip(
+                    button(text("✎"))
+                        .padding([4, 8])
+                        .style(button::text)
+                        .on_press(Message::SmartEdit(index)),
+                    text(&strings.smart_edit),
+                    tooltip::Position::Right,
+                )
+                .style(container::rounded_box),
+            );
         }
         // The folders of a folder of music have a menu (import as a playlist). The playlists
         // of an Engine library can be dragged to another place in the tree.
@@ -700,7 +687,7 @@ pub fn playlists<'a>(
                     )
                 })
                 .map(|line| (line, line.level as f32 * INDENT + TOGGLE_WIDTH / 2.0));
-            Element::from(playlist_drag::drag_row(
+            let row = playlist_drag::drag_row(
                 line,
                 playlist_drag::Row {
                     press: (!playlist.is_smart).then_some(Message::PlaylistDragPress(index)),
@@ -714,13 +701,16 @@ pub fn playlists<'a>(
                     dragging,
                     line: line_to_draw,
                 },
-            ))
-        } else {
-            right_click(line, move |at| Message::FolderMenuOpen {
+            );
+            Element::from(right_click(row, move |at| Message::PlaylistMenuOpen {
                 playlist: index,
                 at,
-            })
-            .into()
+            }))
+        } else {
+            Element::from(right_click(line, move |at| Message::FolderMenuOpen {
+                playlist: index,
+                at,
+            }))
         });
     }
 

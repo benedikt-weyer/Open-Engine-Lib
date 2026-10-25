@@ -22,6 +22,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
             // The row clicked is the one the menu is about.
             browser.selected = Some(row);
+            state.playlist_menu = None;
             let track = &browser.library.tracks[track];
             // An ordinary playlist can lose the track; "All tracks" and a smart playlist (its
             // tracks come from its rules) can't.
