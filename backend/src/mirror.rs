@@ -2170,6 +2170,213 @@ mod tests {
             .collect()
     }
 
+    /// Gives the library the columns an analysis lives in beyond the test schema's.
+    fn with_analysis_columns(library: &Path) -> Connection {
+        let connection = Connection::open(library.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE Track ADD COLUMN isAnalyzed NUMERIC DEFAULT 0;
+                 ALTER TABLE Track ADD COLUMN key INTEGER;
+                 ALTER TABLE PerformanceData ADD COLUMN overviewWaveFormData BLOB;",
+            )
+            .unwrap();
+        connection
+    }
+
+    /// A track's `trackData`, `beatData`, `overviewWaveFormData`, tempo and key.
+    type Analysis = (
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<f64>,
+        Option<i64>,
+    );
+
+    fn analysis_of(library: &Path, track: i64) -> Analysis {
+        Connection::open(library.join(DATABASE_DIR).join(MAIN_DATABASE))
+            .unwrap()
+            .query_row(
+                "SELECT p.trackData, p.beatData, p.overviewWaveFormData, t.bpmAnalyzed, t.key \
+                 FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.id = ?1",
+                [track],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_track_analysed_again_is_seen_as_different_and_its_analysis_is_synced() {
+        let temp = TempDir::new("analysis");
+        let (pc, stick) = with_files(&temp.0);
+        let pc_db = with_analysis_columns(&pc);
+        let stick_db = with_analysis_columns(&stick);
+        // Track 1 was analysed again in the open library. Track 2 only has leftovers there
+        // (it is not marked as analysed), and the stick has its own analyses.
+        pc_db
+            .execute_batch(
+                "UPDATE PerformanceData SET trackData = x'0102', beatData = x'0a', overviewWaveFormData = x'ff' WHERE trackId = 1;
+                 UPDATE Track SET isAnalyzed = 1, bpmAnalyzed = 126.0, bpm = 126, key = 4 WHERE id = 1;
+                 UPDATE PerformanceData SET beatData = x'0b' WHERE trackId = 2;",
+            )
+            .unwrap();
+        stick_db
+            .execute_batch(
+                "UPDATE PerformanceData SET trackData = x'0101', beatData = x'09', overviewWaveFormData = x'aa' WHERE trackId = 1;
+                 UPDATE Track SET isAnalyzed = 1, bpmAnalyzed = 120.0, bpm = 120, key = 2 WHERE id = 1;
+                 UPDATE PerformanceData SET beatData = x'0c' WHERE trackId = 2;
+                 UPDATE Track SET isAnalyzed = 1 WHERE id = 2;",
+            )
+            .unwrap();
+        drop((pc_db, stick_db));
+        let source = open_source(&pc, &temp.0.join("source"));
+        let options = tracks(track_sync::Options {
+            analysis: true,
+            ..Default::default()
+        });
+
+        // Without the option the difference is not seen; with it, it is listed.
+        let none = diff(&source, &stick, &temp.0.join("scratch"), Options::default()).unwrap();
+        assert_eq!(none.tracks_changed, 0);
+        let found = diff(&source, &stick, &temp.0.join("scratch"), options).unwrap();
+        assert_eq!(
+            found.tracks_changed, 1,
+            "only track 1; 2 has no analysis to give"
+        );
+        let field = &found.changed_tracks[0].fields[0];
+        assert_eq!(
+            (
+                field.field.as_str(),
+                field.source_value.as_str(),
+                field.working_value.as_str()
+            ),
+            ("analysis", "120.0 BPM", "126.0 BPM")
+        );
+        assert_eq!(
+            analysis_of(&stick, 1).1,
+            Some(vec![0x09]),
+            "a diff changes nothing"
+        );
+
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(done.tracks_changed, 1);
+        assert!(!done.backup_path.is_empty());
+        assert_eq!(
+            analysis_of(&stick, 1),
+            (
+                Some(vec![1, 2]),
+                Some(vec![0x0a]),
+                Some(vec![0xff]),
+                Some(126.0),
+                Some(4)
+            )
+        );
+        assert_eq!(
+            analysis_of(&stick, 2).1,
+            Some(vec![0x0c]),
+            "not analysed in the source"
+        );
+        assert_eq!(
+            push(
+                &source,
+                &stick,
+                &temp.0.join("scratch"),
+                options,
+                &Progress::default()
+            )
+            .unwrap()
+            .tracks_changed,
+            0
+        );
+
+        // A source without an overview does not take the other library's away.
+        Connection::open(pc.join(DATABASE_DIR).join(MAIN_DATABASE))
+            .unwrap()
+            .execute_batch(
+                "UPDATE PerformanceData SET beatData = x'0d', overviewWaveFormData = NULL WHERE trackId = 1;",
+            )
+            .unwrap();
+        let source = open_source(&pc, &temp.0.join("source-again"));
+        push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
+        let (_, beats, overview, _, _) = analysis_of(&stick, 1);
+        assert_eq!((beats, overview), (Some(vec![0x0d]), Some(vec![0xff])));
+    }
+
+    #[test]
+    fn the_other_way_round_the_other_librarys_analysis_goes_to_the_working_copy() {
+        let temp = TempDir::new("analysis-reverse");
+        let (pc, stick) = with_files(&temp.0);
+        let pc_db = with_analysis_columns(&pc);
+        let stick_db = with_analysis_columns(&stick);
+        pc_db
+            .execute_batch(
+                "UPDATE PerformanceData SET beatData = x'0a' WHERE trackId = 1;
+                 UPDATE Track SET isAnalyzed = 1, bpmAnalyzed = 126.0, bpm = 126 WHERE id = 1;",
+            )
+            .unwrap();
+        stick_db
+            .execute_batch(
+                "UPDATE PerformanceData SET beatData = x'09' WHERE trackId = 1;
+                 UPDATE Track SET isAnalyzed = 1, bpmAnalyzed = 120.0, bpm = 120 WHERE id = 1;",
+            )
+            .unwrap();
+        drop((pc_db, stick_db));
+        // The stick is the open library; the pc library is the master.
+        let open_library = open_source(&stick, &temp.0.join("working-copy"));
+        let options = Options {
+            reverse: true,
+            tracks: track_sync::Options {
+                analysis: true,
+                ..Default::default()
+            },
+            ..Options::default()
+        };
+        let found = diff(&open_library, &pc, &temp.0.join("scratch"), options).unwrap();
+        assert_eq!(found.tracks_changed, 1);
+        let field = &found.changed_tracks[0].fields[0];
+        assert_eq!(
+            (field.source_value.as_str(), field.working_value.as_str()),
+            ("120.0 BPM", "126.0 BPM")
+        );
+        push(
+            &open_library,
+            &pc,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
+        let working = temp.0.join("working-copy");
+        assert_eq!(analysis_of(&working, 1).1, Some(vec![0x0a]));
+        assert_eq!(
+            analysis_of(&stick, 1).1,
+            Some(vec![0x09]),
+            "the stick itself is not changed"
+        );
+        assert_eq!(analysis_of(&pc, 1).1, Some(vec![0x0a]));
+    }
+
     #[test]
     fn the_other_way_round_the_other_library_is_copied_into_the_working_copy() {
         let temp = TempDir::new("reverse");

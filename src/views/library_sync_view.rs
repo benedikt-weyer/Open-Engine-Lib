@@ -37,6 +37,9 @@ pub struct Options {
     pub copy_tracks: bool,
     /// The copied tracks' `.stems` files are copied too (they are big).
     pub copy_stems: bool,
+    /// The analysis (beatgrid, tempo, key, waveform) of the open library's tracks replaces
+    /// the other library's where it differs.
+    pub analysis: bool,
     /// The other way round: the other library is the master and the open library's
     /// working copy is changed.
     pub reverse: bool,
@@ -53,6 +56,7 @@ impl Default for Options {
             locations: false,
             copy_tracks: true,
             copy_stems: true,
+            analysis: true,
             reverse: false,
         }
     }
@@ -66,6 +70,7 @@ pub enum Setting {
     Locations,
     CopyTracks,
     CopyStems,
+    Analysis,
     Reverse,
     /// The "Sync all (with prune)" button: everything on, the direction as it is.
     All,
@@ -87,6 +92,7 @@ impl Options {
             Setting::Locations => self.locations = on,
             Setting::CopyTracks => self.copy_tracks = on,
             Setting::CopyStems => self.copy_stems = on,
+            Setting::Analysis => self.analysis = on,
             Setting::Reverse => self.reverse = on,
             Setting::All => {
                 self = Self {
@@ -419,6 +425,12 @@ fn ready<'a>(
             true
         ),
         tick(
+            words(&strings.libsync_analysis, &strings.libsync_analysis_reverse),
+            options.analysis,
+            Setting::Analysis,
+            true
+        ),
+        tick(
             &strings.libsync_stems,
             options.copy_stems,
             Setting::CopyStems,
@@ -578,6 +590,11 @@ mod tests {
         assert!(options.is_all());
         assert!(options.stars && options.remove_missing && options.copy_tracks);
         assert!(options.copy_stems && !options.locations && !options.reverse);
+        // The analysis is synced too, and taking it back is a change from "all".
+        assert!(options.analysis);
+        let without = options.with(Setting::Analysis, false);
+        assert!(!without.analysis && !without.is_all());
+        assert!(without.with(Setting::All, true).analysis);
 
         let options = options
             .with(Setting::CopyTracks, false)

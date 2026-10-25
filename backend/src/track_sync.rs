@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use open_engine_api::v1 as api;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::library::{ARTWORK_DIR, Library, STEMS_DIR, base64_url, stems_file_name};
 use crate::mirror::MirrorError;
@@ -41,13 +41,26 @@ pub struct Options {
     /// without `copy_tracks`: the file is named after the track's origin, wherever the audio
     /// file is.
     pub copy_stems: bool,
+    /// The analysis of the open library's track (beatgrid, track data, overview, tempo and
+    /// key) replaces the other library's where it differs, if the track has an analysis.
+    pub analysis: bool,
 }
 
 impl Options {
     pub fn any(self) -> bool {
-        self.stars || self.locations || self.copy_tracks || self.copy_stems
+        self.stars || self.locations || self.copy_tracks || self.copy_stems || self.analysis
     }
 }
+
+/// The `PerformanceData` columns that hold a track's analysis, and the `Track` columns that go
+/// with it. (The cues and loops are the user's, not the analysis'.)
+const ANALYSIS_BLOBS: [&str; 4] = [
+    "trackData",
+    "beatData",
+    "overviewWaveFormData",
+    "highResolutionWaveFormData",
+];
+const ANALYSIS_TRACK: [&str; 4] = ["bpmAnalyzed", "bpm", "key", "isAnalyzed"];
 
 /// What the track part did, or in a diff would do.
 #[derive(Debug, Default)]
@@ -356,6 +369,16 @@ pub fn sync(
         .cloned()
         .collect();
 
+    // What can be synced of the analysis, in the columns both libraries have.
+    let analysis_blobs: Vec<&str> = ANALYSIS_BLOBS
+        .into_iter()
+        .filter(|name| performance.iter().any(|column| column == name))
+        .collect();
+    let analysis_track: Vec<&str> = ANALYSIS_TRACK
+        .into_iter()
+        .filter(|name| own.iter().any(|column| column == name) && theirs.iter().any(|c| c == name))
+        .collect();
+
     let transaction = connection.transaction()?;
     let mut covers: HashMap<u32, Option<i64>> = HashMap::new();
 
@@ -406,6 +429,18 @@ pub fn sync(
                             working_value: stars(new),
                         });
                     }
+                }
+
+                if options.analysis
+                    && let Some(change) = sync_analysis(
+                        &transaction,
+                        track.db_id,
+                        other.db_id,
+                        &analysis_blobs,
+                        &analysis_track,
+                    )?
+                {
+                    fields.push(change);
                 }
 
                 let mut copy_it = false;
@@ -545,6 +580,105 @@ pub fn sync(
     }
     transaction.commit()?;
     Ok(report)
+}
+
+/// Copies the analysis of the track `from` (of the attached source) to the track `to` of the
+/// database that is changed, if the source has one that is different: the columns of
+/// `blobs` (where the source has a value; Engine's overview is not wiped by a source that has
+/// none) and, with them, the tempo, key and flag of the track. Returns what changed.
+fn sync_analysis(
+    transaction: &rusqlite::Transaction<'_>,
+    from: i64,
+    to: i64,
+    blobs: &[&str],
+    track_columns: &[&str],
+) -> rusqlite::Result<Option<api::FieldChange>> {
+    // A source that was never analysed has nothing to give.
+    if track_columns.contains(&"isAnalyzed") {
+        let analysed: Option<bool> = transaction
+            .query_row(
+                "SELECT COALESCE(isAnalyzed, 0) FROM src.Track WHERE id = ?1",
+                [from],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if analysed != Some(true) {
+            return Ok(None);
+        }
+    }
+    let mut differing = Vec::new();
+    for name in blobs {
+        let differs: Option<bool> = transaction
+            .query_row(
+                &format!(
+                    "SELECT s.{name} IS NOT NULL AND s.{name} IS NOT m.{name} \
+                     FROM src.PerformanceData s, main.PerformanceData m \
+                     WHERE s.trackId = ?1 AND m.trackId = ?2"
+                ),
+                (from, to),
+                |row| row.get(0),
+            )
+            .optional()?;
+        if differs == Some(true) {
+            differing.push(*name);
+        }
+    }
+    if differing.is_empty() {
+        return Ok(None);
+    }
+
+    let tempo = |schema: &str, id: i64| -> rusqlite::Result<String> {
+        let sql = format!("SELECT COALESCE(bpmAnalyzed, bpm) FROM {schema}.Track WHERE id = ?1");
+        let bpm: Option<f64> = if track_columns.contains(&"bpm") {
+            transaction
+                .query_row(&sql, [id], |row| row.get(0))
+                .optional()?
+                .flatten()
+        } else {
+            None
+        };
+        Ok(bpm.map(|bpm| format!("{bpm:.1} BPM")).unwrap_or_default())
+    };
+    let (before, after) = (tempo("main", to)?, tempo("src", from)?);
+
+    let assignments: Vec<String> = differing
+        .iter()
+        .map(|name| format!("{name} = (SELECT {name} FROM src.PerformanceData WHERE trackId = ?1)"))
+        .collect();
+    transaction.execute(
+        &format!(
+            "UPDATE main.PerformanceData SET {} WHERE trackId = ?2",
+            assignments.join(", ")
+        ),
+        (from, to),
+    )?;
+    if !track_columns.is_empty() {
+        // (A value the source lacks leaves the other library's as it is.)
+        let assignments: Vec<String> = track_columns
+            .iter()
+            .map(|name| {
+                format!("{name} = COALESCE((SELECT {name} FROM src.Track WHERE id = ?1), {name})")
+            })
+            .collect();
+        transaction.execute(
+            &format!(
+                "UPDATE main.Track SET {} WHERE id = ?2",
+                assignments.join(", ")
+            ),
+            (from, to),
+        )?;
+    }
+    // The tempo says what changed, if it did; a grid or waveform that differs otherwise.
+    let (source_value, working_value) = if before == after {
+        ("(changed)".to_owned(), "(changed)".to_owned())
+    } else {
+        (before, after)
+    };
+    Ok(Some(api::FieldChange {
+        field: "analysis".into(),
+        source_value,
+        working_value,
+    }))
 }
 
 /// Notes that the stems of `track` are to go to the other library, and copies them. `there`

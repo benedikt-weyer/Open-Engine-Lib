@@ -225,6 +225,8 @@ pub struct Strings {
     pub sync_origins_summary: String,
     pub libsync_origins: String,
     pub libsync_stars: String,
+    pub libsync_analysis: String,
+    pub libsync_analysis_reverse: String,
     pub libsync_locations: String,
     pub libsync_copy: String,
     pub libsync_stems: String,

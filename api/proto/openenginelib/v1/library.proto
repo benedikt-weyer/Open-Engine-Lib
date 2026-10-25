@@ -501,6 +501,11 @@ message GetLibrarySyncDiffRequest {
   // files stay where they are). They are big, so this is asked for apart.
   // The covers that are files in `Artwork` are always copied for the tracks that are added.
   bool copy_stems = 8;
+  // The analysis of each track both libraries have (its beatgrid, track data, overview
+  // waveform, tempo and key) is copied to the library that changes where it differs, if the
+  // track has one in the library it comes from. Without it a track that was analysed again
+  // is not seen as different.
+  bool sync_analysis = 9;
 }
 // Lists are cut at 200 entries, the counts are complete.
 message GetLibrarySyncDiffResponse {
@@ -547,6 +552,11 @@ message SyncToLibraryRequest {
   bool reverse = 6;
   bool create_if_missing = 7;
   bool copy_stems = 8;
+  // The analysis of each track both libraries have (its beatgrid, track data, overview
+  // waveform, tempo and key) is copied to the library that changes where it differs, if the
+  // track has one in the library it comes from. Without it a track that was analysed again
+  // is not seen as different.
+  bool sync_analysis = 9;
 }
 message SyncToLibraryResponse {
   string target_path = 1;

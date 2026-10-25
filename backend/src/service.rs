@@ -625,10 +625,13 @@ impl LibraryService for Service {
                 &scratch,
                 mirror_options(
                     request.remove_missing,
-                    request.sync_stars,
-                    request.sync_locations,
-                    request.copy_tracks,
-                    request.copy_stems,
+                    crate::track_sync::Options {
+                        stars: request.sync_stars,
+                        locations: request.sync_locations,
+                        copy_tracks: request.copy_tracks,
+                        copy_stems: request.copy_stems,
+                        analysis: request.sync_analysis,
+                    },
                     request.reverse,
                     request.create_if_missing,
                 ),
@@ -658,10 +661,13 @@ impl LibraryService for Service {
                 &scratch,
                 mirror_options(
                     request.remove_missing,
-                    request.sync_stars,
-                    request.sync_locations,
-                    request.copy_tracks,
-                    request.copy_stems,
+                    crate::track_sync::Options {
+                        stars: request.sync_stars,
+                        locations: request.sync_locations,
+                        copy_tracks: request.copy_tracks,
+                        copy_stems: request.copy_stems,
+                        analysis: request.sync_analysis,
+                    },
                     request.reverse,
                     request.create_if_missing,
                 ),
@@ -1256,10 +1262,7 @@ fn known_origins(library: &Library) -> Vec<api::TrackOrigin> {
 
 fn mirror_options(
     remove_missing: bool,
-    stars: bool,
-    locations: bool,
-    copy_tracks: bool,
-    copy_stems: bool,
+    tracks: crate::track_sync::Options,
     reverse: bool,
     create: bool,
 ) -> mirror::Options {
@@ -1267,12 +1270,7 @@ fn mirror_options(
         remove_missing,
         reverse,
         create,
-        tracks: crate::track_sync::Options {
-            stars,
-            locations,
-            copy_tracks,
-            copy_stems,
-        },
+        tracks,
     }
 }
 
