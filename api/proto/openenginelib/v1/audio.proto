@@ -85,6 +85,10 @@ message AudioFound {
   // major, 1 A minor, 2 B-flat major, 3 B-flat minor, ... 22 A-flat major, 23 A-flat
   // minor). Not set if it heard none (silence).
   optional uint32 key = 5;
+  // The overview waveform: 1025 entries of three bytes (low, mid, high), the first 1024 for
+  // equal stretches of the track and the last the largest of each band, as Engine keeps it.
+  // Not set if the file could not be measured.
+  optional bytes overview = 6;
 }
 
 message WatchMidiRequest {}

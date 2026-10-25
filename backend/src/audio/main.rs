@@ -14,6 +14,7 @@
 mod analysis;
 mod engine;
 mod midi;
+mod overview;
 mod player;
 mod scratch;
 mod service;

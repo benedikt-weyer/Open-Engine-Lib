@@ -1029,6 +1029,7 @@ impl LibraryService for Service {
             sample_rate: found.sample_rate,
             frames: found.frames,
             key: found.key,
+            overview: found.overview,
         };
         let overwrite = request.overwrite;
         // Writes the database: not on the async threads.

@@ -213,7 +213,7 @@ pub fn analyze(
 }
 
 /// A second-order (12 dB per octave) Butterworth filter, in transposed direct form II.
-struct Biquad {
+pub(super) struct Biquad {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -224,14 +224,14 @@ struct Biquad {
 }
 
 impl Biquad {
-    fn low_pass(cutoff_hz: f32, sample_rate: u32) -> Self {
+    pub(super) fn low_pass(cutoff_hz: f32, sample_rate: u32) -> Self {
         Self::new(cutoff_hz, sample_rate, |cos, alpha| {
             let b = (1.0 - cos) / 2.0;
             (b, 1.0 - cos, b, 1.0 + alpha)
         })
     }
 
-    fn high_pass(cutoff_hz: f32, sample_rate: u32) -> Self {
+    pub(super) fn high_pass(cutoff_hz: f32, sample_rate: u32) -> Self {
         Self::new(cutoff_hz, sample_rate, |cos, alpha| {
             let b = (1.0 + cos) / 2.0;
             (b, -(1.0 + cos), b, 1.0 + alpha)
@@ -259,7 +259,7 @@ impl Biquad {
         }
     }
 
-    fn process(&mut self, input: f32) -> f32 {
+    pub(super) fn process(&mut self, input: f32) -> f32 {
         let output = self.b0 * input + self.z1;
         self.z1 = self.b1 * input - self.a1 * output + self.z2;
         self.z2 = self.b2 * input - self.a2 * output;

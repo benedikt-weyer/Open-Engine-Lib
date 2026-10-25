@@ -1466,6 +1466,24 @@ impl Library {
             .flatten();
         let track_data =
             track_analysis::track_data(existing.as_deref(), found.sample_rate, found.frames, key);
+        // The overview waveform is the audio's, not the grid's: Engine's own stays, and one
+        // that was made here is not made again.
+        let overview = found
+            .overview
+            .as_deref()
+            .and_then(|entries| track_analysis::overview_data(found.frames, entries))
+            .filter(|_| {
+                connection
+                    .query_row(
+                        "SELECT overviewWaveFormData IS NULL FROM PerformanceData WHERE trackId = ?1",
+                        [track.db_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(true)
+            });
         let has_loop_flag = connection
             .query_row(
                 "SELECT 1 FROM pragma_table_info('PerformanceData') WHERE name = 'activeOnLoadLoops'",
@@ -1486,6 +1504,12 @@ impl Library {
             transaction.execute(
                 "INSERT INTO PerformanceData (trackId, trackData, beatData) VALUES (?1, ?2, ?3)",
                 (track.db_id, &track_data, &beat_data),
+            )?;
+        }
+        if let Some(overview) = &overview {
+            transaction.execute(
+                "UPDATE PerformanceData SET overviewWaveFormData = ?1 WHERE trackId = ?2",
+                (overview, track.db_id),
             )?;
         }
         if has_loop_flag {
@@ -1527,7 +1551,10 @@ impl Library {
             None => track_analysis::TOOL.to_owned(),
         };
 
-        let bits = before | ANALYSIS_TRACK_DATA | ANALYSIS_BEATGRID;
+        let mut bits = before | ANALYSIS_TRACK_DATA | ANALYSIS_BEATGRID;
+        if overview.is_some() {
+            bits |= ANALYSIS_WAVEFORM;
+        }
         self.analysed.lock().expect("analysed lock").insert(
             index,
             Analysed {
@@ -3685,6 +3712,7 @@ mod tests {
             sample_rate: 44_100,
             frames: 44_100 * 60,
             key: Some(1), // A minor
+            overview: None,
         };
 
         // An analysis is not replaced unless that is asked for, a streaming track has no file,
@@ -3767,6 +3795,52 @@ mod tests {
             ANALYSIS_TRACK_DATA | ANALYSIS_BEATGRID | ANALYSIS_WAVEFORM
         );
         assert_eq!(library.analysed_by_us().len(), 2);
+
+        // The overview waveform is written where there is none (track 1 was analysed above
+        // without one), and Engine's own is kept (track 0 has it).
+        let overview_of = |track: i64| -> Option<Vec<u8>> {
+            library
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT overviewWaveFormData FROM PerformanceData WHERE trackId = ?1",
+                    [track],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let engines = overview_of(1);
+        assert!(engines.is_some());
+        assert_eq!(overview_of(2), None);
+        let entries: Vec<u8> = (0..1025 * 3).map(|n| (n % 251) as u8).collect();
+        let with_overview = Found {
+            overview: Some(entries.clone()),
+            ..found.clone()
+        };
+        let kept = library.apply_analysis(0, &with_overview, true).unwrap();
+        assert_eq!(kept.bits & ANALYSIS_WAVEFORM, ANALYSIS_WAVEFORM);
+        assert_eq!(overview_of(1), engines, "Engine's overview is not replaced");
+        let made = library.apply_analysis(1, &with_overview, true).unwrap();
+        assert_eq!(
+            made.bits,
+            ANALYSIS_TRACK_DATA | ANALYSIS_BEATGRID | ANALYSIS_WAVEFORM
+        );
+        assert_eq!(
+            overview_of(2),
+            track_analysis::overview_data(44_100 * 60, &entries)
+        );
+        // One of the wrong size is no overview.
+        let short = Found {
+            overview: Some(vec![0; 10]),
+            ..found.clone()
+        };
+        library.apply_analysis(1, &short, true).unwrap();
+        assert_eq!(
+            overview_of(2),
+            track_analysis::overview_data(44_100 * 60, &entries),
+            "what is there stays"
+        );
 
         // If Engine analyses the track again, it is Engine's analysis again.
         library

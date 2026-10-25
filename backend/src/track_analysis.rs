@@ -88,6 +88,9 @@ pub struct Found {
     pub frames: u64,
     /// libKeyFinder's key, 0 to 23, if it heard one.
     pub key: Option<u32>,
+    /// The overview waveform: 1025 entries of three bytes (see `overview_data`), if the audio
+    /// process measured one.
+    pub overview: Option<Vec<u8>>,
 }
 
 /// A steady beat grid: the tempo and the two markers Engine stores.
@@ -202,6 +205,25 @@ fn decompress(blob: &[u8]) -> Option<Vec<u8>> {
     Some(data)
 }
 
+/// How many steps the overview has (and one entry more, the largest of each band).
+const OVERVIEW_STEPS: usize = 1024;
+
+/// The `overviewWaveFormData` blob for `entries` (the `OVERVIEW_STEPS` steps of the track and
+/// then the largest of each band, three bytes each: low, mid, high) of audio with `frames`
+/// samples: the numbers 1024 and 1024 and the samples per step (big-endian), then the
+/// entries. `None` if there are not as many entries as that.
+pub fn overview_data(frames: u64, entries: &[u8]) -> Option<Vec<u8>> {
+    if entries.len() != (OVERVIEW_STEPS + 1) * 3 {
+        return None;
+    }
+    let mut data = Vec::with_capacity(24 + entries.len());
+    data.extend((OVERVIEW_STEPS as i64).to_be_bytes());
+    data.extend((OVERVIEW_STEPS as i64).to_be_bytes());
+    data.extend((frames as f64 / OVERVIEW_STEPS as f64).to_be_bytes());
+    data.extend(entries);
+    Some(compress(&data))
+}
+
 /// The `beatData` blob of `grid` for audio with `frames` samples at `sample_rate`: the same
 /// grid as analysed and as adjusted.
 pub fn beat_data(sample_rate: u32, frames: u64, grid: &Grid) -> Vec<u8> {
@@ -262,6 +284,24 @@ pub fn fingerprint(blob: &[u8]) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_overview_blob_has_the_header_engine_writes_and_the_entries() {
+        let entries: Vec<u8> = (0..1025 * 3).map(|n| (n % 200) as u8).collect();
+        let blob = overview_data(44_100 * 300, &entries).unwrap();
+        let data = decompress(&blob).unwrap();
+        assert_eq!(
+            u32::from_be_bytes(blob[..4].try_into().unwrap()) as usize,
+            data.len()
+        );
+        assert_eq!(data.len(), 3099, "as the overviews of real libraries are");
+        assert_eq!(i64::from_be_bytes(data[0..8].try_into().unwrap()), 1024);
+        assert_eq!(i64::from_be_bytes(data[8..16].try_into().unwrap()), 1024);
+        let per_step = f64::from_be_bytes(data[16..24].try_into().unwrap());
+        assert!((per_step - 44_100.0 * 300.0 / 1024.0).abs() < 1e-6);
+        assert_eq!(&data[24..], entries.as_slice());
+        assert_eq!(overview_data(1, &entries[..10]), None);
+    }
+
     use super::*;
     use crate::beatgrid;
 

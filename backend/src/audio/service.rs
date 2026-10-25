@@ -17,6 +17,7 @@ use tonic::{Request, Response, Status};
 use crate::analysis::{self, Stage};
 use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::midi;
+use crate::overview;
 use crate::player::Start;
 use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 
@@ -263,6 +264,12 @@ impl AudioService for Service {
                                 sample_rate: found.sample_rate,
                                 frames: found.frames,
                                 key: found.key,
+                                // (A file that was decoded for the beats but can't be again
+                                // is just left without.)
+                                overview: overview::analyze_file(&path)
+                                    .ok()
+                                    .map(|levels| levels.entries().concat())
+                                    .filter(|entries| !entries.is_empty()),
                             },
                         )),
                     }),
