@@ -180,6 +180,7 @@ pub fn modal<'a>(
                         ("title", &done.playlist_title),
                         ("existing", &done.tracks_existing),
                         ("files", &done.files_copied),
+                        ("covers", &done.covers_added),
                         ("missing", &done.files_missing),
                     ],
                 )),

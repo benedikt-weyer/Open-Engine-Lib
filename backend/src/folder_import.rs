@@ -21,7 +21,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::cache::DATABASE_DIR;
-use crate::library::{self, EditError, Library};
+use crate::library::{self, ARTWORK_DIR, EditError, Library, base64_url};
 use crate::mirror::{
     Databases, MAIN_DATABASE, MirrorError, Place, copy_databases, databases_size, install,
 };
@@ -57,11 +57,24 @@ struct Outcome {
     /// The tracks the library had already.
     existing: u32,
     files_missing: u32,
-    /// The files that were copied, so that a failure later on can take them away again.
+    /// The audio files that were copied, so that a failure later on can take them away again.
     copied: Vec<PathBuf>,
+    /// The cover files that were written to `Artwork`, likewise.
+    covers_written: Vec<PathBuf>,
     /// Each track of the folder that is in the library now (new or not), as an index into the
     /// folder's tracks and the path the library has for it, in the folder's order.
     placed: Vec<(usize, String)>,
+}
+
+impl Outcome {
+    /// Every file the import made, to take away again if it fails.
+    fn written(&self) -> Vec<PathBuf> {
+        self.copied
+            .iter()
+            .chain(&self.covers_written)
+            .cloned()
+            .collect()
+    }
 }
 
 /// Adds the tracks of the playlist `request.playlist` of the folder library `open` to the
@@ -120,7 +133,7 @@ pub fn import(
         match install(&place, &scratch, &changed, progress) {
             Ok(backup) => backup_path = backup.display().to_string(),
             Err(error) => {
-                remove_files(&outcome.copied);
+                remove_files(&outcome.written());
                 let _ = fs::remove_dir_all(&base);
                 return Err(error);
             }
@@ -135,6 +148,7 @@ pub fn import(
         tracks_existing: outcome.existing,
         files_missing: outcome.files_missing,
         files_copied: outcome.copied.len() as u32,
+        covers_added: outcome.covers_written.len() as u32,
         backup_path,
         added_paths: outcome.added,
     })
@@ -164,7 +178,7 @@ fn work(
         progress,
         &mut outcome,
     );
-    let copied = |outcome: &Outcome| outcome.copied.clone();
+    let copied = Outcome::written;
     if let Err(error) = tracks {
         return Err((error, copied(&outcome)));
     }
@@ -290,6 +304,7 @@ fn add_tracks(
         });
     }
 
+    let mut covers: HashMap<[u8; 20], Option<i64>> = HashMap::new();
     let mut seen = HashSet::new();
     for &index in wanted {
         let track = &open.tracks[index];
@@ -323,6 +338,7 @@ fn add_tracks(
             .map(|extension| extension.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         let stamp = now();
+        let art = cover(&transaction, &track.path, dir, &mut covers, outcome)?;
         let text = |value: &str| Value::Text(value.to_owned());
         let mut names = Vec::new();
         let mut values: Vec<Value> = Vec::new();
@@ -346,6 +362,10 @@ fn add_tracks(
                 "key" => Value::Integer(-1),
                 "rating" | "isAnalyzed" | "isPlayed" => Value::Integer(0),
                 "isAvailable" => Value::Integer(1),
+                "albumArtId" => match art {
+                    Some(art) => Value::Integer(art),
+                    None => continue,
+                },
                 "dateCreated" | "dateAdded" | "lastEditTime" => Value::Integer(stamp),
                 _ => match usual {
                     Some(value) => value.clone(),
@@ -379,6 +399,110 @@ fn add_tracks(
     }
     transaction.commit()?;
     Ok(())
+}
+
+/// The size of the covers Engine keeps in `Artwork`: they are thumbnails.
+const COVER_SIDE: u32 = 256;
+
+/// The picture embedded in the audio file at `path`: the front cover if there is one, else
+/// the first picture.
+fn embedded_picture(path: &Path) -> Option<Vec<u8>> {
+    use lofty::config::ParseOptions;
+    use lofty::picture::PictureType;
+    use lofty::prelude::*;
+    use lofty::probe::Probe;
+
+    let tagged = Probe::open(path)
+        .and_then(|probe| {
+            probe
+                .options(ParseOptions::new().read_cover_art(true))
+                .read()
+        })
+        .ok()?;
+    let pictures: Vec<_> = tagged
+        .tags()
+        .iter()
+        .flat_map(|tag| tag.pictures())
+        .collect();
+    let picture = pictures
+        .iter()
+        .find(|picture| picture.pic_type() == PictureType::CoverFront)
+        .or(pictures.first())?;
+    Some(picture.data().to_vec())
+}
+
+/// `picture` as the thumbnail Engine keeps: a 256 by 256 JPEG (the picture is scaled to
+/// cover the square and the rest is cut off).
+fn thumbnail(picture: &[u8]) -> Option<Vec<u8>> {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::imageops::FilterType;
+
+    let decoded = image::load_from_memory(picture).ok()?;
+    let square = decoded
+        .resize_to_fill(COVER_SIDE, COVER_SIDE, FilterType::Lanczos3)
+        .to_rgb8();
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&square)
+        .ok()?;
+    Some(jpeg)
+}
+
+/// The `AlbumArt` row of the cover embedded in the file at `path`, made if the library has
+/// none for it (its thumbnail goes to `Artwork`, named after the hash of the embedded
+/// picture, as Engine does it). `None` if the file has no picture or it can't be read.
+/// `known` remembers the covers of this import (an album's tracks share one).
+fn cover(
+    transaction: &rusqlite::Transaction<'_>,
+    path: &Path,
+    dir: &Path,
+    known: &mut HashMap<[u8; 20], Option<i64>>,
+    outcome: &mut Outcome,
+) -> Result<Option<i64>, MirrorError> {
+    use rusqlite::OptionalExtension;
+    use sha1::{Digest, Sha1};
+
+    let Some(picture) = embedded_picture(path) else {
+        return Ok(None);
+    };
+    let hash: [u8; 20] = Sha1::digest(&picture).into();
+    if let Some(art) = known.get(&hash) {
+        return Ok(*art);
+    }
+    let existing: Option<i64> = transaction
+        .query_row(
+            "SELECT id FROM AlbumArt WHERE hash IS ?1 LIMIT 1",
+            [&hash[..]],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let art = match existing {
+        Some(art) => Some(art),
+        None => {
+            let file = dir
+                .join(ARTWORK_DIR)
+                .join(format!("{}.jpg", base64_url(&hash)));
+            let present = file.is_file();
+            let jpeg = if present { None } else { thumbnail(&picture) };
+            // (A picture that can't be decoded is no cover; nothing is left half done.)
+            if present || jpeg.is_some() {
+                if let Some(jpeg) = jpeg {
+                    fs::create_dir_all(dir.join(ARTWORK_DIR))?;
+                    fs::write(&file, jpeg)?;
+                    outcome.covers_written.push(file);
+                }
+                transaction.execute(
+                    "INSERT INTO AlbumArt (hash, albumArt) VALUES (?1, NULL)",
+                    [&hash[..]],
+                )?;
+                Some(transaction.last_insert_rowid())
+            } else {
+                None
+            }
+        }
+    };
+    known.insert(hash, art);
+    Ok(art)
 }
 
 /// Puts the tracks of the folder in a playlist of the copy (made if there is none of that
@@ -785,7 +909,19 @@ mod tests {
     #[test]
     fn a_failure_leaves_no_copied_files_and_the_library_as_it_was() {
         let temp = TempDir::new("failure");
-        let (open, set) = folder(&temp.0);
+        let (_, _) = folder(&temp.0);
+        embed(&temp.0.join("pc/Music/Set/a.wav"), png());
+        let open = Library::open_folder(
+            &temp.0.join("pc/Music"),
+            temp.0.join("scratch"),
+            &Progress::default(),
+        )
+        .unwrap();
+        let set = open
+            .playlists()
+            .iter()
+            .position(|playlist| playlist.title == "Set")
+            .unwrap();
         let library = stick(&temp.0, None);
         // A playlist with the title that a smart playlist has: the playlist can't be made,
         // which is found after the files were copied.
@@ -822,5 +958,133 @@ mod tests {
             fs::read(library.join(DATABASE_DIR).join(MAIN_DATABASE)).unwrap(),
             before
         );
+    }
+
+    /// A 300 by 200 PNG.
+    fn png() -> Vec<u8> {
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            300,
+            200,
+            image::Rgb([200, 30, 30]),
+        ))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+        png
+    }
+
+    /// Gives the file the picture as its front cover.
+    fn embed(path: &Path, picture: Vec<u8>) {
+        use lofty::config::WriteOptions;
+        use lofty::picture::{MimeType, Picture, PictureType};
+        use lofty::prelude::*;
+        use lofty::tag::{Tag, TagType};
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.push_picture(
+            Picture::unchecked(picture)
+                .pic_type(PictureType::CoverFront)
+                .mime_type(MimeType::Png)
+                .build(),
+        );
+        tag.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn embedded_covers_become_thumbnails_in_artwork_that_tracks_of_an_album_share() {
+        use sha1::{Digest, Sha1};
+        let temp = TempDir::new("covers");
+        let (_, _) = folder(&temp.0); // (the files)
+        // A 300 by 200 PNG on a and b, nothing on c.
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            300,
+            200,
+            image::Rgb([200, 30, 30]),
+        ))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+        embed(&temp.0.join("pc/Music/Set/a.wav"), png.clone());
+        embed(&temp.0.join("pc/Music/Set/b.wav"), png.clone());
+        // (Opened after the pictures are in, as the user would have it.)
+        let open = Library::open_folder(
+            &temp.0.join("pc/Music"),
+            temp.0.join("scratch"),
+            &Progress::default(),
+        )
+        .unwrap();
+        let set = open
+            .playlists()
+            .iter()
+            .position(|playlist| playlist.title == "Set")
+            .unwrap();
+        let library = stick(&temp.0, None);
+
+        let done = import(
+            &open,
+            &Request {
+                target: &library,
+                playlist: set,
+                title: "Set",
+                copy_files: false,
+            },
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (done.tracks_added, done.covers_added),
+            (3, 1),
+            "one picture for the two"
+        );
+
+        // The file is named after the hash of the embedded picture and is a 256 by 256 JPEG.
+        let hash: [u8; 20] = Sha1::digest(&png).into();
+        let file = library
+            .join(ARTWORK_DIR)
+            .join(format!("{}.jpg", library::base64_url(&hash)));
+        let thumbnail = image::open(&file).unwrap();
+        assert_eq!((thumbnail.width(), thumbnail.height()), (256, 256));
+        assert_eq!(
+            image::guess_format(&fs::read(&file).unwrap()).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+
+        // One row of the library holds the hash (raw, no image); a and b point at it.
+        assert_eq!(
+            rows(&library, "SELECT COUNT(*), COUNT(albumArt) FROM AlbumArt"),
+            [[Value::Integer(1), Value::Integer(0)]]
+        );
+        assert_eq!(
+            rows(&library, "SELECT hash FROM AlbumArt")[0][0],
+            Value::Blob(hash.to_vec())
+        );
+        let art = rows(&library, "SELECT title, albumArtId FROM Track ORDER BY id");
+        assert_eq!(art[0][1], art[1][1]);
+        assert_ne!(art[0][1], Value::Null);
+        assert_eq!(art[2], [text("c"), Value::Null]);
+
+        // The library gives the cover back, as the player shows it.
+        let reopened = Library::open_copy(
+            &library.join(DATABASE_DIR).join(MAIN_DATABASE),
+            library.clone(),
+            temp.0.join("check"),
+        )
+        .unwrap();
+        let id = reopened.tracks[0].album_art.expect("a has a cover");
+        let cover = reopened.album_art(id).unwrap().expect("the cover is found");
+        assert_eq!(cover.mime_type, "image/jpeg");
+
+        // Importing again makes no second cover.
+        let again = import(
+            &open,
+            &Request {
+                target: &library,
+                playlist: set,
+                title: "Set",
+                copy_files: false,
+            },
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(again.covers_added, 0);
     }
 }

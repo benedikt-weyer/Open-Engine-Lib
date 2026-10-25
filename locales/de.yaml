@@ -143,7 +143,7 @@ import_analyse: "Neue Titel danach analysieren (öffnet die Bibliothek; Beats un
 import_start: "Importieren"
 import_working: "Import läuft…"
 import_failed: "Import fehlgeschlagen: {error}"
-import_done: "{added} neue Titel wurden zur Bibliothek hinzugefügt und in die Playlist „{title}“ gelegt ({existing} waren schon in der Bibliothek, {files} Dateien kopiert, {missing} Dateien nicht gefunden)."
+import_done: "{added} neue Titel wurden zur Bibliothek hinzugefügt und in die Playlist „{title}“ gelegt ({existing} waren schon in der Bibliothek, {files} Dateien kopiert, {covers} Cover hinzugefügt, {missing} Dateien nicht gefunden)."
 import_done_backup: "Die alte Datenbank der Bibliothek liegt in {backup}."
 import_open: "Bibliothek öffnen"
 import_open_analyse: "Bibliothek öffnen und {count} Titel analysieren"

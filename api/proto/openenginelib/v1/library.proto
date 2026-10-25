@@ -169,7 +169,7 @@ service LibraryService {
   // below that folder) to the Engine library at `target_path` and makes them a playlist
   // there, named after the folder (or `title`). The tracks are new tracks of that library,
   // not analysed (the Engine software does that, or `AnalyzeTrack` once the library is
-  // open), with what their tags say, and their saved origin is the file they came from.
+  // open), with what their tags say and their embedded cover, and their saved origin is the file they came from.
   // With `copy_files` the audio files are copied to an `Engine-Tracks` folder beside the
   // library's `Engine Library` folder, as `Artist/Album/File` with names that exFAT accepts,
   // and the tracks' paths lead there; without it the paths lead to the files where they are.
@@ -548,6 +548,10 @@ message ImportFolderResponse {
   // The tracks that were added, as the paths the library has for them (relative to its
   // `Engine Library` folder, as `Track.path`), to find them when it is open.
   repeated string added_paths = 9;
+  // Covers that were new to the library: pictures embedded in the audio files, which were
+  // made 256 by 256 JPEGs in its `Artwork` folder (named after the SHA-1 of the embedded
+  // picture) and given an `AlbumArt` row. Tracks that share a picture share the cover.
+  uint32 covers_added = 10;
 }
 
 message PullFromSourceRequest {}

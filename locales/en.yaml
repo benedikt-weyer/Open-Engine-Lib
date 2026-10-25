@@ -144,7 +144,7 @@ import_analyse: "Analyse the new tracks afterwards (opens the library; the beats
 import_start: "Import"
 import_working: "Importing…"
 import_failed: "Could not import: {error}"
-import_done: "{added} new tracks were added to the library and put in the playlist “{title}” ({existing} were in the library already, {files} files copied, {missing} files not found)."
+import_done: "{added} new tracks were added to the library and put in the playlist “{title}” ({existing} were in the library already, {files} files copied, {covers} covers added, {missing} files not found)."
 import_done_backup: "The library's old database is kept in {backup}."
 import_open: "Open library"
 import_open_analyse: "Open library and analyse {count} tracks"
