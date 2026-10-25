@@ -36,6 +36,8 @@ pub struct Menu {
     pub can_analyse: bool,
     /// The track has an analysis already, which analysing it again replaces.
     pub analysed: bool,
+    /// The track is being analysed or waits to be: it can't be put in the queue again.
+    pub queued: bool,
     /// How many tracks of the list that is shown have no analysis (files, not streaming
     /// tracks): the menu offers to analyse them all one after the other when there are
     /// more than one.
@@ -94,8 +96,9 @@ fn view(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message
 
     if menu.can_analyse {
         // One track at a time: the progress shown is that of one.
-        items = items.push(if analysing {
-            disabled_item(&strings.track_menu_analysing)
+        // (While tracks are analysed, this one joins them.)
+        items = items.push(if menu.queued {
+            disabled_item(&strings.track_menu_queued)
         } else {
             item(
                 if menu.analysed {
@@ -109,18 +112,14 @@ fn view(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message
         });
     }
     if menu.analyse_all > 1 {
-        items = items.push(if analysing {
-            disabled_item(&strings.track_menu_analysing)
-        } else {
-            item(
-                fill(
-                    &strings.track_menu_analyse_all,
-                    &[("count", &menu.analyse_all)],
-                ),
-                Message::TrackMenuAnalyseAll,
-                false,
-            )
-        });
+        items = items.push(item(
+            fill(
+                &strings.track_menu_analyse_all,
+                &[("count", &menu.analyse_all)],
+            ),
+            Message::TrackMenuAnalyseAll,
+            false,
+        ));
     }
     if menu.playlist.is_some() {
         items = items.push(item_if(

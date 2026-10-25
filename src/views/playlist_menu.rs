@@ -21,7 +21,8 @@ pub struct Menu {
     /// A smart playlist is changed through its rules, and can't be renamed or deleted here.
     pub smart: bool,
     /// How many of its tracks are files (a streaming track has nothing to analyse), and how
-    /// many of those have no analysis.
+    /// many of those have no analysis; tracks that are in the analysis queue already are not
+    /// counted.
     pub tracks: usize,
     pub unanalysed: usize,
     /// "Analyse all again" was clicked once and waits for a second click.
@@ -31,8 +32,15 @@ pub struct Menu {
 }
 
 /// The menu in a layer over the whole window. `busy` is true while the library is being
-/// changed or a track is analysed, which the menu's lines would collide with.
-pub fn layer(menu: &Menu, busy: bool, language: Language) -> Element<'_, Message> {
+/// changed or a track is analysed, which renaming and deleting would collide with;
+/// `analysis_blocked` while something else has the working copy (tracks to analyse join
+/// the queue of the analysis that runs).
+pub fn layer(
+    menu: &Menu,
+    busy: bool,
+    analysis_blocked: bool,
+    language: Language,
+) -> Element<'_, Message> {
     let lines = if menu.smart { 1 } else { 2 }
         + usize::from(menu.unanalysed > 0)
         + usize::from(menu.tracks > 0);
@@ -40,11 +48,16 @@ pub fn layer(menu: &Menu, busy: bool, language: Language) -> Element<'_, Message
         menu.at,
         TITLE_HEIGHT + lines as f32 * LINE_HEIGHT,
         Message::PlaylistMenuClose,
-        move || view(menu, busy, language),
+        move || view(menu, busy, analysis_blocked, language),
     )
 }
 
-fn view(menu: &Menu, busy: bool, language: Language) -> Element<'_, Message> {
+fn view(
+    menu: &Menu,
+    busy: bool,
+    analysis_blocked: bool,
+    language: Language,
+) -> Element<'_, Message> {
     let strings = language.strings();
     let title = container(
         text(&menu.title)
@@ -87,7 +100,7 @@ fn view(menu: &Menu, busy: bool, language: Language) -> Element<'_, Message> {
             ),
             Message::PlaylistMenuAnalyse,
             false,
-            !busy,
+            !analysis_blocked,
         ));
     }
     if menu.tracks > 0 {
@@ -102,7 +115,7 @@ fn view(menu: &Menu, busy: bool, language: Language) -> Element<'_, Message> {
             ),
             Message::PlaylistMenuReanalyse,
             menu.confirm_reanalyse,
-            !busy,
+            !analysis_blocked,
         ));
     }
     // (No padding, so that a click on the menu is always on one of its lines.)

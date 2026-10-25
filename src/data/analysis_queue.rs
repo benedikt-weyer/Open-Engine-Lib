@@ -14,9 +14,13 @@ pub type Entry = (u32, String);
 pub struct Queue {
     /// The library the tracks are in (as the backend names it).
     pub library: String,
-    /// Analyse tracks that have an analysis too, replacing it.
+    /// Whether the track that was last taken is analysed even if it has an analysis, replacing
+    /// it. (Each track of the queue has its own: tracks can be added later, in another mode.)
     pub overwrite: bool,
-    waiting: VecDeque<Entry>,
+    /// The tracks that wait, each with whether it replaces an analysis.
+    waiting: VecDeque<(Entry, bool)>,
+    /// The track that was last taken, until its analysis is over.
+    running: Option<u32>,
     total: u32,
     started: u32,
     done: u32,
@@ -41,7 +45,8 @@ impl Queue {
             library,
             overwrite,
             total: tracks.len() as u32,
-            waiting: tracks.into(),
+            waiting: tracks.into_iter().map(|track| (track, overwrite)).collect(),
+            running: None,
             started: 0,
             done: 0,
             failed: 0,
@@ -49,11 +54,40 @@ impl Queue {
         }
     }
 
-    /// Takes the next track to analyse.
+    /// Takes the next track to analyse (`overwrite` says how).
     pub fn next(&mut self) -> Option<Entry> {
-        let next = self.waiting.pop_front()?;
+        let (next, overwrite) = self.waiting.pop_front()?;
         self.started += 1;
+        self.overwrite = overwrite;
+        self.running = Some(next.0);
         Some(next)
+    }
+
+    /// Whether the track is being analysed or waits for its turn.
+    pub fn contains(&self, track: u32) -> bool {
+        self.running == Some(track) || self.waiting.iter().any(|((id, _), _)| *id == track)
+    }
+
+    /// Puts tracks at the end of the queue, even while it runs. A track that is in the queue
+    /// already (being analysed or waiting) is not put in again, but one that waits to be
+    /// analysed without replacing its analysis is made to replace it if `overwrite` says so.
+    /// Returns how many tracks were added.
+    pub fn add(&mut self, tracks: Vec<Entry>, overwrite: bool) -> usize {
+        let mut added = 0;
+        for track in tracks {
+            if self.running == Some(track.0) {
+                continue;
+            }
+            match self.waiting.iter_mut().find(|((id, _), _)| *id == track.0) {
+                Some((_, replaces)) => *replaces |= overwrite,
+                None => {
+                    self.waiting.push_back((track, overwrite));
+                    added += 1;
+                }
+            }
+        }
+        self.total += added as u32;
+        added
     }
 
     /// Whether tracks wait for their turn.
@@ -68,6 +102,7 @@ impl Queue {
 
     /// Notes how the analysis of the track that was last taken went.
     pub fn finished(&mut self, title: &str, error: Option<&str>) {
+        self.running = None;
         match error {
             None => self.done += 1,
             Some(error) => {
@@ -129,6 +164,43 @@ mod tests {
         assert_eq!(queue.next().map(|entry| entry.0), Some(2));
         assert!(!queue.has_next());
         assert_eq!(queue.next(), None);
+    }
+
+    #[test]
+    fn tracks_can_be_added_while_it_runs_but_none_twice() {
+        let mut queue = queue(3);
+        queue.next();
+        // Track 0 runs, 1 and 2 wait. 0, 1 and 2 are in; 3 and 4 are new, one of them twice.
+        assert!(queue.contains(0) && queue.contains(2) && !queue.contains(3));
+        let entry = |id: u32| (id, format!("Track {id}"));
+        assert_eq!(
+            queue.add(
+                vec![entry(0), entry(1), entry(3), entry(3), entry(4)],
+                false
+            ),
+            2
+        );
+        assert_eq!(queue.position(), (1, 5), "the total grows");
+        let order: Vec<_> = std::iter::from_fn(|| queue.next().map(|entry| entry.0)).collect();
+        assert_eq!(order, [1, 2, 3, 4]);
+
+        // Once its analysis is over, a track can be put in again.
+        assert!(queue.contains(4));
+        queue.finished("Track 4", None);
+        assert!(!queue.contains(4));
+        assert_eq!(queue.add(vec![entry(4)], false), 1);
+        assert_eq!(queue.next().map(|entry| entry.0), Some(4));
+    }
+
+    #[test]
+    fn every_track_keeps_the_mode_it_was_asked_for_in() {
+        let mut queue = queue(2);
+        let entry = |id: u32| (id, format!("Track {id}"));
+        // 5 is new and replaces; 1 waits already and is made to replace too.
+        assert_eq!(queue.add(vec![entry(5), entry(1)], true), 1);
+        let modes: Vec<_> =
+            std::iter::from_fn(|| queue.next().map(|entry| (entry.0, queue.overwrite))).collect();
+        assert_eq!(modes, [(0, false), (1, true), (5, true)]);
     }
 
     #[test]

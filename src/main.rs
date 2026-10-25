@@ -1786,7 +1786,12 @@ fn with_windows<'a>(
     if let (Some(menu), LibraryState::Open(_)) = (&state.playlist_menu, &state.library) {
         return iced::widget::stack![
             window,
-            playlist_menu::layer(menu, state.locked() || state.syncing(), language)
+            playlist_menu::layer(
+                menu,
+                state.locked() || state.syncing(),
+                state.saving.is_some() || state.reloading || state.syncing(),
+                language,
+            )
         ]
         .into();
     }
@@ -3615,6 +3620,7 @@ mod tests {
                 confirm_library: false,
                 can_analyse: true,
                 analysed: false,
+                queued: false,
                 analyse_all: 3,
             }
         );
@@ -5769,6 +5775,133 @@ mod tests {
         let _ = handle(&mut other, Message::LibraryOpened(Ok(library)));
         assert_eq!(browser(&other).source, Source::Collection);
         assert!(!other.analysing());
+    }
+
+    /// The Engine library of `state()` with the tracks 0 to 2 (none analysed) and a queue
+    /// that is running on track 1, with track 2 waiting.
+    fn state_analysing_one_and_waiting_for_another() -> State {
+        let mut state = state();
+        let library = "/media/DRIVE/Engine Library".to_owned();
+        let mut queue = analysis_queue::Queue::new(
+            library.clone(),
+            vec![(1, "Track 1".into()), (2, "Track 2".into())],
+            false,
+        );
+        queue.next();
+        state.analysis_queue = Some(queue);
+        state.toast = Some(toast::Toast::Analysing {
+            library,
+            title: "Track 1".into(),
+            position: Some((1, 2)),
+            stoppable: true,
+        });
+        state
+    }
+
+    #[test]
+    fn tracks_join_the_queue_while_it_runs_and_none_is_in_it_twice() {
+        let mut state = state_analysing_one_and_waiting_for_another();
+        let library = "/media/DRIVE/Engine Library".to_owned();
+        let entry = |id: u32| (id, format!("Track {id}"));
+
+        // Track 1 runs, 2 waits: only 0 is new.
+        let _ = state.start_analysis(library.clone(), vec![entry(0), entry(1), entry(2)], false);
+        let queue = state.analysis_queue.as_ref().unwrap();
+        assert_eq!(queue.position(), (1, 3));
+        assert!(queue.contains(0));
+        assert!(
+            matches!(
+                state.toast,
+                Some(toast::Toast::Analysing {
+                    position: Some((1, 3)),
+                    stoppable: true,
+                    ..
+                })
+            ),
+            "the toast counts it: {:?}",
+            state.toast
+        );
+        // The same again adds nothing.
+        let _ = state.start_analysis(library.clone(), vec![entry(0), entry(1)], false);
+        assert_eq!(state.analysis_queue.as_ref().unwrap().position(), (1, 3));
+
+        // Another library's tracks are not put in this one's queue, and nothing is added
+        // while the working copy is being saved.
+        let _ = state.start_analysis("/elsewhere".into(), vec![entry(9)], false);
+        state.saving = Some(PathBuf::from("/saved"));
+        let _ = state.start_analysis(library, vec![entry(7)], false);
+        assert_eq!(state.analysis_queue.as_ref().unwrap().position(), (1, 3));
+    }
+
+    #[test]
+    fn the_last_track_running_does_not_stop_the_queue_from_taking_more() {
+        let mut state = state();
+        let library = "/media/DRIVE/Engine Library".to_owned();
+        let mut queue =
+            analysis_queue::Queue::new(library.clone(), vec![(1, "Track 1".into())], false);
+        queue.next();
+        state.analysis_queue = Some(queue);
+        // A queue of one: the toast has no count and no stop button.
+        state.toast = Some(toast::Toast::Analysing {
+            library: library.clone(),
+            title: "Track 1".into(),
+            position: None,
+            stoppable: false,
+        });
+        let _ = state.start_analysis(library, vec![(2, "Track 2".into())], false);
+        assert!(matches!(
+            state.toast,
+            Some(toast::Toast::Analysing {
+                position: Some((1, 2)),
+                stoppable: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_menus_offer_what_is_not_in_the_queue_and_work_while_it_runs() {
+        let at = iced::Point::new(10.0, 10.0);
+        let mut state = state_analysing_one_and_waiting_for_another();
+        // The track that is analysed and the one that waits are in the queue; track 0 is not.
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
+        assert!(state.playlist_menu.is_none());
+        let menu = |state: &State| state.track_menu.clone().expect("the menu opens");
+        let _ = handle(&mut state, Message::ShowCollection);
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert!(menu(&state).queued, "it is being analysed");
+        // (The line is greyed out, so it sends nothing; if it did, nothing would be added.)
+        let _ = handle(&mut state, Message::TrackMenuAnalyse);
+        assert_eq!(state.analysis_queue.as_ref().unwrap().position(), (1, 2));
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
+        assert!(!menu(&state).queued);
+        assert_eq!(
+            menu(&state).analyse_all,
+            1,
+            "of the three unanalysed tracks, one is not in the queue"
+        );
+        let _ = handle(&mut state, Message::TrackMenuAnalyse);
+        assert!(state.track_menu.is_none());
+        let queue = state.analysis_queue.as_ref().unwrap();
+        assert!(queue.contains(0));
+        assert_eq!(queue.position(), (1, 3));
+
+        // The same for a playlist: what is in the queue is not counted or put in again.
+        let _ = handle(&mut state, Message::PlaylistMenuOpen { playlist: 1, at });
+        let menu = state.playlist_menu.clone().expect("the menu opens");
+        assert_eq!(
+            (menu.tracks, menu.unanalysed),
+            (0, 0),
+            "Deep's two tracks (1 and 2) are both in the queue"
+        );
+        let _ = handle(&mut state, Message::PlaylistMenuClose);
+        let _ = handle(&mut state, Message::PlaylistMenuOpen { playlist: 2, at });
+        let menu = state.playlist_menu.clone().expect("the menu opens");
+        assert_eq!(
+            (menu.tracks, menu.unanalysed),
+            (0, 0),
+            "Pop's is track 0, which joined"
+        );
     }
 
     #[test]

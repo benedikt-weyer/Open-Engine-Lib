@@ -320,7 +320,7 @@ pub struct Strings {
     pub analysis_origin_none_tip: String,
     pub track_menu_analyse: String,
     pub track_menu_analyse_again: String,
-    pub track_menu_analysing: String,
+    pub track_menu_queued: String,
     pub toast_analysing: String,
     pub toast_stage_decoding: String,
     pub toast_stage_beats: String,

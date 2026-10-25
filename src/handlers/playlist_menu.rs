@@ -23,7 +23,13 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .tracks
                 .iter()
                 .map(|&index| &browser.library.tracks[index])
-                .filter(|track| !track.streaming)
+                .filter(|track| {
+                    !track.streaming
+                        && !state
+                            .analysis_queue
+                            .as_ref()
+                            .is_some_and(|queue| queue.contains(track.id))
+                })
                 .collect();
             let menu = playlist_menu::Menu {
                 playlist,
@@ -86,11 +92,9 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
 }
 
 /// Analyses the tracks of the playlist of `menu` one after the other: with `overwrite` all of
-/// them, replacing what they have, else the ones that have no analysis.
+/// them, replacing what they have, else the ones that have no analysis. While tracks are
+/// being analysed they join the queue (the ones in it already stay as they are).
 fn analyse(state: &mut State, menu: &playlist_menu::Menu, overwrite: bool) -> Task<Message> {
-    if state.locked() {
-        return Task::none();
-    }
     let LibraryState::Open(browser) = &state.library else {
         return Task::none();
     };

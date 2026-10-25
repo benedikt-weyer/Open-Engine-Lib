@@ -23,6 +23,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             // The row clicked is the one the menu is about.
             browser.selected = Some(row);
             state.playlist_menu = None;
+            let queue = state.analysis_queue.as_ref();
             let track = &browser.library.tracks[track];
             // An ordinary playlist can lose the track; "All tracks" and a smart playlist (its
             // tracks come from its rules) can't.
@@ -51,7 +52,8 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 confirm_library: false,
                 can_analyse: !track.streaming,
                 analysed: browser.analysis(track) != 0,
-                analyse_all: unanalysed(browser).len(),
+                queued: queue.is_some_and(|queue| queue.contains(track.id)),
+                analyse_all: unanalysed(browser, queue).len(),
             });
         }
         Message::TrackMenuClose => state.track_menu = None,
@@ -59,7 +61,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             let Some(menu) = state.track_menu.take() else {
                 return Task::none();
             };
-            if !menu.can_analyse || state.locked() {
+            if !menu.can_analyse || menu.queued {
                 return Task::none();
             }
             let LibraryState::Open(browser) = &state.library else {
@@ -70,13 +72,13 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::TrackMenuAnalyseAll => {
             state.track_menu = None;
-            if state.locked() {
-                return Task::none();
-            }
             let LibraryState::Open(browser) = &state.library else {
                 return Task::none();
             };
-            let (library, tracks) = (browser.library.path.clone(), unanalysed(browser));
+            let (library, tracks) = (
+                browser.library.path.clone(),
+                unanalysed(browser, state.analysis_queue.as_ref()),
+            );
             return state.start_analysis(library, tracks, false);
         }
         Message::AnalysisQueueStop => {
@@ -278,12 +280,19 @@ pub(crate) fn removal_finished(
 }
 
 /// The tracks of the list that is shown that have no analysis: files, not streaming tracks.
-fn unanalysed(browser: &Browser) -> Vec<analysis_queue::Entry> {
+fn unanalysed(
+    browser: &Browser,
+    queue: Option<&analysis_queue::Queue>,
+) -> Vec<analysis_queue::Entry> {
     browser
         .tracks()
         .iter()
         .map(|&index| &browser.library.tracks[index])
-        .filter(|track| !track.streaming && browser.analysis(track) == 0)
+        .filter(|track| {
+            !track.streaming
+                && browser.analysis(track) == 0
+                && !queue.is_some_and(|queue| queue.contains(track.id))
+        })
         .map(|track| (track.id, track.title.clone()))
         .collect()
 }
@@ -314,14 +323,32 @@ fn queue_summary(summary: &analysis_queue::Summary, strings: &i18n::Strings) -> 
 
 impl State {
     /// Starts analysing `tracks` (their ids and titles) of the open library, which is at
-    /// `library`, one after the other.
+    /// `library`, one after the other; if tracks are being analysed already, adds them to the
+    /// end of that queue, except those that are in it.
     pub(crate) fn start_analysis(
         &mut self,
         library: String,
         tracks: Vec<analysis_queue::Entry>,
         overwrite: bool,
     ) -> Task<Message> {
-        if tracks.is_empty() || self.locked() {
+        // (Something else that changes the library waits for the analyses to be over, but
+        // another analysis does not: the tracks join the queue.)
+        if tracks.is_empty() || self.saving.is_some() || self.reloading {
+            return Task::none();
+        }
+        if self.analysing() {
+            if let Some(queue) = &mut self.analysis_queue
+                && queue.library == library
+                && queue.add(tracks, overwrite) > 0
+                && let Some(toast::Toast::Analysing {
+                    position,
+                    stoppable,
+                    ..
+                }) = &mut self.toast
+            {
+                *position = Some(queue.position());
+                *stoppable = queue.has_next();
+            }
             return Task::none();
         }
         self.analysis_queue = Some(analysis_queue::Queue::new(library, tracks, overwrite));
