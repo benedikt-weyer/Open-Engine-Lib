@@ -1,4 +1,4 @@
-//! Moving playlists in the sidebar's tree by dragging them: what a drop on a row means, the
+//! Moving playlists in the sidebar's tree, and tracks in a playlist's list, by dragging them: what a drop on a row means, the
 //! state of a drag, and the wrapper of a row that reports where the pointer is on it and
 //! draws the line that shows where the playlist would go.
 //!
@@ -24,6 +24,9 @@ pub const CHECK_EVERY: Duration = Duration::from_millis(100);
 const THRESHOLD: f32 = 6.0;
 /// The share of a row's height, at the top and at the bottom, that means before and after it.
 const EDGE: f32 = 0.3;
+/// How near the edge of what the rows are scrolled in the pointer has to be for the list to
+/// scroll.
+const SCROLL_EDGE: f32 = 28.0;
 /// How thick the line is.
 const LINE: f32 = 2.0;
 /// The size of the dot at the start of the line.
@@ -52,6 +55,15 @@ impl Zone {
     }
 }
 
+/// Where the pointer is on a row, and whether it is near the top or the bottom of what the
+/// rows are scrolled in (`-1` and `1`; `0` is not near either), which is when the list
+/// should scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hover {
+    pub zone: Zone,
+    pub edge: i8,
+}
+
 /// A row and where on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
@@ -59,26 +71,30 @@ pub struct Target {
     pub zone: Zone,
 }
 
-/// A playlist being dragged (or that the button went down on; it is a drag once the pointer
-/// has moved).
+/// A row being dragged (or that the button went down on; it is a drag once the pointer has
+/// moved).
 #[derive(Debug, Clone)]
 pub struct Drag {
-    /// The playlist, as an index into the library's playlists.
-    pub playlist: usize,
+    /// The row: a playlist as an index into the library's playlists, or a track as a row of
+    /// the shown list.
+    pub dragged: usize,
     start: Option<Point>,
     pub active: bool,
     pub over: Option<Target>,
+    /// Whether the list the pointer is in should scroll (`-1` up, `1` down, `0` not).
+    pub edge: i8,
     /// Since when the pointer has been over the row it is over.
     pub over_since: Instant,
 }
 
 impl Drag {
-    pub fn pressed(playlist: usize) -> Self {
+    pub fn pressed(dragged: usize) -> Self {
         Self {
-            playlist,
+            dragged,
             start: None,
             active: false,
             over: None,
+            edge: 0,
             over_since: Instant::now(),
         }
     }
@@ -91,16 +107,20 @@ impl Drag {
         }
     }
 
-    /// The pointer is over `zone` of `row` now (`None`: no longer over it).
-    pub fn hover(&mut self, row: usize, zone: Option<Zone>) {
-        match zone {
-            Some(zone) => {
+    /// The pointer is over `hover` of `row` now (`None`: no longer over it).
+    pub fn hover(&mut self, row: usize, hover: Option<Hover>) {
+        match hover {
+            Some(Hover { zone, edge }) => {
                 if self.over.map(|over| over.row) != Some(row) {
                     self.over_since = Instant::now();
                 }
                 self.over = Some(Target { row, zone });
+                self.edge = edge;
             }
-            None if self.over.is_some_and(|over| over.row == row) => self.over = None,
+            None if self.over.is_some_and(|over| over.row == row) => {
+                self.over = None;
+                self.edge = 0;
+            }
             None => {}
         }
     }
@@ -222,6 +242,17 @@ pub fn place(
     (!stays).then_some(place)
 }
 
+/// Where in a list of tracks the dragged one goes: the row it is put in front of (the length
+/// of the list for the end of it), unless that leaves it where it is.
+pub fn insertion(drag: &Drag) -> Option<usize> {
+    let over = drag.over.filter(|_| drag.active)?;
+    let at = match over.zone {
+        Zone::Before => over.row,
+        Zone::After | Zone::Inside => over.row + 1,
+    };
+    (at != drag.dragged && at != drag.dragged + 1).then_some(at)
+}
+
 /// Which edge of its row the line is on, and how many levels it is indented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Line {
@@ -260,9 +291,12 @@ pub fn line(
 pub struct Row<Message> {
     /// The button going down on it starts a drag.
     pub press: Option<Message>,
-    /// The pointer is over this zone of it (`None`: it left): sent while a drag is going on,
-    /// by rows that a playlist can be dropped on.
-    pub over: Option<Box<dyn Fn(Option<Zone>) -> Message>>,
+    /// The pointer is over it like this (`None`: it left): sent while a drag is going on,
+    /// by rows that something can be dropped on.
+    pub over: Option<Box<dyn Fn(Option<Hover>) -> Message>>,
+    /// The row has two zones, its upper and its lower half (a track in a list), and not
+    /// three.
+    pub halves: bool,
     /// A drag is going on.
     pub dragging: bool,
     /// The line to draw, and how far in from the row's left edge it starts.
@@ -272,7 +306,7 @@ pub struct Row<Message> {
 /// What the wrapper remembers between events.
 #[derive(Default)]
 struct State {
-    zone: Option<Zone>,
+    hover: Option<Hover>,
 }
 
 pub struct DragRow<'a, Message> {
@@ -369,16 +403,35 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for DragRow<'_, Message> {
 
         let state = tree.state.downcast_mut::<State>();
         let (true, Some(over)) = (self.row.dragging, &self.row.over) else {
-            state.zone = None;
+            state.hover = None;
             return;
         };
-        if let Event::Mouse(mouse::Event::CursorMoved { .. }) = event {
-            let zone = cursor
-                .position_in(bounds)
-                .map(|at| Zone::at(at.y, bounds.height));
-            if state.zone != zone {
-                state.zone = zone;
-                shell.publish(over(zone));
+        // (Also when the list was scrolled under a pointer that did not move.)
+        if let Event::Mouse(mouse::Event::CursorMoved { .. })
+        | Event::Window(iced::window::Event::RedrawRequested(_)) = event
+        {
+            let hover = cursor.position_in(bounds).map(|at| {
+                let zone = if !self.row.halves {
+                    Zone::at(at.y, bounds.height)
+                } else if at.y < bounds.height / 2.0 {
+                    Zone::Before
+                } else {
+                    Zone::After
+                };
+                // Where the pointer is among what the rows are scrolled in.
+                let y = at.y + bounds.y;
+                let edge = if y < viewport.y + SCROLL_EDGE {
+                    -1
+                } else if y > viewport.y + viewport.height - SCROLL_EDGE {
+                    1
+                } else {
+                    0
+                };
+                Hover { zone, edge }
+            });
+            if state.hover != hover {
+                state.hover = hover;
+                shell.publish(over(hover));
             }
         }
     }
@@ -662,6 +715,26 @@ mod tests {
     }
 
     #[test]
+    fn a_track_goes_in_front_of_the_row_below_the_line_unless_that_is_where_it_is() {
+        let mut drag = Drag::pressed(3);
+        drag.moved(Point::new(0.0, 0.0));
+        drag.moved(Point::new(0.0, 50.0));
+        let mut over = |row, zone| {
+            drag.hover(row, Some(Hover { zone, edge: 0 }));
+            insertion(&drag)
+        };
+        assert_eq!(over(1, Zone::Before), Some(1));
+        assert_eq!(over(1, Zone::After), Some(2));
+        assert_eq!(over(8, Zone::After), Some(9), "the end of a list of nine");
+        // In front of itself, and behind the one in front of it, is where it is.
+        assert_eq!(over(3, Zone::Before), None);
+        assert_eq!(over(3, Zone::After), None);
+        assert_eq!(over(2, Zone::After), None);
+        assert_eq!(over(4, Zone::Before), None);
+        assert_eq!(over(4, Zone::After), Some(5));
+    }
+
+    #[test]
     fn zones_are_the_top_the_middle_and_the_bottom_of_a_row() {
         assert_eq!(Zone::at(1.0, 32.0), Zone::Before);
         assert_eq!(Zone::at(16.0, 32.0), Zone::Inside);
@@ -679,14 +752,26 @@ mod tests {
         assert!(drag.active);
 
         let tree = tree();
-        drag.hover(0, Some(Zone::Inside));
+        drag.hover(
+            0,
+            Some(Hover {
+                zone: Zone::Inside,
+                edge: 0,
+            }),
+        );
         let soon = drag.over_since + Duration::from_millis(100);
         let later = drag.over_since + OPEN_AFTER;
         assert_eq!(drag.to_open(&tree, |_| false, soon), None);
         assert_eq!(drag.to_open(&tree, |_| false, later), Some(0));
         assert_eq!(drag.to_open(&tree, |_| true, later), None, "already open");
         // A leaf is not opened, and leaving the row ends the wait.
-        drag.hover(4, Some(Zone::Inside));
+        drag.hover(
+            4,
+            Some(Hover {
+                zone: Zone::Inside,
+                edge: 0,
+            }),
+        );
         assert_eq!(
             drag.to_open(&tree, |_| false, drag.over_since + OPEN_AFTER),
             None

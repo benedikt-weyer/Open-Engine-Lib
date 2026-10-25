@@ -15,4 +15,5 @@ pub(super) mod playlists;
 pub(super) mod repair;
 pub(super) mod settings;
 pub(super) mod sync;
+pub(super) mod track_drag;
 pub(super) mod track_menu;

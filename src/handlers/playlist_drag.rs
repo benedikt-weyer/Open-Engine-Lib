@@ -1,7 +1,7 @@
 //! Moving a playlist of an Engine library to another place in the sidebar's tree by dragging
 //! it.
 
-use playlist_drag::Drag;
+use playlist_drag::{Drag, Hover};
 
 use crate::*;
 
@@ -41,7 +41,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::PlaylistDragOver(row, zone) => {
             if let Some(drag) = state.playlist_drag.as_mut().filter(|drag| drag.active) {
-                drag.hover(row, zone);
+                drag.hover(row, zone.map(|zone| Hover { zone, edge: 0 }));
             }
         }
         Message::PlaylistDragTick => {
@@ -77,18 +77,18 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             let Some(place) = playlist_drag::place(
                 &browser.library.playlists,
                 |row| browser.is_expanded(row),
-                drag.playlist,
+                drag.dragged,
                 over,
             ) else {
                 return Task::none();
             };
             state.moving_playlist = true;
-            let from = browser.library.playlist_span(drag.playlist);
+            let from = browser.library.playlist_span(drag.dragged);
             return Task::perform(
                 backend::move_playlist(
                     backend,
                     Arc::clone(&browser.library),
-                    drag.playlist,
+                    drag.dragged,
                     place.parent,
                     place.before,
                 ),

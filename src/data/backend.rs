@@ -28,16 +28,17 @@ use open_engine_api::v1::{
     GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest,
     ImportFolderRequest, ImportFolderResponse, LearnRequest, ListPlaylistsRequest,
     ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse, MovePlaylistRequest,
-    MoveScratchRequest, NameOrder, NextRequest, OpenLibraryRequest, OpenLocalFolderRequest,
-    OperationProgress, PlayRequest, PlaybackStatus, PreviewFolderImportRequest, PreviousRequest,
-    PullFromSourceRequest, PullFromSourceResponse, RemoveStreamingTracksRequest,
-    RemoveStreamingTracksResponse, RemoveTrackFromPlaylistRequest, RemoveTracksRequest,
-    RemoveTracksResponse, RenamePlaylistRequest, RenameProfileRequest, RepairLibraryRequest,
-    RepairLibraryResponse, ReplaceOriginPrefixRequest, ReplaceOriginPrefixResponse,
-    SaveLibraryAsRequest, SeekRequest, SelectProfileRequest, SetControllerEnabledRequest,
-    SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules, SoundSwitchState, StopRequest,
-    SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
-    TogglePauseRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
+    MoveScratchRequest, MoveTrackInPlaylistRequest, NameOrder, NextRequest, OpenLibraryRequest,
+    OpenLocalFolderRequest, OperationProgress, PlayRequest, PlaybackStatus,
+    PreviewFolderImportRequest, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
+    RemoveStreamingTracksRequest, RemoveStreamingTracksResponse, RemoveTrackFromPlaylistRequest,
+    RemoveTracksRequest, RemoveTracksResponse, RenamePlaylistRequest, RenameProfileRequest,
+    RepairLibraryRequest, RepairLibraryResponse, ReplaceOriginPrefixRequest,
+    ReplaceOriginPrefixResponse, SaveLibraryAsRequest, SeekRequest, SelectProfileRequest,
+    SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRules,
+    SoundSwitchState, StopRequest, SyncToLibraryRequest, SyncToLibraryResponse,
+    SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
+    WatchControllerRequest,
 };
 use open_engine_api::{
     API_VERSION, AUTHORIZATION, LIBRARY_SLOT, LISTENING_PREFIX, SLOT_ENGINE, SLOT_FOLDER, TOKEN_ENV,
@@ -532,6 +533,28 @@ pub async fn move_playlist(
             playlist_id: playlist as u32,
             parent_id: parent.map(|parent| parent as u32),
             before_id: before.map(|before| before as u32),
+        })
+        .await
+        .map_err(describe)?
+        .into_inner();
+    Ok(playlists_edited_from(edited, &library))
+}
+
+/// Moves the track `track` of the ordinary playlist `playlist` in front of the track `before`
+/// (both are the tracks' ids), or to the end of the playlist if there is none.
+pub async fn move_track_in_playlist(
+    mut backend: Backend,
+    library: Arc<Library>,
+    playlist: usize,
+    track: u32,
+    before: Option<u32>,
+) -> Result<PlaylistsEdited, String> {
+    let edited = backend
+        .library
+        .move_track_in_playlist(MoveTrackInPlaylistRequest {
+            playlist_id: playlist as u32,
+            track_id: track,
+            before_track_id: before,
         })
         .await
         .map_err(describe)?

@@ -419,6 +419,24 @@ impl LibraryService for Service {
         .await
     }
 
+    async fn move_track_in_playlist(
+        &self,
+        request: Request<api::MoveTrackInPlaylistRequest>,
+    ) -> Result<Response<api::PlaylistsEdited>, Status> {
+        let library = self.engine_library()?;
+        let request = request.into_inner();
+        playlists_edited(library, move |library| {
+            library
+                .move_track_in_playlist(
+                    request.playlist_id as usize,
+                    request.track_id as usize,
+                    request.before_track_id.map(|id| id as usize),
+                )
+                .map(|()| None)
+        })
+        .await
+    }
+
     async fn move_playlist(
         &self,
         request: Request<api::MovePlaylistRequest>,

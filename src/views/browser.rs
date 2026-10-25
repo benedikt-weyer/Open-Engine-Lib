@@ -351,6 +351,20 @@ impl Browser {
         self.sort
     }
 
+    /// Whether the tracks of the shown list can be dragged to another place in it: it is an
+    /// ordinary playlist of an Engine library, shown in its own order.
+    pub fn reorderable(&self) -> bool {
+        self.library.is_engine() && self.numbered() && self.sort.is_none()
+    }
+
+    /// Scrolls the track list by `delta` (towards its end if positive), not past either end.
+    pub fn scroll_by(&mut self, delta: f32) -> iced::Task<Message> {
+        let end = (self.tracks().len() as f32 * ROW_HEIGHT - self.viewport_height).max(0.0);
+        let y = (self.scroll + delta).clamp(0.0, end);
+        self.scroll = y;
+        scroll_to(y)
+    }
+
     /// What `track` is compared by when the list is sorted by `key`. Nothing sorts last,
     /// whichever way round.
     fn value(&self, key: SortKey, track: &Track, position: usize) -> Option<Value> {
@@ -625,7 +639,7 @@ pub fn playlists<'a>(
         }
 
         let selected = browser.source == Source::Playlist(index);
-        let lifted = drag.is_some_and(|drag| drag.active && drag.playlist == index);
+        let lifted = drag.is_some_and(|drag| drag.active && drag.dragged == index);
         let mut line = row![
             Space::new().width(playlist.depth as f32 * INDENT),
             toggle,
@@ -681,7 +695,7 @@ pub fn playlists<'a>(
                     playlist_drag::line(
                         &browser.library.playlists,
                         |row| browser.is_expanded(row),
-                        drag.playlist,
+                        drag.dragged,
                         over,
                     )
                 })
@@ -691,9 +705,12 @@ pub fn playlists<'a>(
                 playlist_drag::Row {
                     press: (!playlist.is_smart).then_some(Message::PlaylistDragPress(index)),
                     over: (!playlist.is_smart).then(|| {
-                        Box::new(move |zone| Message::PlaylistDragOver(index, zone))
-                            as Box<dyn Fn(Option<playlist_drag::Zone>) -> Message>
+                        Box::new(move |hover: Option<playlist_drag::Hover>| {
+                            Message::PlaylistDragOver(index, hover.map(|hover| hover.zone))
+                        })
+                            as Box<dyn Fn(Option<playlist_drag::Hover>) -> Message>
                     }),
+                    halves: false,
                     dragging,
                     line: line_to_draw,
                 },
@@ -1003,6 +1020,7 @@ fn content_width(layout: Layout<'_>, numbered: bool) -> f32 {
 /// The tracks of the shown list. `playing` is the row that is playing, if it is in this list.
 pub fn tracks<'a>(
     browser: &'a Browser,
+    drag: Option<&'a Drag>,
     playing: Option<usize>,
     covers: &'a Covers,
     reachable: &'a Reachability,
@@ -1063,6 +1081,7 @@ pub fn tracks<'a>(
             end: last,
         } = browser.visible_rows();
 
+        let reorderable = browser.reorderable();
         let mut body = column![Space::new().height(first as f32 * ROW_HEIGHT)];
         for (row_index, &track_index) in list.iter().enumerate().take(last).skip(first) {
             let track = &browser.library.tracks[track_index];
@@ -1071,6 +1090,22 @@ pub fn tracks<'a>(
                 row_index,
                 RowState {
                     selected: browser.selected == Some(row_index),
+                    drag: reorderable.then(|| RowDrag {
+                        dragging: drag.is_some_and(|drag| drag.active),
+                        line: drag
+                            .and_then(|drag| {
+                                let over = drag.over?;
+                                (over.row == row_index && playlist_drag::insertion(drag).is_some())
+                                    .then_some(over.zone)
+                            })
+                            .map(|zone| {
+                                let line = playlist_drag::Line {
+                                    bottom: zone != playlist_drag::Zone::Before,
+                                    level: 0,
+                                };
+                                (line, 0.0)
+                            }),
+                    }),
                     origin: browser.origin(track),
                     location_reachable: reachable.get(&track.location),
                     origin_reachable: browser
@@ -1392,9 +1427,19 @@ impl canvas::Program<Message> for WarningIcon {
     }
 }
 
+/// What a row is told about a drag of tracks.
+struct RowDrag {
+    /// A track is being dragged.
+    dragging: bool,
+    /// The line to draw on the row.
+    line: Option<(playlist_drag::Line, f32)>,
+}
+
 /// What a row shows besides its track.
 struct RowState<'a> {
     selected: bool,
+    /// What the row is for a drag, if the track can be dragged.
+    drag: Option<RowDrag>,
     /// Where the track's file was when its origin was saved.
     origin: Option<&'a str>,
     /// Whether the location and the origin could be reached, if that is known.
@@ -1428,6 +1473,7 @@ fn track_row<'a>(
 ) -> Element<'a, Message> {
     let RowState {
         selected,
+        drag,
         origin,
         location_reachable,
         origin_reachable,
@@ -1499,7 +1545,7 @@ fn track_row<'a>(
         plain_gap,
     );
 
-    let row = mouse_area(
+    let mut row: Element<'a, Message> = mouse_area(
         container(cells)
             .height(ROW_HEIGHT)
             .width(Fill)
@@ -1521,11 +1567,28 @@ fn track_row<'a>(
             }),
     )
     .on_press(Message::SelectTrack(row_index))
-    .on_double_click(Message::PlayTrack(row_index));
+    .on_double_click(Message::PlayTrack(row_index))
+    .into();
+    // The tracks of a playlist can be dragged to another place in it.
+    if let Some(RowDrag { dragging, line }) = drag {
+        row = playlist_drag::drag_row(
+            row,
+            playlist_drag::Row {
+                press: Some(Message::TrackDragPress(row_index)),
+                over: Some(Box::new(move |hover| {
+                    Message::TrackDragOver(row_index, hover)
+                })),
+                halves: true,
+                dragging,
+                line,
+            },
+        )
+        .into();
+    }
     // What an Engine library's tracks can be taken out of is in the context menu; a folder
     // of music has nothing to change.
     if kind == Kind::Folder {
-        row.into()
+        row
     } else {
         right_click(row, move |at| Message::TrackMenuOpen { row: row_index, at }).into()
     }

@@ -53,6 +53,9 @@ const SCRATCH_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How long after a library opens to wait with scrolling its track list to the right place.
 const REVEAL_DELAY: Duration = Duration::from_millis(150);
 /// How often to look for USB drives that were plugged in or removed.
+/// How often the track list scrolls while a track is dragged to its edge, and by how much.
+const TRACK_SCROLL_EVERY: Duration = Duration::from_millis(30);
+const TRACK_SCROLL_STEP: f32 = 14.0;
 const DRIVE_SCAN_INTERVAL: Duration = Duration::from_secs(3);
 
 fn main() -> iced::Result {
@@ -119,6 +122,10 @@ struct State {
     parked: Option<Browser>,
     /// A playlist of the tree being dragged to another place.
     playlist_drag: Option<playlist_drag::Drag>,
+    /// A track of the shown playlist being dragged to another place in it.
+    track_drag: Option<playlist_drag::Drag>,
+    /// A track is being moved by the backend.
+    moving_track: bool,
     /// A playlist is being moved by the backend.
     moving_playlist: bool,
     recents: Recents,
@@ -417,6 +424,17 @@ pub enum Message {
         from: std::ops::Range<usize>,
         result: Result<backend::PlaylistsEdited, String>,
     },
+    /// The same for a track of the shown playlist: `row` is where it is after it was moved.
+    TrackDragPress(usize),
+    TrackDragMoved(iced::Point),
+    TrackDragOver(usize, Option<playlist_drag::Hover>),
+    TrackDragEnd,
+    TrackDragCancel,
+    TrackDragTick,
+    TrackMoved {
+        row: usize,
+        result: Result<backend::PlaylistsEdited, String>,
+    },
 
     /// A File menu entry was picked.
     MenuSelected(MenuItem),
@@ -571,6 +589,8 @@ impl State {
             parked: None,
             playlist_drag: None,
             moving_playlist: false,
+            track_drag: None,
+            moving_track: false,
             recents: Recents::discover(),
             local_folders: LocalFolders::discover(),
             drives: Vec::new(),
@@ -672,6 +692,28 @@ impl State {
         } else {
             Subscription::none()
         };
+        // The same while a track is dragged; the list scrolls while the pointer is at its edge.
+        let dragging_track = if self.track_drag.is_some() {
+            let events = iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::TrackDragMoved(position))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::TrackDragEnd),
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::TrackDragCancel),
+                _ => None,
+            });
+            Subscription::batch([
+                events,
+                iced::time::every(TRACK_SCROLL_EVERY).map(|_| Message::TrackDragTick),
+            ])
+        } else {
+            Subscription::none()
+        };
         // While a column is being resized, follow the pointer wherever it goes (it leaves
         // the thin handle at once) and notice when the button is let go.
         let resizing = if self.resize.is_some() {
@@ -704,6 +746,7 @@ impl State {
             poll,
             resizing,
             dragging,
+            dragging_track,
             progress,
             toast_clock,
             iced::time::every(DRIVE_SCAN_INTERVAL).map(|_| Message::ScanDrives),
@@ -735,6 +778,7 @@ impl State {
     /// from it: the ids belong to one library.
     fn forget_shown_library(&mut self) {
         self.playlist_drag = None;
+        self.track_drag = None;
         self.reset_playback();
         self.covers.clear();
         self.reachable.clear();
@@ -1499,6 +1543,13 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::PlaylistDragPress(..)
         | Message::PlaylistDragTick
         | Message::PlaylistMoved { .. } => handlers::playlist_drag::handle(state, message),
+        Message::TrackDragCancel
+        | Message::TrackDragEnd
+        | Message::TrackDragMoved(..)
+        | Message::TrackDragOver(..)
+        | Message::TrackDragPress(..)
+        | Message::TrackDragTick
+        | Message::TrackMoved { .. } => handlers::track_drag::handle(state, message),
         Message::LibrarySyncAdd
         | Message::LibrarySyncAdded(..)
         | Message::LibrarySyncBack
@@ -1967,6 +2018,7 @@ fn open_library<'a>(
         header,
         browser::tracks(
             browser,
+            state.track_drag.as_ref(),
             state.playing_row(browser),
             &state.covers,
             &state.reachable,
@@ -2184,6 +2236,144 @@ mod tests {
         state
     }
 
+    /// An Engine library with one playlist of 3000 tracks, shown.
+    fn state_with_a_long_playlist() -> State {
+        let mut state = state();
+        state.library = LibraryState::Open(Browser::new(Arc::new(Library::new(
+            "/media/DRIVE/Engine Library".into(),
+            "/cache".into(),
+            (0..3000)
+                .map(|i| Track {
+                    path: format!("../Music/{i}.flac"),
+                    ..track(i % 3)
+                })
+                .collect(),
+            vec![playlist("Set", 0, false, &(0..3000).collect::<Vec<_>>())],
+        ))));
+        let _ = handle(&mut state, Message::ShowPlaylist(0));
+        state
+    }
+
+    #[test]
+    fn the_rows_of_a_playlist_can_be_dragged_and_say_where_the_pointer_is_on_them() {
+        use iced::mouse::{Button, Event};
+        let mut state = state_with_a_long_playlist();
+        let at = iced::Point::new(600.0, 300.0);
+        let moved = iced::Event::Mouse(Event::CursorMoved { position: at });
+        let down = iced::Event::Mouse(Event::ButtonPressed(Button::Left));
+
+        let (messages, _) = press(&state, Default::default(), &[moved.clone(), down], at);
+        let pressed: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::TrackDragPress(row) => Some(*row),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pressed.len(), 1, "{messages:?}");
+        let row = pressed[0];
+
+        // Once it is a drag, the row under the pointer says which half the pointer is on.
+        let _ = handle(&mut state, Message::TrackDragPress(row));
+        let _ = handle(
+            &mut state,
+            Message::TrackDragMoved(iced::Point::new(0.0, 0.0)),
+        );
+        let _ = handle(
+            &mut state,
+            Message::TrackDragMoved(iced::Point::new(50.0, 90.0)),
+        );
+        let drag = state.track_drag.clone().expect("a drag");
+        assert!(drag.active);
+        let (messages, _) = press(&state, Default::default(), &[moved], at);
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, Message::TrackDragOver(_, Some(_)))),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_track_is_dragged_only_where_the_list_is_in_its_own_order() {
+        // All tracks, a smart playlist's tracks and a sorted list have no order of their own.
+        let mut state = state_with_a_long_playlist();
+        let LibraryState::Open(browser) = &mut state.library else {
+            unreachable!()
+        };
+        browser.show(Source::Collection);
+        let _ = handle(&mut state, Message::TrackDragPress(1));
+        assert!(state.track_drag.is_none());
+        let _ = handle(&mut state, Message::ShowPlaylist(0));
+        let _ = handle(
+            &mut state,
+            Message::SortBy(browser::SortKey::Column(columns::Column::Title)),
+        );
+        let _ = handle(&mut state, Message::TrackDragPress(1));
+        assert!(state.track_drag.is_none(), "sorted");
+        let _ = handle(
+            &mut state,
+            Message::SortBy(browser::SortKey::Column(columns::Column::Title)),
+        );
+        let _ = handle(
+            &mut state,
+            Message::SortBy(browser::SortKey::Column(columns::Column::Title)),
+        );
+        let _ = handle(&mut state, Message::TrackDragPress(1));
+        assert!(state.track_drag.is_some(), "back in the playlist's order");
+        // A folder of music has nothing to reorder.
+        let mut folder = state_with_a_folder();
+        let _ = handle(&mut folder, Message::ShowPlaylist(1));
+        let _ = handle(&mut folder, Message::TrackDragPress(0));
+        assert!(folder.track_drag.is_none());
+    }
+
+    #[test]
+    fn a_dragged_track_ends_where_it_was_let_go_and_the_moved_one_stays_selected() {
+        let mut state = state_with_a_long_playlist();
+        let _ = handle(&mut state, Message::TrackDragPress(5));
+        let _ = handle(
+            &mut state,
+            Message::TrackDragMoved(iced::Point::new(0.0, 0.0)),
+        );
+        let _ = handle(
+            &mut state,
+            Message::TrackDragMoved(iced::Point::new(0.0, 80.0)),
+        );
+        let hover =
+            |row, zone| Message::TrackDragOver(row, Some(playlist_drag::Hover { zone, edge: 1 }));
+        let _ = handle(&mut state, hover(9, playlist_drag::Zone::After));
+        let drag = state.track_drag.as_ref().unwrap();
+        assert_eq!(playlist_drag::insertion(drag), Some(10));
+        assert_eq!(drag.edge, 1, "at the bottom edge the list scrolls");
+        // (There is no backend here to move anything: letting go ends the drag.)
+        let _ = handle(&mut state, Message::TrackDragEnd);
+        assert!(state.track_drag.is_none());
+
+        let _ = handle(
+            &mut state,
+            Message::TrackMoved {
+                row: 9,
+                result: Ok(backend::PlaylistsEdited {
+                    playlists: vec![playlist("Set", 0, false, &(0..3000).collect::<Vec<_>>())],
+                    playlist: None,
+                }),
+            },
+        );
+        let LibraryState::Open(browser) = &state.library else {
+            unreachable!()
+        };
+        assert_eq!(browser.selected, Some(9));
+        let _ = handle(
+            &mut state,
+            Message::TrackMoved {
+                row: 9,
+                result: Err("no".into()),
+            },
+        );
+        assert_eq!(state.backend_error.as_deref(), Some("no"));
+    }
+
     #[test]
     fn the_context_menu_stays_open_in_a_list_with_a_scrollbar() {
         use iced::mouse::{Button, Event};
@@ -2274,6 +2464,8 @@ mod tests {
             parked: None,
             playlist_drag: None,
             moving_playlist: false,
+            track_drag: None,
+            moving_track: false,
             library: LibraryState::Open(Browser::new(Arc::new(library))),
             recents: Recents::load(temp.join("recent.toml")),
             local_folders: LocalFolders::load(temp.join("local-folders.toml")),

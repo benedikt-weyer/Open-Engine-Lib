@@ -928,6 +928,87 @@ impl Library {
         Ok(())
     }
 
+    /// Moves the track `track` of the ordinary playlist at `index` in `playlists` in front of
+    /// the track `before` (both indices into `Library::tracks`, both in the playlist), or to
+    /// its end if there is none. Only the order changes: every track keeps its entry.
+    pub fn move_track_in_playlist(
+        &self,
+        index: usize,
+        track: usize,
+        before: Option<usize>,
+    ) -> Result<(), EditError> {
+        let list = {
+            let playlists = self.playlists();
+            let playlist = playlists.get(index).ok_or(EditError::NoSuchPlaylist)?;
+            playlist.db_id.ok_or(EditError::IsSmart)?
+        };
+        if track >= self.tracks.len() || before.is_some_and(|before| before >= self.tracks.len()) {
+            return Err(EditError::NoSuchTrack);
+        }
+        if before == Some(track) {
+            return Ok(());
+        }
+        cache::mark_edited(&self.cache).map_err(EditError::Cache)?;
+        let connection = self.connection.lock().expect("database lock");
+        let transaction = connection.unchecked_transaction()?;
+
+        // The entries, each with the track it names (as when the playlist was read).
+        let mut next: HashMap<i64, i64> = HashMap::new();
+        let mut track_of: HashMap<i64, usize> = HashMap::new();
+        {
+            let mut statement = transaction.prepare(
+                "SELECT id, nextEntityId, trackId, COALESCE(databaseUuid, '') \
+                 FROM PlaylistEntity WHERE listId = ?1",
+            )?;
+            let mut rows = statement.query([list])?;
+            while let Some(row) = rows.next()? {
+                let (id, after, entry): (i64, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
+                let uuid: String = row.get(3)?;
+                let resolved = if uuid.is_empty() {
+                    self.by_id.get(&entry)
+                } else {
+                    self.by_origin.get(&(uuid, entry))
+                };
+                next.insert(id, after);
+                if let Some(&resolved) = resolved {
+                    track_of.insert(id, resolved);
+                }
+            }
+        }
+        let links: Vec<(i64, i64)> = next.iter().map(|(&id, &after)| (id, after)).collect();
+        let mut order = chain_order(&links);
+        let entry_of = |order: &[i64], wanted: usize| {
+            order
+                .iter()
+                .position(|id| track_of.get(id) == Some(&wanted))
+                .ok_or(EditError::NoSuchTrack)
+        };
+        let moved = order.remove(entry_of(&order, track)?);
+        let at = match before {
+            Some(before) => entry_of(&order, before)?,
+            None => order.len(),
+        };
+        order.insert(at, moved);
+
+        for (position, id) in order.iter().enumerate() {
+            let after = order.get(position + 1).copied().unwrap_or(0);
+            if next[id] != after {
+                transaction.execute(
+                    "UPDATE PlaylistEntity SET nextEntityId = ?1 WHERE id = ?2",
+                    (after, id),
+                )?;
+            }
+        }
+        transaction.execute(
+            "UPDATE Playlist SET lastEditTime = datetime('now') WHERE id = ?1",
+            [list],
+        )?;
+        transaction.commit()?;
+
+        self.reload_playlists(&connection)?;
+        Ok(())
+    }
+
     /// Makes the tracks of the playlist at `index` in `playlists` exactly `tracks` (indices
     /// into `Library::tracks`), in that order. Tracks that are already in it keep their
     /// entries. Tracks without a recorded origin can't be listed and are left out.
@@ -3272,6 +3353,59 @@ mod tests {
         assert!(matches!(
             library.set_playlist_tracks(99, &[]),
             Err(EditError::NoSuchPlaylist)
+        ));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_track_moves_within_a_playlist_and_keeps_its_entry() {
+        let (library, cache) = engine_library("playlist-track-move");
+        library
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "ALTER TABLE PlaylistEntity ADD COLUMN membershipReference INTEGER",
+                [],
+            )
+            .unwrap();
+        let beta = index_of(&library, "Beta");
+        assert_eq!(library.playlists()[beta].tracks, [2, 0, 1]);
+        let entries = |library: &Library| -> i64 {
+            library
+                .connection
+                .lock()
+                .unwrap()
+                .query_row("SELECT count(*) FROM PlaylistEntity", [], |row| row.get(0))
+                .unwrap()
+        };
+        let before = entries(&library);
+
+        // The last one to the front, the first one to the end, one before another.
+        library.move_track_in_playlist(beta, 1, Some(2)).unwrap();
+        assert_eq!(library.playlists()[beta].tracks, [1, 2, 0]);
+        library.move_track_in_playlist(beta, 1, None).unwrap();
+        assert_eq!(library.playlists()[beta].tracks, [2, 0, 1]);
+        library.move_track_in_playlist(beta, 2, None).unwrap();
+        assert_eq!(library.playlists()[beta].tracks, [0, 1, 2]);
+        library.move_track_in_playlist(beta, 2, Some(1)).unwrap();
+        assert_eq!(library.playlists()[beta].tracks, [0, 2, 1]);
+        // In front of itself is where it is.
+        library.move_track_in_playlist(beta, 2, Some(2)).unwrap();
+        assert_eq!(library.playlists()[beta].tracks, [0, 2, 1]);
+        assert_eq!(entries(&library), before, "no entry was made or lost");
+
+        assert!(matches!(
+            library.move_track_in_playlist(beta, 9, None),
+            Err(EditError::NoSuchTrack)
+        ));
+        assert!(matches!(
+            library.move_track_in_playlist(99, 0, None),
+            Err(EditError::NoSuchPlaylist)
+        ));
+        assert!(matches!(
+            library.move_track_in_playlist(index_of(&library, "Before"), 0, None),
+            Err(EditError::IsSmart)
         ));
         let _ = std::fs::remove_dir_all(&cache);
     }

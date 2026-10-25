@@ -111,6 +111,14 @@ service LibraryService {
   // the playlist or in it, or a `before_id` that is not the parent's, ALREADY_EXISTS if
   // the new parent has a playlist with the title, INTERNAL if the database can't be written.
   rpc MovePlaylist(MovePlaylistRequest) returns (PlaylistsEdited);
+  // Moves a track within an ordinary playlist of the working copy: in front of the track
+  // `before_track_id`, or to the end if that is unset. Only the order changes. Playlist ids
+  // stay the same; the answer has the new list of playlists.
+  // Errors: FAILED_PRECONDITION if no library is open or it is a folder of music,
+  // NOT_FOUND for an unknown playlist or track id or a track that is not in the playlist,
+  // INVALID_ARGUMENT for a smart playlist (its tracks come from its rules), INTERNAL if the
+  // database can't be written.
+  rpc MoveTrackInPlaylist(MoveTrackInPlaylistRequest) returns (PlaylistsEdited);
   // Saves the location of each track's file as its origin in Open Engine Lib's own
   // database, for the tracks that have no origin saved yet (one that is saved is kept).
   // Tracks without a file here (streaming) or that don't say where they came from are
@@ -369,6 +377,12 @@ message MovePlaylistRequest {
   uint32 playlist_id = 1;
   optional uint32 parent_id = 2;
   optional uint32 before_id = 3;
+}
+message MoveTrackInPlaylistRequest {
+  // As in `DeletePlaylist`: an index into the playlists `ListPlaylists` gives.
+  uint32 playlist_id = 1;
+  uint32 track_id = 2;
+  optional uint32 before_track_id = 3;
 }
 message PlaylistsEdited {
   // The playlist that was added or moved; unset after a rename or a delete.
