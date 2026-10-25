@@ -52,6 +52,7 @@ Versioning rules:
 - Within a version, changes must be additive only (new fields, new RPCs, new enum values). Never renumber, retype or remove anything.
 - A breaking change becomes `openenginelib.v2` in `api/proto/openenginelib/v2/`. A backend can serve `v1` and `v2` at the same time, and the UI picks one it supports. `API_VERSION` in `api/src/lib.rs` is what this build of the UI speaks.
 - Track and playlist ids are only valid while a library is open; they are indices, not the Engine database's ids.
+- An Engine library and a folder of music can be open at the same time, one of each kind at most. Every request says which one it is about in the metadata `x-open-engine-library` (`engine` or `folder`; `slot.rs` wraps the library and playback services to make that known to the handlers); without it, a request is about the Engine library if there is one, else the folder. The ids are per library, so the UI shows one at a time (the other is parked and brought back from the sidebar) and what plays stops when they are switched; the DJ controller acts on the library the player was last given tracks of.
 
 The `.proto` files are compiled in pure Rust (`protox`), so building needs no `protoc`.
 

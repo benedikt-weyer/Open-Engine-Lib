@@ -27,6 +27,7 @@ mod progress;
 mod repair;
 mod save;
 mod service;
+mod slot;
 mod smartlist;
 mod soundswitch;
 mod sync;
@@ -83,12 +84,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     Server::builder()
         .add_service(authorize.protect(BackendServiceServer::new(service.clone())))
-        .add_service(authorize.protect(
+        .add_service(slot::Routed(authorize.protect(
             LibraryServiceServer::new(service.clone()).max_decoding_message_size(MAX_MESSAGE_SIZE),
-        ))
-        .add_service(authorize.protect(
+        )))
+        .add_service(slot::Routed(authorize.protect(
             PlaybackServiceServer::new(service.clone()).max_decoding_message_size(MAX_MESSAGE_SIZE),
-        ))
+        )))
         .add_service(authorize.protect(ControllerServiceServer::new(service)))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
             let _ = stopped.await;

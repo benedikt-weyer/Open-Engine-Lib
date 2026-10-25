@@ -118,8 +118,11 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::LocalFolderChosen(None) => {}
         Message::OpenLocalFolder(path) => {
-            // One library at a time: the backend would end up with the other one.
             if !matches!(state.library, LibraryState::Opening(_)) {
+                // One that is open already (shown or parked) is not read again.
+                if state.is_parked(&path) {
+                    return state.switch_libraries();
+                }
                 return state.open_folder(path);
             }
         }
@@ -137,6 +140,13 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             );
             if open && !state.locked() {
                 return handle(state, Message::CloseLibrary);
+            }
+            // (One that is parked has nothing shown to close, only the backend's copy.)
+            if state.is_parked(&path) && !state.locked() {
+                state.parked = None;
+                if let Some(backend) = state.backend_about(model::Kind::Folder) {
+                    return Task::perform(backend::close_library(backend), Message::LibraryClosed);
+                }
             }
         }
         Message::ChooseLibrary => {
@@ -194,21 +204,30 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::CloseLibrary => {
-            state.library = LibraryState::Closed { error: None };
-            state.reset_playback();
-            state.covers.clear();
-            state.reachable.clear();
-            state.waveforms.clear();
-            state.cues.clear();
-            state.loops.clear();
-            state.sync = None;
-            state.library_sync = None;
-            state.reload_result = None;
-            // Closing a library on purpose means the next start doesn't reopen it.
-            state.save(&Session::default(), true);
-            if let Some(backend) = state.backend() {
-                return Task::perform(backend::close_library(backend), Message::LibraryClosed);
-            }
+            // (The backend is asked to close the one that was shown, so it is told which.)
+            let closing = state.backend();
+            let was_open = matches!(state.library, LibraryState::Open(_));
+            // The library that was parked is shown now.
+            state.library = match state.parked.take() {
+                Some(browser) => LibraryState::Open(browser),
+                None => LibraryState::Closed { error: None },
+            };
+            state.forget_shown_library();
+            // Closing a library on purpose means the next start doesn't reopen what was
+            // shown; it opens the one that is now.
+            let session = state.snapshot().unwrap_or_default();
+            state.save(&session, true);
+            let scroll = match &state.library {
+                LibraryState::Open(browser) => browser.restore_scroll(),
+                _ => Task::none(),
+            };
+            let close = match closing.filter(|_| was_open) {
+                Some(backend) => {
+                    Task::perform(backend::close_library(backend), Message::LibraryClosed)
+                }
+                None => Task::none(),
+            };
+            return Task::batch([close, scroll]);
         }
         Message::LibraryClosed(result) => state.backend_error = result.err(),
         Message::ScanDrives => {
@@ -251,8 +270,11 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
         },
         Message::OpenRecent(path) | Message::OpenDrive(path) => {
-            // One library at a time: the backend would end up with the other one.
             if !matches!(state.library, LibraryState::Opening(_)) {
+                // One that is open already (shown or parked) is not read again.
+                if state.is_parked(&path) {
+                    return state.switch_libraries();
+                }
                 return state.open(path, None);
             }
         }

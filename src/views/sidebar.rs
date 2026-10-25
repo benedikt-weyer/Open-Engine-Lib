@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use iced::widget::{Space, button, column, container, row, scrollable, text, tooltip};
-use iced::{Center, Element, Fill};
+use iced::{Center, Element, Fill, Theme};
 
 use crate::Message;
 use crate::browser::{self, Browser};
@@ -35,12 +35,41 @@ pub struct Sources<'a> {
     pub local: &'a LocalFolders,
 }
 
-/// `current` is the open library, to mark it in the list. Libraries can't be opened
+/// The libraries that are open, to mark them in the list: the shown one, and the one of the
+/// other kind (an Engine library and a folder of music can be open at the same time) that
+/// a click on its entry brings back.
+#[derive(Clone, Copy, Default)]
+pub struct Open<'a> {
+    pub shown: Option<&'a str>,
+    pub parked: Option<&'a str>,
+}
+
+impl Open<'_> {
+    fn is(self, which: Option<&str>, path: &Path) -> bool {
+        which.is_some_and(|open| Path::new(open) == path)
+    }
+
+    fn is_shown(self, path: &Path) -> bool {
+        self.is(self.shown, path)
+    }
+
+    fn style(self, path: &Path) -> fn(&Theme, button::Status) -> button::Style {
+        if self.is_shown(path) {
+            button::primary
+        } else if self.is(self.parked, path) {
+            button::secondary
+        } else {
+            button::text
+        }
+    }
+}
+
+/// `open` says which libraries are open, to mark them in the list. Libraries can't be opened
 /// from the list (`can_open` is false) while another one is still being opened.
 pub fn view<'a>(
     browser: Option<&'a Browser>,
     sources: Sources<'a>,
-    current: Option<&'a str>,
+    open: Open<'a>,
     can_open: bool,
     can_sync: bool,
     language: Language,
@@ -60,7 +89,7 @@ pub fn view<'a>(
     } else {
         let mut list = column![].spacing(2);
         for path in recents.paths() {
-            list = list.push(entry(path, current, can_open, language));
+            list = list.push(entry(path, open, can_open, language));
         }
         section = section.push(scrollable(list));
     }
@@ -77,7 +106,7 @@ pub fn view<'a>(
     } else {
         let mut list = column![].spacing(2);
         for drive in drives {
-            list = list.push(drive_entry(drive, current, can_open, language));
+            list = list.push(drive_entry(drive, open, can_open, language));
         }
         drive_section = drive_section.push(scrollable(list));
     }
@@ -85,7 +114,7 @@ pub fn view<'a>(
         drive_section = drive_section.push(error_text::view(error.to_owned(), language));
     }
 
-    let local_section = local_section(local, current, can_open, language);
+    let local_section = local_section(local, open, can_open, language);
 
     let content = match browser {
         // The folders of a folder of music, with the local music below them. There is
@@ -141,7 +170,7 @@ pub fn view<'a>(
 /// it (the open one is marked); the × takes it out of the list, closing it if it is open.
 fn local_section<'a>(
     local: &'a LocalFolders,
-    current: Option<&str>,
+    open: Open<'_>,
     can_open: bool,
     language: Language,
 ) -> Element<'a, Message> {
@@ -153,14 +182,9 @@ fn local_section<'a>(
     } else {
         let mut list = column![].spacing(2);
         for path in local.paths() {
-            let is_current = current.is_some_and(|current| Path::new(current) == path);
-            let open = button(text(display_name(path)).wrapping(text::Wrapping::None))
+            let entry = button(text(display_name(path)).wrapping(text::Wrapping::None))
                 .width(Fill)
-                .style(if is_current {
-                    button::primary
-                } else {
-                    button::text
-                })
+                .style(open.style(path))
                 .on_press_maybe(can_open.then(|| Message::OpenLocalFolder(path.to_path_buf())));
             let remove = tooltip(
                 button(text("×"))
@@ -174,7 +198,7 @@ fn local_section<'a>(
             // The full path is what tells two folders with the same name apart.
             list = list.push(
                 tooltip(
-                    row![open, remove].align_y(iced::Center),
+                    row![entry, remove].align_y(iced::Center),
                     text(path.display().to_string()),
                     tooltip::Position::Right,
                 )
@@ -195,20 +219,15 @@ fn local_section<'a>(
 
 fn entry<'a>(
     path: &'a Path,
-    current: Option<&str>,
+    open: Open<'_>,
     can_open: bool,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
-    let is_current = current.is_some_and(|current| Path::new(current) == path);
 
-    let open = button(text(display_name(path)).wrapping(text::Wrapping::None))
+    let entry = button(text(display_name(path)).wrapping(text::Wrapping::None))
         .width(Fill)
-        .style(if is_current {
-            button::primary
-        } else {
-            button::text
-        })
+        .style(open.style(path))
         .on_press_maybe(can_open.then(|| Message::OpenRecent(path.to_path_buf())));
     let forget = tooltip(
         button(text("×"))
@@ -222,7 +241,7 @@ fn entry<'a>(
 
     // The full path is what tells two libraries with the same name apart.
     tooltip(
-        row![open, forget].align_y(iced::Center),
+        row![entry, forget].align_y(iced::Center),
         text(path.display().to_string()),
         tooltip::Position::Right,
     )
@@ -234,16 +253,17 @@ fn entry<'a>(
 /// is only shown, so it is clear why it can't be opened.
 fn drive_entry<'a>(
     drive: &'a Drive,
-    current: Option<&str>,
+    open: Open<'_>,
     can_open: bool,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
-    let is_current = drive
-        .library
-        .as_deref()
-        .zip(current)
-        .is_some_and(|(library, current)| Path::new(current) == library);
+    let library = drive.library.as_deref();
+    let is_current = library.is_some_and(|library| open.is_shown(library));
+    let style = library.map_or(
+        button::text as fn(&Theme, button::Status) -> button::Style,
+        |library| open.style(library),
+    );
 
     let status = if drive.library.is_some() {
         &strings.drive_has_library
@@ -258,23 +278,16 @@ fn drive_entry<'a>(
             text::secondary
         }),
     ];
-    let open = button(label)
-        .width(Fill)
-        .style(if is_current {
-            button::primary
-        } else {
-            button::text
-        })
-        .on_press_maybe(
-            drive
-                .library
-                .clone()
-                .filter(|_| can_open)
-                .map(Message::OpenDrive),
-        );
+    let entry = button(label).width(Fill).style(style).on_press_maybe(
+        drive
+            .library
+            .clone()
+            .filter(|_| can_open)
+            .map(Message::OpenDrive),
+    );
 
-    let open = tooltip(
-        open,
+    let entry = tooltip(
+        entry,
         text(drive.mount.display().to_string()),
         tooltip::Position::Right,
     )
@@ -294,5 +307,5 @@ fn drive_entry<'a>(
     )
     .style(container::rounded_box);
 
-    row![open, unmount].spacing(4).align_y(Center).into()
+    row![entry, unmount].spacing(4).align_y(Center).into()
 }

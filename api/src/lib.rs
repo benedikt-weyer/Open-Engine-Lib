@@ -49,6 +49,14 @@ pub const TOKEN_ENV: &str = "OPEN_ENGINE_BACKEND_TOKEN";
 /// The metadata key of the bearer token.
 pub const AUTHORIZATION: &str = "authorization";
 
+/// The metadata key that says which of the open libraries a request is about: `engine` for
+/// the Engine library, `folder` for the folder of music (one of each can be open at the same
+/// time). Without it a request is about the Engine library if there is one, else the folder.
+pub const LIBRARY_SLOT: &str = "x-open-engine-library";
+/// The values of [`LIBRARY_SLOT`].
+pub const SLOT_ENGINE: &str = "engine";
+pub const SLOT_FOLDER: &str = "folder";
+
 /// What the backend prints on its first stdout line, followed by the address it
 /// listens on, once it is ready: `LISTENING 127.0.0.1:41234`.
 pub const LISTENING_PREFIX: &str = "LISTENING ";

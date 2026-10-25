@@ -23,6 +23,7 @@ use crate::name_order::NameOrder;
 use crate::progress::{Phase, Progress};
 use crate::repair;
 use crate::save::{self, SaveError};
+use crate::slot::{self, Slot};
 use crate::smartlist::Rules;
 use crate::sync::{self, SyncError};
 use crate::track_analysis::Found;
@@ -33,7 +34,11 @@ mod controller;
 const TRACKS_PER_BATCH: usize = 500;
 
 struct Shared {
-    library: RwLock<Option<Arc<Library>>>,
+    /// The open Engine library and the open folder of music: one of each at most.
+    engine: RwLock<Option<Arc<Library>>>,
+    folder: RwLock<Option<Arc<Library>>>,
+    /// The library the player was last given tracks of, which the DJ controller acts on.
+    playing: Mutex<Option<Slot>>,
     /// The audio process, which plays and decodes for us, or why it is not there.
     audio: Result<Audio, String>,
     /// Where copies of the libraries' databases are kept.
@@ -51,7 +56,9 @@ pub struct Service(Arc<Shared>);
 impl Service {
     pub fn new(audio: Result<Audio, String>, cache_root: PathBuf, controller: Controller) -> Self {
         Self(Arc::new(Shared {
-            library: RwLock::new(None),
+            engine: RwLock::new(None),
+            folder: RwLock::new(None),
+            playing: Mutex::new(None),
             audio,
             cache_root,
             progress: Progress::default(),
@@ -69,7 +76,27 @@ impl Service {
             .map_err(|error| Status::unavailable(format!("no audio process: {error}")))
     }
 
-    /// Replaces the library that is open by one read again from the same working copy
+    /// Where the library is kept.
+    fn slot(&self, slot: Slot) -> &RwLock<Option<Arc<Library>>> {
+        match slot {
+            Slot::Engine => &self.0.engine,
+            Slot::Folder => &self.0.folder,
+        }
+    }
+
+    /// The slot the request that is being handled is about: the one it names, else the Engine
+    /// library's if there is one, else the folder's.
+    fn requested(&self) -> Slot {
+        slot::current().unwrap_or_else(|| {
+            if self.0.engine.read().expect("library lock").is_some() {
+                Slot::Engine
+            } else {
+                Slot::Folder
+            }
+        })
+    }
+
+    /// Replaces the Engine library that is open by one read again from the same working copy
     /// (which changed). Playback is not stopped.
     async fn reopen(&self, dir: PathBuf) -> Result<(), Status> {
         let cache_root = self.0.cache_root.clone();
@@ -77,17 +104,27 @@ impl Service {
             .await
             .map_err(|error| Status::internal(error.to_string()))?
             .map_err(|error| Status::internal(error.to_string()))?;
-        *self.0.library.write().expect("library lock") = Some(Arc::new(library));
+        *self.0.engine.write().expect("library lock") = Some(Arc::new(library));
         Ok(())
     }
 
+    /// The library the request is about.
     fn library(&self) -> Result<Arc<Library>, Status> {
-        self.0
-            .library
+        self.slot(self.requested())
             .read()
             .expect("library lock")
             .clone()
             .ok_or_else(|| Status::failed_precondition("no library is open"))
+    }
+
+    /// The library the player plays from (what the DJ controller acts on), else the one a
+    /// request would be about.
+    fn playing_library(&self) -> Result<Arc<Library>, Status> {
+        let playing = *self.0.playing.lock().expect("playing lock");
+        match playing.and_then(|slot| self.slot(slot).read().expect("library lock").clone()) {
+            Some(library) => Ok(library),
+            None => self.library(),
+        }
     }
 
     /// The open library, which must be an Engine library: what only those have (syncing,
@@ -127,12 +164,14 @@ impl Service {
         Ok(removed)
     }
 
-    /// Stops playback, releases the audio device and forgets the library.
-    async fn close(&self) {
+    /// Stops playback, releases the audio device and forgets the library in `slot` (the
+    /// queue may hold tracks of either library). The other library stays open.
+    async fn close(&self, slot: Slot) {
         if let Ok(audio) = &self.0.audio {
             let _ = audio.client().close(api::CloseRequest {}).await;
         }
-        *self.0.library.write().expect("library lock") = None;
+        *self.0.playing.lock().expect("playing lock") = None;
+        *self.slot(slot).write().expect("library lock") = None;
     }
 }
 
@@ -157,7 +196,7 @@ impl LibraryService for Service {
     ) -> Result<Response<api::OpenLibraryResponse>, Status> {
         let path = PathBuf::from(request.into_inner().path);
         let cache_root = self.0.cache_root.clone();
-        self.close().await;
+        self.close(Slot::Engine).await;
 
         let library = tokio::task::spawn_blocking(move || Library::open(&path, &cache_root))
             .await
@@ -175,7 +214,7 @@ impl LibraryService for Service {
             track_count: library.tracks.len() as u32,
             playlist_count: library.playlists().len() as u32,
         };
-        *self.0.library.write().expect("library lock") = Some(Arc::new(library));
+        *self.0.engine.write().expect("library lock") = Some(Arc::new(library));
         Ok(Response::new(response))
     }
 
@@ -186,7 +225,7 @@ impl LibraryService for Service {
         let path = PathBuf::from(request.into_inner().path);
         // Where an edit would be noted, which a folder of music never gets.
         let scratch = self.0.cache_root.join("local-folder");
-        self.close().await;
+        self.close(Slot::Folder).await;
 
         // Looking at every file takes a moment and must not block the async threads. The UI
         // asks `GetProgress` meanwhile.
@@ -210,7 +249,7 @@ impl LibraryService for Service {
             track_count: library.tracks.len() as u32,
             playlist_count: library.playlists().len() as u32,
         };
-        *self.0.library.write().expect("library lock") = Some(Arc::new(library));
+        *self.0.folder.write().expect("library lock") = Some(Arc::new(library));
         Ok(Response::new(response))
     }
 
@@ -248,7 +287,7 @@ impl LibraryService for Service {
             cache_path: saved.cache.display().to_string(),
         };
         // The tracks are the same files in the same order, so playback and every id carry on.
-        *self.0.library.write().expect("library lock") = Some(Arc::new(saved));
+        *self.0.engine.write().expect("library lock") = Some(Arc::new(saved));
         Ok(Response::new(response))
     }
 
@@ -711,7 +750,14 @@ impl LibraryService for Service {
         &self,
         _: Request<api::CloseLibraryRequest>,
     ) -> Result<Response<api::CloseLibraryResponse>, Status> {
-        self.close().await;
+        // The one the request names; without one, both.
+        match slot::current() {
+            Some(slot) => self.close(slot).await,
+            None => {
+                self.close(Slot::Engine).await;
+                self.close(Slot::Folder).await;
+            }
+        }
         Ok(Response::new(api::CloseLibraryResponse {}))
     }
 
@@ -1291,6 +1337,7 @@ impl PlaybackService for Service {
         request: Request<api::PlayRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
         let library = self.library()?;
+        *self.0.playing.lock().expect("playing lock") = Some(self.requested());
         let request = request.into_inner();
         let mut audio = self.audio()?;
 

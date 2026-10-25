@@ -1,18 +1,24 @@
-// Opening an Engine library and reading its tracks and playlists. The backend
-// holds at most one open library; opening another replaces it.
+// Opening an Engine library and reading its tracks and playlists. The backend holds at
+// most one open Engine library and at most one open folder of music, at the same time:
+// opening another of the same kind replaces it, opening the other kind does not. A request
+// says which of them it is about in the metadata `x-open-engine-library` (`engine` or
+// `folder`); without it, it is about the Engine library if there is one, else the folder.
+// What only an Engine library has (syncing, ratings, playlist edits...) is always about the
+// Engine library, and FAILED_PRECONDITION if the request names the folder.
 syntax = "proto3";
 
 package openenginelib.v1;
 
 service LibraryService {
-  // Opens the library at `path`, closing the current one (and stopping playback).
+  // Opens the library at `path`, closing the Engine library that is open (and stopping
+  // playback). An open folder of music stays open.
   // The backend never works on the library in place: it copies the databases into
   // its cache and reads those. The audio files stay where they are and are played
   // from there.
   // Errors: NOT_FOUND if no Engine library is there, INTERNAL if it can't be read.
   rpc OpenLibrary(OpenLibraryRequest) returns (OpenLibraryResponse);
-  // Opens a plain folder of music as the library, closing the current one (and stopping
-  // playback). The tracks are the audio files the player can play anywhere below `path`
+  // Opens a plain folder of music, closing the folder that is open (and stopping
+  // playback). An open Engine library stays open. The tracks are the audio files the player can play anywhere below `path`
   // (hidden files and folders are skipped) with what their tags say, and the playlists are
   // the folders that have music below them, each holding the tracks of all the folders
   // below it too. There is no Engine library behind it: the things only an Engine library
@@ -197,7 +203,8 @@ service LibraryService {
   // asked again and again while it runs. Not running: `running` is false and the rest is
   // empty. Does not need a library to be open.
   rpc GetProgress(GetProgressRequest) returns (OperationProgress);
-  // Closes the library and stops playback. Succeeds if none is open.
+  // Closes the library the request is about (both, if it names none) and stops playback.
+  // Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
   // Streams every track of the open library in id order, in batches.
   // Error: FAILED_PRECONDITION if no library is open.

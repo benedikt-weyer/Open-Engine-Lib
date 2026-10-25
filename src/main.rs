@@ -113,6 +113,10 @@ struct State {
     restore: Option<Session>,
     session: SessionStore,
     library: LibraryState,
+    /// The open library of the other kind than `library`, if there is one: an Engine library
+    /// and a folder of music can be open at the same time (one of each at most), and the
+    /// sidebar brings this one back, which parks the shown one in its place.
+    parked: Option<Browser>,
     recents: Recents,
     /// The folders of music that were added to the "Local music" section.
     local_folders: LocalFolders,
@@ -546,6 +550,7 @@ impl State {
             restore: None,
             session,
             library: LibraryState::Closed { error: None },
+            parked: None,
             recents: Recents::discover(),
             local_folders: LocalFolders::discover(),
             drives: Vec::new(),
@@ -661,11 +666,86 @@ impl State {
         ])
     }
 
+    /// The backend, with its requests about the shown library (while one is open; else about
+    /// whichever the backend picks).
     fn backend(&self) -> Option<Backend> {
-        match &self.backend {
-            BackendState::Ready(backend) => Some(Backend::clone(backend)),
+        match (&self.backend, &self.library) {
+            (BackendState::Ready(backend), LibraryState::Open(browser)) => {
+                Some(backend.about(browser.library.kind))
+            }
+            (BackendState::Ready(backend), _) => Some(Backend::clone(backend)),
             _ => None,
         }
+    }
+
+    /// The backend, with its requests about the open library of `kind`.
+    fn backend_about(&self, kind: model::Kind) -> Option<Backend> {
+        match &self.backend {
+            BackendState::Ready(backend) => Some(backend.about(kind)),
+            _ => None,
+        }
+    }
+
+    /// Forgets what was fetched for the library that was shown and the player that played
+    /// from it: the ids belong to one library.
+    fn forget_shown_library(&mut self) {
+        self.reset_playback();
+        self.covers.clear();
+        self.reachable.clear();
+        self.waveforms.clear();
+        self.cues.clear();
+        self.loops.clear();
+        self.sync = None;
+        self.library_sync = None;
+        self.reload_result = None;
+        self.streaming_confirm = false;
+        self.track_menu = None;
+        self.folder_menu = None;
+    }
+
+    /// Makes room for a library of `kind` to be opened: the shown library is parked if it is
+    /// of the other kind, and gone if it is of this kind (opening replaces it). A parked
+    /// library of this kind is gone too: one of each kind at most.
+    fn make_room_for(&mut self, kind: model::Kind) {
+        let shown = std::mem::replace(&mut self.library, LibraryState::Closed { error: None });
+        if self
+            .parked
+            .as_ref()
+            .is_some_and(|parked| parked.library.kind == kind)
+        {
+            self.parked = None;
+        }
+        if let LibraryState::Open(browser) = shown
+            && browser.library.kind != kind
+        {
+            self.parked = Some(browser);
+        }
+    }
+
+    /// Whether `path` is the parked library.
+    fn is_parked(&self, path: &Path) -> bool {
+        self.parked
+            .as_ref()
+            .is_some_and(|parked| Path::new(&parked.library.path) == path)
+    }
+
+    /// Shows the parked library and parks the shown one. What plays stops: the player's
+    /// queue holds the tracks of one library.
+    fn switch_libraries(&mut self) -> Task<Message> {
+        let Some(parked) = self.parked.take() else {
+            return Task::none();
+        };
+        // (The backend stops what plays when a library is opened or closed; here nothing is.)
+        let stop = self.control(Control::Stop);
+        let shown = std::mem::replace(&mut self.library, LibraryState::Open(parked));
+        if let LibraryState::Open(browser) = shown {
+            self.parked = Some(browser);
+        }
+        self.forget_shown_library();
+        let LibraryState::Open(browser) = &self.library else {
+            return stop;
+        };
+        Task::batch([stop, browser.restore_scroll()])
     }
 
     /// Takes the playlists as they are after one was added, changed or deleted. The
@@ -844,19 +924,11 @@ impl State {
             return Task::none();
         };
         self.restore = restore;
-        self.reset_playback();
-        self.covers.clear();
-        self.reachable.clear();
-        self.waveforms.clear();
-        self.cues.clear();
-        self.loops.clear();
-        self.sync = None;
-        self.reload_result = None;
-        self.streaming_confirm = false;
-        self.track_menu = None;
-        self.folder_menu = None;
+        self.forget_shown_library();
         self.progress = None;
+        self.make_room_for(kind);
         self.library = LibraryState::Opening(path.clone());
+        let backend = backend.about(kind);
         match kind {
             model::Kind::Engine => {
                 Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
@@ -1656,7 +1728,13 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
                 drives: &state.drives,
                 local: &state.local_folders,
             },
-            browser.map(|browser| browser.library.path.as_str()),
+            sidebar::Open {
+                shown: browser.map(|browser| browser.library.path.as_str()),
+                parked: state
+                    .parked
+                    .as_ref()
+                    .map(|parked| parked.library.path.as_str()),
+            },
             !matches!(state.library, LibraryState::Opening(_)) && !state.locked(),
             !state.locked(),
             language,
@@ -2139,6 +2217,7 @@ mod tests {
             open_when_ready: None,
             restore: None,
             session: SessionStore::load(temp.join("session.toml")),
+            parked: None,
             library: LibraryState::Open(Browser::new(Arc::new(library))),
             recents: Recents::load(temp.join("recent.toml")),
             local_folders: LocalFolders::load(temp.join("local-folders.toml")),
@@ -4786,6 +4865,122 @@ mod tests {
 
     /// An app with a folder of music open (see `library_at`): the folders House (no tracks
     /// of its own), Deep (b, c) and Pop (a).
+    /// The Engine library of `state()` is shown, with a folder of music parked.
+    fn state_with_both_open() -> State {
+        let mut state = state();
+        state.parked = Some(Browser::new(Arc::new(
+            library_at("/home/me/Music").of_kind(model::Kind::Folder),
+        )));
+        state
+    }
+
+    fn shown_path(state: &State) -> Option<String> {
+        match &state.library {
+            LibraryState::Open(browser) => Some(browser.library.path.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_folder_of_music_and_an_engine_library_can_be_open_together_one_of_each() {
+        use model::Kind::{Engine, Folder};
+
+        // Opening a folder parks the Engine library that is shown.
+        let mut state = state();
+        state.make_room_for(Folder);
+        assert!(matches!(state.library, LibraryState::Closed { .. }));
+        assert_eq!(
+            state.parked.as_ref().map(|parked| parked.library.kind),
+            Some(Engine)
+        );
+
+        // Another folder replaces the folder, and leaves the parked Engine library.
+        state.library = LibraryState::Open(Browser::new(Arc::new(
+            library_at("/home/me/Music").of_kind(Folder),
+        )));
+        state.make_room_for(Folder);
+        assert!(state.parked.is_some());
+        assert!(matches!(state.library, LibraryState::Closed { .. }));
+
+        // An Engine library opened while the folder is shown parks the folder; the parked
+        // Engine library is the one that is replaced (one of each kind).
+        let mut state = state_with_both_open();
+        state.make_room_for(Engine);
+        assert_eq!(
+            state.parked.as_ref().map(|parked| parked.library.kind),
+            Some(Folder)
+        );
+        assert!(matches!(state.library, LibraryState::Closed { .. }));
+    }
+
+    #[test]
+    fn the_sidebar_brings_the_parked_library_back_and_parks_the_shown_one() {
+        let mut state = state_with_both_open();
+        state.status.track_id = Some(3);
+        state.play_source = Some(Source::Collection);
+        assert_eq!(
+            shown_path(&state).as_deref(),
+            Some("/media/DRIVE/Engine Library")
+        );
+
+        // A click on the folder that is parked shows it instead of reading it again.
+        let _ = handle(
+            &mut state,
+            Message::OpenLocalFolder(PathBuf::from("/home/me/Music")),
+        );
+        assert_eq!(shown_path(&state).as_deref(), Some("/home/me/Music"));
+        assert_eq!(
+            state
+                .parked
+                .as_ref()
+                .map(|parked| parked.library.path.as_str()),
+            Some("/media/DRIVE/Engine Library")
+        );
+        // What played came from the other library: nothing of it is left to the new one.
+        assert!(state.play_source.is_none());
+
+        // And the same the other way round, from the list of recent libraries.
+        let _ = handle(
+            &mut state,
+            Message::OpenRecent(PathBuf::from("/media/DRIVE/Engine Library")),
+        );
+        assert_eq!(
+            shown_path(&state).as_deref(),
+            Some("/media/DRIVE/Engine Library")
+        );
+        assert_eq!(
+            state
+                .parked
+                .as_ref()
+                .map(|parked| parked.library.path.as_str()),
+            Some("/home/me/Music")
+        );
+    }
+
+    #[test]
+    fn closing_the_shown_library_shows_the_parked_one() {
+        let mut state = state_with_both_open();
+        let _ = handle(&mut state, Message::CloseLibrary);
+        assert_eq!(shown_path(&state).as_deref(), Some("/home/me/Music"));
+        assert!(state.parked.is_none());
+        let _ = handle(&mut state, Message::CloseLibrary);
+        assert!(matches!(state.library, LibraryState::Closed { .. }));
+    }
+
+    #[test]
+    fn taking_the_parked_folder_out_of_the_list_closes_it() {
+        let mut state = state_with_both_open();
+        let _ = handle(
+            &mut state,
+            Message::RemoveLocalFolder(PathBuf::from("/home/me/Music")),
+        );
+        assert!(state.parked.is_none());
+        assert_eq!(
+            shown_path(&state).as_deref(),
+            Some("/media/DRIVE/Engine Library")
+        );
+    }
+
     fn state_with_a_folder() -> State {
         let mut state = state();
         state.library = LibraryState::Open(Browser::new(Arc::new(

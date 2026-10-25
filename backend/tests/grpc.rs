@@ -24,7 +24,9 @@ use open_engine_api::v1::{
     SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule,
     SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
-use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
+use open_engine_api::{
+    API_VERSION, AUTHORIZATION, LIBRARY_SLOT, LISTENING_PREFIX, SLOT_ENGINE, SLOT_FOLDER, TOKEN_ENV,
+};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Request, Status};
@@ -130,6 +132,22 @@ fn with_token(mut request: Request<()>) -> Result<Request<()>, Status> {
         .metadata_mut()
         .insert(AUTHORIZATION, format!("Bearer {TOKEN}").parse().unwrap());
     Ok(request)
+}
+
+/// The requests are about the Engine library.
+fn engine_slot(mut request: Request<()>) -> Result<Request<()>, Status> {
+    request
+        .metadata_mut()
+        .insert(LIBRARY_SLOT, SLOT_ENGINE.parse().unwrap());
+    with_token(request)
+}
+
+/// The requests are about the folder of music.
+fn folder_slot(mut request: Request<()>) -> Result<Request<()>, Status> {
+    request
+        .metadata_mut()
+        .insert(LIBRARY_SLOT, SLOT_FOLDER.parse().unwrap());
+    with_token(request)
 }
 
 async fn channel(running: &Running) -> Channel {
@@ -3643,6 +3661,101 @@ async fn opens_a_plain_folder_of_music_as_a_library() {
     assert_eq!(stream.message().await.unwrap().unwrap().tracks.len(), 3);
 }
 
+#[tokio::test]
+async fn an_engine_library_and_a_folder_of_music_are_open_at_the_same_time() {
+    let temp = TempDir::new("both-open");
+    let music = temp.0.join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+    wav(&music.join("only.wav"), &[(440.0, 1.0)]);
+    let engine_dir = fixture_library(&temp.0);
+
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    type Tagged = fn(Request<()>) -> Result<Request<()>, Status>;
+    let mut engine = LibraryServiceClient::new(InterceptedService::new(
+        channel.clone(),
+        engine_slot as Tagged,
+    ));
+    let mut folder =
+        LibraryServiceClient::new(InterceptedService::new(channel, folder_slot as Tagged));
+    let tracks = |mut client: LibraryServiceClient<_>| async move {
+        let mut stream = client
+            .list_tracks(ListTracksRequest {})
+            .await
+            .map(|response| response.into_inner())?;
+        let mut tracks = Vec::new();
+        while let Some(batch) = stream.message().await? {
+            tracks.extend(batch.tracks);
+        }
+        Ok::<_, Status>(tracks)
+    };
+
+    // Nothing is open in either.
+    assert_eq!(
+        code(folder.list_playlists(ListPlaylistsRequest {}).await),
+        Code::FailedPrecondition
+    );
+
+    let opened = engine
+        .open_library(OpenLibraryRequest {
+            path: engine_dir.display().to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    // Opening the folder does not replace the Engine library.
+    folder
+        .open_local_folder(OpenLocalFolderRequest {
+            path: music.display().to_string(),
+        })
+        .await
+        .unwrap();
+    let engine_tracks = tracks(engine.clone()).await.unwrap();
+    let folder_tracks = tracks(folder.clone()).await.unwrap();
+    assert_eq!(engine_tracks.len() as u32, opened.track_count);
+    assert_eq!(
+        folder_tracks
+            .iter()
+            .map(|track| track.path.as_str())
+            .collect::<Vec<_>>(),
+        ["only.wav"]
+    );
+
+    // What only an Engine library does is the Engine library's, whichever is asked.
+    assert_eq!(
+        code(folder.get_sync_diff(GetSyncDiffRequest::default()).await),
+        Code::FailedPrecondition
+    );
+    assert!(
+        engine
+            .get_sync_diff(GetSyncDiffRequest::default())
+            .await
+            .is_ok()
+    );
+
+    // Opening another folder replaces the folder, not the Engine library.
+    folder
+        .open_local_folder(OpenLocalFolderRequest {
+            path: music.display().to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        tracks(engine.clone()).await.unwrap().len() as u32,
+        opened.track_count
+    );
+
+    // Closing one leaves the other.
+    folder.close_library(CloseLibraryRequest {}).await.unwrap();
+    assert_eq!(code(tracks(folder.clone()).await), Code::FailedPrecondition);
+    assert_eq!(
+        tracks(engine.clone()).await.unwrap().len() as u32,
+        opened.track_count
+    );
+    engine.close_library(CloseLibraryRequest {}).await.unwrap();
+    assert_eq!(code(tracks(engine).await), Code::FailedPrecondition);
+}
+
 /// A real folder of music, counted and timed:
 /// `OPEN_ENGINE_TEST_FOLDER=... cargo test -p open-engine-backend --test grpc real_music_folder -- --ignored --nocapture`
 #[tokio::test]
@@ -3738,8 +3851,10 @@ async fn imports_a_folder_of_music_into_an_engine_library_as_a_playlist() {
 
     let running = start(&temp.0.join("cache"));
     let channel = channel(&running).await;
-    let mut library =
-        LibraryServiceClient::new(InterceptedService::new(channel, with_token as fn(_) -> _));
+    let mut library = LibraryServiceClient::new(InterceptedService::new(
+        channel.clone(),
+        with_token as fn(_) -> _,
+    ));
     let request = |playlist_id| ImportFolderRequest {
         playlist_id,
         target_path: stick.display().to_string(),
@@ -3765,12 +3880,17 @@ async fn imports_a_folder_of_music_into_an_engine_library_as_a_playlist() {
         Code::FailedPrecondition
     );
 
+    // The folder is open beside it, and the requests are about the folder.
     library
         .open_local_folder(OpenLocalFolderRequest {
             path: music.display().to_string(),
         })
         .await
         .unwrap();
+    let mut library = LibraryServiceClient::new(InterceptedService::new(
+        channel.clone(),
+        folder_slot as fn(_) -> _,
+    ));
     let playlists = library
         .list_playlists(ListPlaylistsRequest {})
         .await
@@ -3867,6 +3987,8 @@ async fn imports_a_folder_of_music_into_an_engine_library_as_a_playlist() {
     assert!(again.playlist_existed && again.backup_path.is_empty());
 
     // The library has the tracks, not analysed, in a playlist.
+    let mut library =
+        LibraryServiceClient::new(InterceptedService::new(channel, engine_slot as fn(_) -> _));
     library
         .open_library(OpenLibraryRequest {
             path: stick.display().to_string(),

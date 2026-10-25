@@ -523,6 +523,11 @@ impl Browser {
         scroll_to(y)
     }
 
+    /// Scrolls the list back to where it was left (when the library is shown again).
+    pub fn restore_scroll(&self) -> iced::Task<Message> {
+        scroll_to(self.scroll)
+    }
+
     pub fn is_expanded(&self, playlist: usize) -> bool {
         self.expanded.contains(&playlist)
     }

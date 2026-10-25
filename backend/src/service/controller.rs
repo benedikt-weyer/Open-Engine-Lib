@@ -201,7 +201,7 @@ impl Service {
         let Some(track) = status.track_id else {
             return Ok(());
         };
-        let library = self.library()?;
+        let library = self.playing_library()?;
         if library.is_folder() {
             return Ok(());
         }

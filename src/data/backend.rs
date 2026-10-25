@@ -39,7 +39,9 @@ use open_engine_api::v1::{
     SyncToLibraryRequest, SyncToLibraryResponse, SyncToSourceRequest, SyncToSourceResponse,
     TogglePauseRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
-use open_engine_api::{API_VERSION, AUTHORIZATION, LISTENING_PREFIX, TOKEN_ENV};
+use open_engine_api::{
+    API_VERSION, AUTHORIZATION, LIBRARY_SLOT, LISTENING_PREFIX, SLOT_ENGINE, SLOT_FOLDER, TOKEN_ENV,
+};
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -59,13 +61,24 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Replies like the playlist list can exceed gRPC's 4 MB default for big libraries.
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
-/// Adds the launch token to every request.
+/// Adds the launch token to every request, and says which of the open libraries the
+/// request is about.
 #[derive(Clone)]
-struct Token(MetadataValue<tonic::metadata::Ascii>);
+struct Token {
+    bearer: MetadataValue<tonic::metadata::Ascii>,
+    slot: Option<&'static str>,
+}
 
 impl Interceptor for Token {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        request.metadata_mut().insert(AUTHORIZATION, self.0.clone());
+        request
+            .metadata_mut()
+            .insert(AUTHORIZATION, self.bearer.clone());
+        if let Some(slot) = self.slot {
+            request
+                .metadata_mut()
+                .insert(LIBRARY_SLOT, MetadataValue::from_static(slot));
+        }
         Ok(request)
     }
 }
@@ -91,9 +104,44 @@ impl Drop for Process {
 #[derive(Clone)]
 pub struct Backend {
     _process: Arc<Process>,
+    channel: Channel,
+    token: Token,
     library: LibraryServiceClient<Connection>,
     playback: PlaybackServiceClient<Connection>,
     controller: ControllerServiceClient<Connection>,
+}
+
+impl Backend {
+    fn new(process: Arc<Process>, channel: Channel, token: Token) -> Self {
+        Self {
+            library: LibraryServiceClient::with_interceptor(channel.clone(), token.clone())
+                .max_decoding_message_size(MAX_MESSAGE_SIZE),
+            playback: PlaybackServiceClient::with_interceptor(channel.clone(), token.clone())
+                .max_decoding_message_size(MAX_MESSAGE_SIZE),
+            controller: ControllerServiceClient::with_interceptor(channel.clone(), token.clone()),
+            _process: process,
+            channel,
+            token,
+        }
+    }
+
+    /// The same backend, with every request about the open library of `kind`: an Engine
+    /// library and a folder of music can be open at the same time, and without this a
+    /// request is about the Engine library if there is one.
+    pub fn about(&self, kind: Kind) -> Self {
+        let slot = match kind {
+            Kind::Engine => SLOT_ENGINE,
+            Kind::Folder => SLOT_FOLDER,
+        };
+        Self::new(
+            self._process.clone(),
+            self.channel.clone(),
+            Token {
+                slot: Some(slot),
+                ..self.token.clone()
+            },
+        )
+    }
 }
 
 impl std::fmt::Debug for Backend {
@@ -180,11 +228,12 @@ pub async fn start() -> Result<Backend, String> {
         .connect()
         .await
         .map_err(|error| error.to_string())?;
-    let token = Token(
-        format!("Bearer {token}")
+    let token = Token {
+        bearer: format!("Bearer {token}")
             .parse()
             .map_err(|_| "invalid token".to_owned())?,
-    );
+        slot: None,
+    };
 
     let info = BackendServiceClient::with_interceptor(channel.clone(), token.clone())
         .get_info(GetInfoRequest {})
@@ -198,14 +247,7 @@ pub async fn start() -> Result<Backend, String> {
         ));
     }
 
-    Ok(Backend {
-        _process: process,
-        library: LibraryServiceClient::with_interceptor(channel.clone(), token.clone())
-            .max_decoding_message_size(MAX_MESSAGE_SIZE),
-        playback: PlaybackServiceClient::with_interceptor(channel.clone(), token.clone())
-            .max_decoding_message_size(MAX_MESSAGE_SIZE),
-        controller: ControllerServiceClient::with_interceptor(channel, token),
-    })
+    Ok(Backend::new(process, channel, token))
 }
 
 /// Has the backend open the library at `path` and fetches its tracks and playlists.
