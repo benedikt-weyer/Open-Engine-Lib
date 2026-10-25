@@ -27,6 +27,8 @@ Development uses a Nix flake (`flake.nix`) activated by direnv (`.envrc`: `use f
 
 The flake also exports `packages`/`apps` (default), `overlays.default` and `nixosModules.default` (`programs.open-engine-lib.enable`) for NixOS installs. `nix/package.nix` sources only `Cargo.toml`, `Cargo.lock`, `src`, `api`, `backend`, `locales` and `packaging`, and patches the runtime library RPATH (windowing libraries on the UI, ALSA on the audio process), so add any new top-level build inputs to its fileset.
 
+The icon is `packaging/open-engine-lib.svg` (desktop entry, Nix package, AppImage); the window's own icon is `packaging/open-engine-lib.png`, compiled into the UI (`window_icon` in `main.rs`), and the window's application id `open-engine-lib` is what a Wayland taskbar matches to the desktop entry. Change the PNG together with the SVG.
+
 Newly added files must be `git add`ed (at least `-N`) before Nix flake commands can see them, because flakes only read tracked files.
 
 The root `Cargo.toml` builds dependencies with `opt-level = 2` in debug builds (`[profile.dev.package."*"]`): the audio decoders are too slow unoptimised for waveform analysis to be usable.

@@ -6,3 +6,4 @@ Exec=open-engine-lib
 Icon=open-engine-lib
 Categories=AudioVideo;Audio;
 Terminal=false
+StartupWMClass=open-engine-lib

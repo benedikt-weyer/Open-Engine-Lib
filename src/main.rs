@@ -58,9 +58,29 @@ const TRACK_SCROLL_EVERY: Duration = Duration::from_millis(30);
 const TRACK_SCROLL_STEP: f32 = 14.0;
 const DRIVE_SCAN_INTERVAL: Duration = Duration::from_secs(3);
 
+/// The name the desktop knows the window by: the desktop entry's file name, which is how a
+/// taskbar finds the icon of a window on Wayland (and `StartupWMClass` on X11).
+#[cfg(target_os = "linux")]
+const APPLICATION_ID: &str = "open-engine-lib";
+
+/// The icon of the window, the same as `packaging/open-engine-lib.svg`.
+fn window_icon() -> Option<iced::window::Icon> {
+    iced::window::icon::from_file_data(include_bytes!("../packaging/open-engine-lib.png"), None)
+        .ok()
+}
+
 fn main() -> iced::Result {
     iced::application(State::new, update, view)
         .title("Open Engine Lib")
+        .window(iced::window::Settings {
+            icon: window_icon(),
+            #[cfg(target_os = "linux")]
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: APPLICATION_ID.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
         .theme(State::theme)
         .subscription(State::subscription)
         // Closing the window saves the session first, see `Message::CloseRequested`.
@@ -2130,6 +2150,11 @@ fn playback_error(language: Language, error: &PlaybackError, library: &Library) 
 mod tests {
     use super::*;
     use model::{Playlist, Track};
+
+    #[test]
+    fn the_window_icon_is_a_picture_iced_can_read() {
+        assert!(window_icon().is_some());
+    }
 
     fn track(id: u32) -> Track {
         Track {
