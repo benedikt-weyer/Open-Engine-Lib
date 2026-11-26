@@ -13,6 +13,7 @@
   libxrandr,
   alsa-lib,
   libkeyfinder,
+  sqlite,
   fetchurl,
 }:
 
@@ -75,8 +76,12 @@ rustPlatform.buildRustPackage {
     pkg-config
     patchelf
   ];
-  # libKeyFinder finds the key of a track (the audio process links it, with FFTW).
-  buildInputs = runtimeLibs ++ [ libkeyfinder ];
+  # libKeyFinder finds the key of a track (the audio process links it, with FFTW). The library
+  # process links the system SQLite.
+  buildInputs = runtimeLibs ++ [
+    libkeyfinder
+    sqlite
+  ];
 
   postInstall = ''
     ${lib.concatMapStringsSep "\n" (model: ''
