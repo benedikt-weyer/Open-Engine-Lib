@@ -170,6 +170,7 @@ columns_hint: "Tick the columns to show"
 stems_rendered: "Stems are rendered for this track"
 stems_none: "No stems rendered"
 col_location: Location
+col_location_info: "The location is where the track's file is now: the path the Engine library records (relative to its Engine Library folder), shown in full. Playback tries it first. It changes when files are moved or copied, for example by “Save as…” or “Sync to…”."
 location_streaming: Streaming (no file here)
 play: Play
 pause: Pause
@@ -269,6 +270,7 @@ playlist_delete_inside: "The playlists inside it are deleted too: {count}."
 playlist_delete_note: "Its tracks stay in the library. The source is only changed when you sync, and syncing keeps a backup."
 playlist_failed: "Could not change the playlists: {error}"
 col_origin: Origin
+col_origin_info: "The origin is the file path Open Engine Lib saved earlier, kept in its own database (not in the Engine library). It is only a fallback: a track plays from its location, and from its origin only if no file is there. “Save locations as origins” fills it; “Change origin folder…” moves all origins to another folder. (Not the same as Engine's origin database, which says where a track was first created.)"
 origin_migrate: Save locations as origins
 streaming_remove: "Remove {count} streaming songs"
 streaming_remove_confirm: "Click again to remove {count} streaming songs"

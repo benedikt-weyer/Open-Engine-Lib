@@ -130,7 +130,7 @@ On the drive I developed this with, 283 of 3,123 local tracks came out as render
 
 ## The track list
 
-Besides title, artist, album, genre, BPM and length, the list shows where each file is: the path the library records (relative to its `Engine Library` folder, usually starting with `..`) resolved against that folder, so it is a plain path such as `/run/media/you/DRIVE/House/track.flac`. It is worked out from the path alone, without asking the file system. Streaming tracks have no file here and say so. The location is the last column and takes the width the others leave; pointing at it shows the whole path, since a long one is cut off.
+Besides title, artist, album, genre, BPM and length, the list shows where each file is: the path the library records (relative to its `Engine Library` folder, usually starting with `..`) resolved against that folder, so it is a plain path such as `/run/media/you/DRIVE/House/track.flac`. It is worked out from the path alone, without asking the file system. Streaming tracks have no file here and say so. The location is the last column and takes the width the others leave; pointing at it shows the whole path, since a long one is cut off. The headers of the Origin and Location columns have a small circled "i" that explains, when pointed at, what the column is and how the saved origin differs from the location (`info_icon` in `browser.rs`; the texts are `col_origin_info` and `col_location_info`).
 
 The other columns can be resized by dragging the divider after their header (the pointer changes over it). The drag is followed anywhere in the window and ends when the button is let go, which also saves the widths in `<state dir>/open-engine-lib/track-columns.toml`. A column can be between 40 and 1200 pixels wide.
 

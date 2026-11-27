@@ -12,7 +12,9 @@ use iced::widget::{
     Space, button, canvas, checkbox, column, container, image, mouse_area, responsive, row,
     scrollable, text, tooltip,
 };
-use iced::{Color, ContentFit, Element, Fill, Point, Rectangle, Renderer, Size, Theme, mouse};
+use iced::{
+    Border, Color, ContentFit, Element, Fill, Point, Rectangle, Renderer, Size, Theme, mouse,
+};
 
 use crate::Message;
 use crate::columns::{Column, ColumnWidths, Hidden};
@@ -858,6 +860,29 @@ fn cell<'a>(content: impl iced::widget::text::IntoFragment<'a>) -> text::Text<'a
     text(content).size(14).wrapping(text::Wrapping::None)
 }
 
+/// A small circled "i" that explains a column when pointed at.
+fn info_icon<'a>(info: String) -> Element<'a, Message> {
+    tooltip(
+        container(text("i").size(10))
+            .padding([0, 5])
+            .style(|theme: &Theme| container::Style {
+                text_color: Some(theme.extended_palette().secondary.base.color),
+                border: Border {
+                    color: theme.extended_palette().secondary.base.color,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..container::Style::default()
+            }),
+        container(text(info).size(13))
+            .max_width(340)
+            .padding([6, 10])
+            .style(container::rounded_box),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
 /// The bar of column titles. Its height is that of its text and the handles in it,
 /// whatever the height of the window. Clicking a title sorts the list by it; the one it is
 /// sorted by shows which way.
@@ -868,7 +893,7 @@ fn header<'a>(
     numbered: bool,
 ) -> Element<'a, Message> {
     let strings = language.strings();
-    let heading_cell = |label: &str, key: SortKey| -> Element<'a, Message> {
+    let heading_cell = |label: &str, key: SortKey, info: Option<&str>| -> Element<'a, Message> {
         let sorted = sort.filter(|sort| sort.key == key);
         let arrow = match sorted {
             Some(Sort {
@@ -878,21 +903,29 @@ fn header<'a>(
             None => "",
         };
         let label = cell(format!("{label}{arrow}"));
-        mouse_area(
-            container(if sorted.is_some() {
-                label
-            } else {
-                label.style(text::secondary)
-            })
-            .width(Fill),
-        )
-        .on_press(Message::SortBy(key))
-        .interaction(mouse::Interaction::Pointer)
-        .into()
+        let label = if sorted.is_some() {
+            label
+        } else {
+            label.style(text::secondary)
+        };
+        let content: Element<'a, Message> = match info {
+            Some(info) => row![label, info_icon(info.to_owned())]
+                .spacing(6)
+                .align_y(iced::Center)
+                .into(),
+            None => label.into(),
+        };
+        mouse_area(container(content).width(Fill))
+            .on_press(Message::SortBy(key))
+            .interaction(mouse::Interaction::Pointer)
+            .into()
     };
-    let by = |column: Column, label: &str| heading_cell(label, SortKey::Column(column));
+    let by = |column: Column, label: &str| heading_cell(label, SortKey::Column(column), None);
+    let by_with_info = |column: Column, label: &str, info: &str| {
+        heading_cell(label, SortKey::Column(column), Some(info))
+    };
     container(line(
-        numbered.then(|| heading_cell("#", SortKey::Number)),
+        numbered.then(|| heading_cell("#", SortKey::Number, None)),
         Space::new().into(),
         Space::new().into(),
         [
@@ -909,9 +942,17 @@ fn header<'a>(
             by(Column::AnalysisOrigin, &strings.col_analysis_origin),
             by(Column::Lighting, &strings.col_lighting),
             by(Column::Stems, &strings.col_stems),
-            by(Column::Origin, &strings.col_origin),
+            by_with_info(
+                Column::Origin,
+                &strings.col_origin,
+                &strings.col_origin_info,
+            ),
         ],
-        heading_cell(&strings.col_location, SortKey::Location),
+        heading_cell(
+            &strings.col_location,
+            SortKey::Location,
+            Some(&strings.col_location_info),
+        ),
         layout,
         handle,
     ))

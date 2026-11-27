@@ -170,6 +170,7 @@ stems_rendered: "Für diesen Titel sind Stems gerendert"
 stems_none: "Keine Stems gerendert"
 lighting_none: "Nicht in SoundSwitch"
 col_location: Speicherort
+col_location_info: "Der Speicherort ist der Ort, an dem die Datei des Titels jetzt liegt: der Pfad, den die Engine-Bibliothek speichert (relativ zu ihrem Ordner Engine Library), vollständig angezeigt. Die Wiedergabe versucht ihn zuerst. Er ändert sich, wenn Dateien verschoben oder kopiert werden, etwa durch „Speichern unter…“ oder „Abgleichen mit…“."
 location_streaming: Streaming (keine Datei hier)
 play: Abspielen
 pause: Pause
@@ -269,6 +270,7 @@ playlist_delete_inside: "Die Playlists darin werden mit gelöscht: {count}."
 playlist_delete_note: "Die Titel bleiben in der Bibliothek. Die Quelle wird erst beim Abgleich geändert, und dabei wird eine Sicherung angelegt."
 playlist_failed: "Die Playlists konnten nicht geändert werden: {error}"
 col_origin: Herkunft
+col_origin_info: "Die Herkunft ist der Dateipfad, den Open Engine Lib früher gespeichert hat, in seiner eigenen Datenbank (nicht in der Engine-Bibliothek). Sie ist nur ein Ersatz: Ein Titel wird von seinem Speicherort gespielt, von der Herkunft nur, wenn dort keine Datei liegt. „Orte als Herkunft speichern“ füllt sie; „Herkunftsordner ändern…“ verlegt alle Herkünfte in einen anderen Ordner. (Nicht dasselbe wie die Herkunftsdatenbank von Engine, die sagt, wo ein Titel zuerst angelegt wurde.)"
 origin_migrate: Orte als Herkunft speichern
 streaming_remove: "{count} Streaming-Titel entfernen"
 streaming_remove_confirm: "Zum Entfernen von {count} Streaming-Titeln erneut klicken"
