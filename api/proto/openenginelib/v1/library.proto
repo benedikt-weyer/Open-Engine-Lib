@@ -520,6 +520,12 @@ message GetLibrarySyncDiffRequest {
   // track has one in the library it comes from. Without it a track that was analysed again
   // is not seen as different.
   bool sync_analysis = 9;
+  // Leave the playlists alone: none is created, changed or deleted, no track is added to
+  // one, and the saved origins, which go along with the playlists, are not written either.
+  // Streaming songs are not deleted (`remove_missing` then has nothing to do). What the
+  // other options ask for is still done, so that a sync of just the stars changes only the
+  // stars. Without it the playlists are made the same, as always.
+  bool skip_playlists = 10;
 }
 // Lists are cut at 200 entries, the counts are complete.
 message GetLibrarySyncDiffResponse {
@@ -571,6 +577,8 @@ message SyncToLibraryRequest {
   // track has one in the library it comes from. Without it a track that was analysed again
   // is not seen as different.
   bool sync_analysis = 9;
+  // As for `GetLibrarySyncDiffRequest`.
+  bool skip_playlists = 10;
 }
 message SyncToLibraryResponse {
   string target_path = 1;

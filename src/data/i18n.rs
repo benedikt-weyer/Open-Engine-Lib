@@ -298,6 +298,7 @@ pub struct Strings {
     pub libsync_nothing: String,
     pub libsync_hint: String,
     pub libsync_remove: String,
+    pub libsync_playlists: String,
     pub libsync_missing: String,
     pub libsync_run: String,
     pub libsync_writing: String,

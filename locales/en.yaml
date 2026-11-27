@@ -337,6 +337,7 @@ libsync_summary: "Playlists: {count} would change"
 libsync_nothing: The playlists are already the same.
 libsync_hint: "The other library gets the playlists and smart playlists of the open one. Tracks are matched by where they came from, or by a file name only one track has. Tracks the other library doesn't have are left out of its playlists, unless the tracks are copied."
 libsync_remove: Also delete playlists and streaming songs that only the other library has
+libsync_playlists: "Make the playlists and smart playlists the same, with the saved origins"
 libsync_missing: "Tracks the other library doesn't have: {count}"
 libsync_run: Sync playlists
 libsync_writing: Writing the playlists…

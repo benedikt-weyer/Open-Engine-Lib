@@ -26,6 +26,10 @@ const LIST_HEIGHT: f32 = 260.0;
 /// What to sync besides the playlists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
+    /// The playlists and smart playlists are made the same (and the saved origins go along
+    /// with them). Off, the playlists are left alone, so that a sync of just the stars, say,
+    /// changes only those.
+    pub playlists: bool,
     /// Also delete playlists that only the other library has.
     pub remove_missing: bool,
     /// The stars of the open library replace those of the other library's tracks.
@@ -50,6 +54,7 @@ impl Default for Options {
     /// library has is deleted. (The ticks below it can take parts back.)
     fn default() -> Self {
         Self {
+            playlists: true,
             remove_missing: true,
             stars: true,
             // (The copied files' places are the locations.)
@@ -65,6 +70,7 @@ impl Default for Options {
 /// A tick of the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
+    Playlists,
     RemoveMissing,
     Stars,
     Locations,
@@ -87,6 +93,13 @@ impl Options {
 
     pub fn with(mut self, setting: Setting, on: bool) -> Self {
         match setting {
+            Setting::Playlists => {
+                self.playlists = on;
+                // Nothing is deleted from playlists that are left alone.
+                if !on {
+                    self.remove_missing = false;
+                }
+            }
             Setting::RemoveMissing => self.remove_missing = on,
             Setting::Stars => self.stars = on,
             Setting::Locations => self.locations = on,
@@ -397,10 +410,16 @@ fn ready<'a>(
         secondary(words(&strings.libsync_hint, &strings.libsync_hint_reverse).clone()),
         all,
         tick(
+            &strings.libsync_playlists,
+            options.playlists,
+            Setting::Playlists,
+            true
+        ),
+        tick(
             words(&strings.libsync_remove, &strings.libsync_remove_reverse),
             options.remove_missing,
             Setting::RemoveMissing,
-            true
+            options.playlists
         ),
         tick(
             words(&strings.libsync_stars, &strings.libsync_stars_reverse),
@@ -595,6 +614,19 @@ mod tests {
         let without = options.with(Setting::Analysis, false);
         assert!(!without.analysis && !without.is_all());
         assert!(without.with(Setting::All, true).analysis);
+
+        // Only the stars: the playlists are left alone, and nothing is deleted from them.
+        let stars_only = options
+            .with(Setting::Playlists, false)
+            .with(Setting::CopyTracks, false)
+            .with(Setting::CopyStems, false)
+            .with(Setting::Analysis, false)
+            .with(Setting::Reverse, true);
+        assert!(!stars_only.playlists && !stars_only.remove_missing && stars_only.stars);
+        assert!(!stars_only.is_all());
+        // Turning the playlists back on does not bring back the deleting.
+        assert!(!stars_only.with(Setting::Playlists, true).remove_missing);
+        assert!(stars_only.with(Setting::All, true).playlists);
 
         let options = options
             .with(Setting::CopyTracks, false)

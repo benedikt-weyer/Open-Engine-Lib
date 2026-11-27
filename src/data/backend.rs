@@ -896,7 +896,8 @@ pub async fn library_sync_diff(
         .library
         .get_library_sync_diff(GetLibrarySyncDiffRequest {
             target_path: target.display().to_string(),
-            remove_missing: options.remove_missing,
+            remove_missing: options.remove_missing && options.playlists,
+            skip_playlists: !options.playlists,
             sync_stars: options.stars,
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,
@@ -920,7 +921,8 @@ pub async fn sync_to_library(
         .library
         .sync_to_library(SyncToLibraryRequest {
             target_path: target.display().to_string(),
-            remove_missing: options.remove_missing,
+            remove_missing: options.remove_missing && options.playlists,
+            skip_playlists: !options.playlists,
             sync_stars: options.stars,
             sync_locations: options.locations,
             copy_tracks: options.copy_tracks,

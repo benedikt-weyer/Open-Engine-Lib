@@ -337,6 +337,7 @@ libsync_summary: "Playlists: {count} würden sich ändern"
 libsync_nothing: Die Playlists sind bereits gleich.
 libsync_hint: "Die andere Bibliothek bekommt die Playlists und Smart-Playlists der geöffneten. Titel werden über ihre Herkunft zugeordnet oder über einen Dateinamen, den nur ein Titel hat. Titel, die die andere Bibliothek nicht hat, fehlen in ihren Playlists, außer die Titel werden kopiert."
 libsync_remove: Auch Playlists und Streaming-Titel löschen, die nur die andere Bibliothek hat
+libsync_playlists: "Playlists und Smart-Playlists angleichen, mit den gespeicherten Herkünften"
 libsync_missing: "Titel, die die andere Bibliothek nicht hat: {count}"
 libsync_run: Playlists abgleichen
 libsync_writing: Playlists werden geschrieben…

@@ -668,6 +668,7 @@ impl LibraryService for Service {
                 &scratch,
                 mirror_options(
                     request.remove_missing,
+                    request.skip_playlists,
                     crate::track_sync::Options {
                         stars: request.sync_stars,
                         locations: request.sync_locations,
@@ -704,6 +705,7 @@ impl LibraryService for Service {
                 &scratch,
                 mirror_options(
                     request.remove_missing,
+                    request.skip_playlists,
                     crate::track_sync::Options {
                         stars: request.sync_stars,
                         locations: request.sync_locations,
@@ -1329,12 +1331,14 @@ fn known_origins(library: &Library) -> Vec<api::TrackOrigin> {
 
 fn mirror_options(
     remove_missing: bool,
+    skip_playlists: bool,
     tracks: crate::track_sync::Options,
     reverse: bool,
     create: bool,
 ) -> mirror::Options {
     mirror::Options {
         remove_missing,
+        skip_playlists,
         reverse,
         create,
         tracks,

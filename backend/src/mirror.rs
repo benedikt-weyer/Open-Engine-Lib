@@ -104,6 +104,9 @@ impl From<EditError> for MirrorError {
 pub struct Options {
     /// Also delete playlists and smart playlists that only the other library has.
     pub remove_missing: bool,
+    /// Leave the playlists alone (and the origins and streaming songs that go with them):
+    /// only what `tracks` asks for is done.
+    pub skip_playlists: bool,
     pub tracks: track_sync::Options,
     /// The other way round: the other library is the master and the open library's
     /// working copy is changed.
@@ -393,6 +396,18 @@ fn work(
     } else {
         track_sync::Report::default()
     };
+    if options.skip_playlists {
+        return Ok(Work {
+            outcome: Outcome {
+                changes: Vec::new(),
+                tracks_removed: 0,
+                missing: Vec::new(),
+                origins_changed: 0,
+                changed_origins: Vec::new(),
+            },
+            tracks,
+        });
+    }
     progress.phase(Phase::Updating, 0, 0);
     let library = match copy.open() {
         Ok(library) => library,
@@ -1635,6 +1650,93 @@ mod tests {
             .tracks_changed,
             0
         );
+    }
+
+    #[test]
+    fn a_sync_of_just_the_stars_leaves_the_playlists_and_the_tracks_alone() {
+        let stars_only = Options {
+            skip_playlists: true,
+            tracks: track_sync::Options {
+                stars: true,
+                ..Default::default()
+            },
+            ..Options::default()
+        };
+
+        // The PC has a playlist ("Mix") and a track (c) that the stick lacks. Writing the
+        // stars to the stick creates neither.
+        let temp = TempDir::new("stars-only");
+        let (pc, stick) = with_files(&temp.0);
+        let source = open_source(&pc, &temp.0.join("source"));
+        let found = diff(&source, &stick, &temp.0.join("scratch"), stars_only).unwrap();
+        assert_eq!(
+            (
+                found.playlists_changed,
+                found.tracks_missing,
+                found.tracks_added
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(found.tracks_changed, 1, "only the stars of a");
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            stars_only,
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!((done.playlists_changed, done.tracks_added), (0, 0));
+        let after = open(&stick, &temp.0.join("check"));
+        assert!(lists(&after).is_empty(), "no playlist was made");
+        assert_eq!(after.tracks.len(), 2, "no track was added");
+        assert_eq!(after.tracks[0].rating, Some(80), "the stars were synced");
+        // With the playlists the same sync would have made "Mix", which is what it did before.
+        let temp = TempDir::new("stars-and-playlists");
+        let (pc, stick) = with_files(&temp.0);
+        let source = open_source(&pc, &temp.0.join("source"));
+        let with_playlists = Options {
+            skip_playlists: false,
+            ..stars_only
+        };
+        let found = diff(&source, &stick, &temp.0.join("scratch"), with_playlists).unwrap();
+        assert_eq!(found.playlists_changed, 1);
+
+        // The other way round it is the same: the stick is the open library, the PC's stars
+        // go into its working copy, and it gets no playlist and no track from the PC.
+        let temp = TempDir::new("stars-only-back");
+        let (pc, stick) = with_files(&temp.0);
+        let open_library = open_source(&stick, &temp.0.join("working-copy"));
+        let back = Options {
+            reverse: true,
+            ..stars_only
+        };
+        let done = push(
+            &open_library,
+            &pc,
+            &temp.0.join("scratch"),
+            back,
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                done.playlists_changed,
+                done.tracks_added,
+                done.tracks_changed
+            ),
+            (0, 0, 1)
+        );
+        let working = temp
+            .0
+            .join("working-copy")
+            .join(DATABASE_DIR)
+            .join(MAIN_DATABASE);
+        let changed =
+            Library::open_copy(&working, stick.clone(), temp.0.join("working-copy")).unwrap();
+        assert!(lists(&changed).is_empty(), "no playlist came over");
+        assert_eq!(changed.tracks.len(), 2, "no track came over");
+        assert_eq!(changed.tracks[0].rating, Some(80), "the stars did");
     }
 
     #[test]
