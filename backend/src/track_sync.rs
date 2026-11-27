@@ -524,6 +524,25 @@ pub fn sync(
 
                 let mut names = copied.clone();
                 let mut values = copied.clone();
+                // The track keeps its origin, unless another track of this library has it
+                // (libraries made from one database hand out the same origins separately):
+                // it then gets none, and the database makes a new one.
+                let origin_taken: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM main.Track t, src.Track s \
+                         WHERE s.id = ?1 AND t.originDatabaseUuid = s.originDatabaseUuid \
+                         AND t.originTrackId = s.originTrackId)",
+                        [track.db_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if origin_taken {
+                    for (name, value) in names.iter().zip(values.iter_mut()) {
+                        if name == "originDatabaseUuid" || name == "originTrackId" {
+                            *value = "NULL".into();
+                        }
+                    }
+                }
                 names.extend(["path".into(), "albumArtId".into()]);
                 values.extend(["?1".into(), "?2".into()]);
                 if has_filename {
@@ -565,15 +584,37 @@ pub fn sync(
                 report.added.push(index);
                 place(destination, track, copy_files, progress, &mut report)?;
                 if options.copy_stems {
-                    place_stems(
-                        source,
-                        probe,
-                        track,
-                        None,
-                        copy_files,
-                        progress,
-                        &mut report,
-                    )?;
+                    // The stems file is named after the origin the new track has.
+                    let origin = if origin_taken {
+                        transaction
+                            .query_row(
+                                "SELECT originDatabaseUuid, originTrackId FROM main.Track \
+                                 WHERE id = ?1",
+                                [new_id],
+                                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                            )
+                            .ok()
+                    } else {
+                        None
+                    };
+                    match (origin, stems_name(track)) {
+                        (Some((uuid, id)), Some(name)) => place_extra(
+                            &source.dir.join(STEMS_DIR).join(&name),
+                            &probe.dir.join(STEMS_DIR).join(stems_file_name(&uuid, id)),
+                            copy_files,
+                            progress,
+                            &mut report,
+                        )?,
+                        _ => place_stems(
+                            source,
+                            probe,
+                            track,
+                            None,
+                            copy_files,
+                            progress,
+                            &mut report,
+                        )?,
+                    }
                 }
             }
         }

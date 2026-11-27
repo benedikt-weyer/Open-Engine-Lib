@@ -675,8 +675,38 @@ fn find(library: &Library, path: &[String], smart: bool) -> Option<usize> {
         .find(|&index| playlists[index].smart == smart && titles(&playlists, index) == path)
 }
 
-/// For each track of `source`, the track of `target` it is: the one with the same origin,
-/// or else the one with the same file name if only one track of each has it.
+/// Whether two tracks that share an origin can be the same song. Two libraries made from one
+/// database have the same database UUID, so each hands out the origin ids from the same
+/// numbers: a track one of them added later can have the origin of a quite different track
+/// of the other, and treating those as one would give the track the other's file. They are the
+/// same if both are files or both are streamed, and the file name or the title and artist agree.
+fn alike(a: &library::Track, b: &library::Track) -> bool {
+    if a.streaming != b.streaming {
+        return false;
+    }
+    let file_name = |track: &library::Track| {
+        track
+            .relative_path
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+    };
+    if !a.streaming && file_name(a) == file_name(b) {
+        return true;
+    }
+    let tags = |track: &library::Track| {
+        (
+            track.title.trim().to_lowercase(),
+            track.artist.trim().to_lowercase(),
+        )
+    };
+    let (a, b) = (tags(a), tags(b));
+    !a.0.is_empty() && a == b
+}
+
+/// For each track of `source`, the track of `target` it is: the one with the same origin (if
+/// it is `alike`), or else the one with the same file name if only one track of each has it.
 pub fn match_tracks(source: &Library, target: &Library) -> Vec<Option<usize>> {
     let by_origin: HashMap<&(String, i64), usize> = target
         .tracks
@@ -716,6 +746,7 @@ pub fn match_tracks(source: &Library, target: &Library) -> Vec<Option<usize>> {
                 .origin_key
                 .as_ref()
                 .and_then(|origin| by_origin.get(origin))
+                .filter(|&&index| alike(track, &target.tracks[index]))
             {
                 return Some(index);
             }
@@ -992,6 +1023,12 @@ mod tests {
         CREATE TABLE PerformanceData (trackId INTEGER PRIMARY KEY, trackData BLOB, beatData BLOB);
         CREATE TRIGGER trigger_after_insert_Track_insert_performance_data AFTER INSERT ON Track
         BEGIN INSERT INTO PerformanceData(trackId) VALUES(NEW.id); END;
+        -- What Engine does for a track that is added without an origin (its database's UUID
+        -- is `db` here).
+        CREATE TRIGGER trigger_after_insert_Track_fix_origin AFTER INSERT ON Track
+        WHEN IFNULL(NEW.originTrackId, 0) = 0 OR IFNULL(NEW.originDatabaseUuid, '') = ''
+        BEGIN UPDATE Track SET originTrackId = NEW.id, originDatabaseUuid = 'db'
+        WHERE id = NEW.id; END;
         CREATE TABLE Playlist (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT,
             parentListId INTEGER, isPersisted BOOLEAN, nextListId INTEGER,
             lastEditTime DATETIME, isExplicitlyExported BOOLEAN,
@@ -1711,6 +1748,75 @@ mod tests {
             changed.tracks[0].relative_path,
             "../../stick/Engine-Tracks/AC_DC/Back_ In Black_/a.flac"
         );
+    }
+
+    #[test]
+    fn a_track_with_the_origin_of_another_track_is_not_taken_for_it() {
+        // Libraries made from one database have the same UUID and each hands out the same
+        // origin ids to the tracks it adds later. Here the stick has two other tracks under
+        // the origins of the PC's first two, and the playlist has to get the PC's tracks,
+        // not those.
+        let temp = TempDir::new("origin-clash");
+        let pc = make(
+            &temp.0,
+            "pc",
+            &[("one.flac", 1), ("two.flac", 2), ("keep.flac", 3)],
+            "INSERT INTO Playlist (id, title, parentListId, isPersisted, nextListId) VALUES (1, 'Set', 0, 1, 0);
+             INSERT INTO PlaylistEntity VALUES (1, 1, 1, 'db', 2, 0), (2, 1, 2, 'db', 3, 0), (3, 1, 3, 'db', 0, 0);",
+        );
+        fs::create_dir_all(temp.0.join("pc/Music")).unwrap();
+        for file in ["one.flac", "two.flac", "keep.flac"] {
+            fs::write(temp.0.join("pc/Music").join(file), file.as_bytes()).unwrap();
+        }
+        let stick = make(
+            &temp.0,
+            "stick",
+            &[("old-1.m4a", 1), ("old-2.m4a", 2), ("keep.flac", 3)],
+            "",
+        );
+        let source = open_source(&pc, &temp.0.join("source"));
+
+        // Not one of them is matched with the other's track of the same origin.
+        let target = open(&stick, &temp.0.join("probe"));
+        let matched = match_tracks(&source, &target);
+        assert_eq!(matched, [None, None, Some(2)]);
+
+        let options = tracks(track_sync::Options {
+            copy_tracks: true,
+            ..Default::default()
+        });
+        let done = push(
+            &source,
+            &stick,
+            &temp.0.join("scratch"),
+            options,
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!((done.tracks_added, done.tracks_missing), (2, 0));
+
+        let after = open(&stick, &temp.0.join("check"));
+        let set = lists(&after)
+            .into_iter()
+            .find(|(name, _)| name == "Set")
+            .expect("the playlist is there");
+        assert_eq!(
+            set.1,
+            ["one.flac", "two.flac", "keep.flac"],
+            "the right tracks, in the playlist's order"
+        );
+        // The stick's own tracks are as they were, and the new ones are other tracks.
+        assert_eq!(after.tracks.len(), 5);
+        for old in ["old-1.m4a", "old-2.m4a"] {
+            let track = after
+                .tracks
+                .iter()
+                .find(|track| track.title == old)
+                .unwrap();
+            assert_eq!(track.relative_path, format!("../Music/{old}"));
+        }
+        let origins: HashSet<_> = after.tracks.iter().map(|track| &track.origin_key).collect();
+        assert_eq!(origins.len(), 5, "every track has an origin of its own");
     }
 
     #[test]
