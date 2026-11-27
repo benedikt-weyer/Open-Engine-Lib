@@ -131,14 +131,20 @@ pub fn view<'a>(
         ],
         Some(browser) => column![
             browser::playlists(browser, drag, language),
-            button(text(&strings.playlist_new))
-                .width(Fill)
-                .style(button::secondary)
-                .on_press_maybe(can_sync.then_some(Message::PlaylistNew)),
-            button(text(&strings.smart_new))
-                .width(Fill)
-                .style(button::secondary)
-                .on_press_maybe(can_sync.then_some(Message::SmartNew)),
+            // Icon buttons, side by side; what each does is in its tooltip.
+            row![
+                icon_button(
+                    iced_fonts::lucide::list_plus(),
+                    &strings.playlist_new,
+                    can_sync.then_some(Message::PlaylistNew),
+                ),
+                icon_button(
+                    iced_fonts::lucide::list_filter_plus(),
+                    &strings.smart_new,
+                    can_sync.then_some(Message::SmartNew),
+                ),
+            ]
+            .spacing(8),
             // Compare the working copy with the library it was made from, and write it there
             // (save) or replace it by the library (discard).
             button(text(&strings.sync_save_button))
@@ -173,6 +179,25 @@ pub fn view<'a>(
     container(content.spacing(16).height(Fill))
         .width(WIDTH)
         .into()
+}
+
+/// A button that is only an icon, as wide as its share of the row, with `tip` shown when it
+/// is pointed at. It does nothing while `on_press` is `None`.
+fn icon_button<'a>(
+    icon: text::Text<'a>,
+    tip: &'a str,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    tooltip(
+        button(icon.size(18).center().width(Fill))
+            .width(Fill)
+            .style(button::secondary)
+            .on_press_maybe(on_press),
+        text(tip).size(13),
+        tooltip::Position::Bottom,
+    )
+    .style(container::rounded_box)
+    .into()
 }
 
 /// The folders of music that were added, with the button to add one. Clicking a folder opens

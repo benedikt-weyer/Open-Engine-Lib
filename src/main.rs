@@ -84,6 +84,8 @@ fn main() -> iced::Result {
             },
             ..Default::default()
         })
+        // The icons of the buttons (Lucide, from `iced_fonts`).
+        .font(iced_fonts::LUCIDE_FONT_BYTES)
         .theme(State::theme)
         .subscription(State::subscription)
         // Closing the window saves the session first, see `Message::CloseRequested`.
