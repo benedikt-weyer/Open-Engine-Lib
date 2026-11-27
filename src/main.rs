@@ -42,7 +42,7 @@ use views::{
     browser, cue_bar, cue_editor, deck, error_text, folder_menu, import_view, library_sync_view,
     loop_bar, loop_editor, menubar, navbar, origin_prefix_dialog, player_bar, playlist_dialog,
     playlist_drag, playlist_menu, progress_view, repair_view, right_click, settings, sidebar,
-    smart_editor, sync_view, toast, track_menu,
+    smart_editor, sync_view, tabs, toast, track_menu,
 };
 use waveform::{Waveform, Waveforms};
 
@@ -57,6 +57,9 @@ const REVEAL_DELAY: Duration = Duration::from_millis(150);
 const TRACK_SCROLL_EVERY: Duration = Duration::from_millis(30);
 const TRACK_SCROLL_STEP: f32 = 14.0;
 const DRIVE_SCAN_INTERVAL: Duration = Duration::from_secs(3);
+/// How often the backend is asked which open libraries have unsaved changes (a stat of one
+/// file each).
+const UNSAVED_CHECK_EVERY: Duration = Duration::from_secs(1);
 
 /// The name the desktop knows the window by: the desktop entry's file name, which is how a
 /// taskbar finds the icon of a window on Wayland (and `StartupWMClass` on X11).
@@ -136,10 +139,12 @@ struct State {
     restore: Option<Session>,
     session: SessionStore,
     library: LibraryState,
-    /// The open library of the other kind than `library`, if there is one: an Engine library
-    /// and a folder of music can be open at the same time (one of each at most), and the
-    /// sidebar brings this one back, which parks the shown one in its place.
-    parked: Option<Browser>,
+    /// The other open libraries, the ones that are not shown: any number of Engine libraries
+    /// and folders of music can be open at the same time, each as a tab. Showing one parks
+    /// the shown one here (`switch_to`); the tabs are in the order of `Browser::order`.
+    parked: Vec<Browser>,
+    /// What the next library that is opened gets as its `Browser::order`.
+    next_tab: u64,
     /// A playlist of the tree being dragged to another place.
     playlist_drag: Option<playlist_drag::Drag>,
     /// A track of the shown playlist being dragged to another place in it.
@@ -293,6 +298,13 @@ pub enum Message {
     /// A column was ticked (shown) or unticked (hidden) in that menu.
     ColumnShown(Column, bool),
 
+    /// A tab of the tab bar was clicked: show that library (by the backend's id for it).
+    TabSelect(u64),
+    /// The cross of a tab was clicked: close that library.
+    TabClose(u64),
+    /// Time to ask the backend which open libraries have changes that were not saved.
+    UnsavedTick,
+    UnsavedChecked(u64, Result<bool, String>),
     /// The "Save changes" button: open the window that writes the working copy to the source.
     SyncSave,
     /// The "Discard changes" button: open the window that replaces the working copy by the
@@ -625,7 +637,8 @@ impl State {
             restore: None,
             session,
             library: LibraryState::Closed { error: None },
-            parked: None,
+            parked: Vec::new(),
+            next_tab: 1,
             playlist_drag: None,
             moving_playlist: false,
             track_drag: None,
@@ -781,8 +794,16 @@ impl State {
         } else {
             Subscription::none()
         };
+        // The tabs of Engine libraries show a star while the working copy has edits that were
+        // not saved to the source.
+        let unsaved = if self.has_engine_tab() {
+            iced::time::every(UNSAVED_CHECK_EVERY).map(|_| Message::UnsavedTick)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             mpris::subscription().map(Message::Mpris),
+            unsaved,
             poll,
             resizing,
             dragging,
@@ -799,17 +820,17 @@ impl State {
     fn backend(&self) -> Option<Backend> {
         match (&self.backend, &self.library) {
             (BackendState::Ready(backend), LibraryState::Open(browser)) => {
-                Some(backend.about(browser.library.kind))
+                Some(backend.about(browser.library.id))
             }
             (BackendState::Ready(backend), _) => Some(Backend::clone(backend)),
             _ => None,
         }
     }
 
-    /// The backend, with its requests about the open library of `kind`.
-    fn backend_about(&self, kind: model::Kind) -> Option<Backend> {
+    /// The backend, with its requests about the open library with this id.
+    fn backend_about(&self, id: u64) -> Option<Backend> {
         match &self.backend {
-            BackendState::Ready(backend) => Some(backend.about(kind)),
+            BackendState::Ready(backend) => Some(backend.about(id)),
             _ => None,
         }
     }
@@ -834,49 +855,156 @@ impl State {
         self.playlist_menu = None;
     }
 
-    /// Makes room for a library of `kind` to be opened: the shown library is parked if it is
-    /// of the other kind, and gone if it is of this kind (opening replaces it). A parked
-    /// library of this kind is gone too: one of each kind at most.
-    fn make_room_for(&mut self, kind: model::Kind) {
+    /// Parks the shown library, if one is shown, to make room for another one to be opened
+    /// (it stays open as a tab).
+    fn park_shown(&mut self) {
         let shown = std::mem::replace(&mut self.library, LibraryState::Closed { error: None });
-        if self
+        if let LibraryState::Open(browser) = shown {
+            self.parked.push(browser);
+        }
+    }
+
+    /// The id of the library that is shown, if one is.
+    fn shown_id(&self) -> Option<u64> {
+        match &self.library {
+            LibraryState::Open(browser) => Some(browser.library.id),
+            _ => None,
+        }
+    }
+
+    /// The open libraries, the shown one and the parked ones.
+    fn browsers(&self) -> impl Iterator<Item = &Browser> {
+        let shown = match &self.library {
+            LibraryState::Open(browser) => Some(browser),
+            _ => None,
+        };
+        shown.into_iter().chain(self.parked.iter())
+    }
+
+    /// The id of the open library (shown or parked) at `path`, if there is one: it is not
+    /// read again, its tab is shown.
+    fn open_library_at(&self, path: &Path) -> Option<u64> {
+        self.browsers()
+            .find(|browser| Path::new(&browser.library.path) == path)
+            .map(|browser| browser.library.id)
+    }
+
+    /// Whether an Engine library is open (shown or parked), which can have unsaved changes.
+    fn has_engine_tab(&self) -> bool {
+        self.browsers().any(|browser| browser.library.is_engine())
+    }
+
+    /// The tabs of the open libraries, in the order they were opened.
+    fn tabs(&self) -> Vec<tabs::Tab> {
+        let shown = self.shown_id();
+        let mut browsers: Vec<&Browser> = self.browsers().collect();
+        browsers.sort_by_key(|browser| browser.order);
+        browsers
+            .into_iter()
+            .map(|browser| tabs::Tab {
+                id: browser.library.id,
+                title: browser.library.title(),
+                path: browser.library.path.clone(),
+                unsaved: browser.unsaved,
+                active: Some(browser.library.id) == shown,
+            })
+            .collect()
+    }
+
+    /// Shows the open library with this id and parks the shown one. What plays stops: the
+    /// player's queue holds the tracks of one library.
+    fn switch_to(&mut self, id: u64) -> Task<Message> {
+        if self.locked() || matches!(self.library, LibraryState::Opening(_)) {
+            return Task::none();
+        }
+        let Some(position) = self
             .parked
-            .as_ref()
-            .is_some_and(|parked| parked.library.kind == kind)
-        {
-            self.parked = None;
-        }
-        if let LibraryState::Open(browser) = shown
-            && browser.library.kind != kind
-        {
-            self.parked = Some(browser);
-        }
-    }
-
-    /// Whether `path` is the parked library.
-    fn is_parked(&self, path: &Path) -> bool {
-        self.parked
-            .as_ref()
-            .is_some_and(|parked| Path::new(&parked.library.path) == path)
-    }
-
-    /// Shows the parked library and parks the shown one. What plays stops: the player's
-    /// queue holds the tracks of one library.
-    fn switch_libraries(&mut self) -> Task<Message> {
-        let Some(parked) = self.parked.take() else {
+            .iter()
+            .position(|browser| browser.library.id == id)
+        else {
             return Task::none();
         };
-        // (The backend stops what plays when a library is opened or closed; here nothing is.)
+        // (The backend stops what plays when a library is closed; here nothing is.)
         let stop = self.control(Control::Stop);
-        let shown = std::mem::replace(&mut self.library, LibraryState::Open(parked));
+        let target = self.parked.remove(position);
+        let shown = std::mem::replace(&mut self.library, LibraryState::Open(target));
         if let LibraryState::Open(browser) = shown {
-            self.parked = Some(browser);
+            self.parked.push(browser);
         }
         self.forget_shown_library();
         let LibraryState::Open(browser) = &self.library else {
             return stop;
         };
         Task::batch([stop, browser.restore_scroll()])
+    }
+
+    /// Closes the open library with this id (a tab's cross). If it was shown, the tab next
+    /// to it is shown, else none. Its edits stay in its working copy, so the star is there
+    /// again when it is opened again.
+    fn close_tab(&mut self, id: u64) -> Task<Message> {
+        if self.locked() || matches!(self.library, LibraryState::Opening(_)) {
+            return Task::none();
+        }
+        let backend = self.backend_about(id);
+        let mut scroll = Task::none();
+        if self.shown_id() == Some(id) {
+            let shown_order = self.browsers().next().map_or(0, |browser| browser.order);
+            // The next tab to the right, else the one to the left.
+            let next = self
+                .parked
+                .iter()
+                .enumerate()
+                .filter(|(_, browser)| browser.order > shown_order)
+                .min_by_key(|(_, browser)| browser.order)
+                .or_else(|| {
+                    self.parked
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, browser)| browser.order)
+                })
+                .map(|(position, _)| position);
+            self.library = match next {
+                Some(position) => LibraryState::Open(self.parked.remove(position)),
+                None => LibraryState::Closed { error: None },
+            };
+            self.forget_shown_library();
+            // Closing a library on purpose means the next start doesn't reopen what was
+            // shown; it opens the one that is now.
+            let session = self.snapshot().unwrap_or_default();
+            self.save(&session, true);
+            if let LibraryState::Open(browser) = &self.library {
+                scroll = browser.restore_scroll();
+            }
+        } else if let Some(position) = self
+            .parked
+            .iter()
+            .position(|browser| browser.library.id == id)
+        {
+            self.parked.remove(position);
+        } else {
+            return Task::none();
+        }
+        let close = match backend {
+            Some(backend) => Task::perform(backend::close_library(backend), Message::LibraryClosed),
+            None => Task::none(),
+        };
+        Task::batch([scroll, close])
+    }
+
+    /// Asks the backend which open Engine libraries have edits that were not saved.
+    fn check_unsaved(&self) -> Task<Message> {
+        Task::batch(
+            self.browsers()
+                .filter(|browser| browser.library.is_engine())
+                .filter_map(|browser| {
+                    let id = browser.library.id;
+                    let backend = self.backend_about(id)?;
+                    Some(Task::perform(
+                        backend::has_unsaved_changes(backend),
+                        move |result| Message::UnsavedChecked(id, result),
+                    ))
+                }),
+        )
     }
 
     /// Takes the playlists as they are after one was added, changed or deleted. The
@@ -1055,12 +1183,17 @@ impl State {
             return Task::none();
         };
         self.restore = restore;
+        // What plays is from the library that is shown, which is parked now.
+        let stop = if matches!(self.library, LibraryState::Open(_)) {
+            self.control(Control::Stop)
+        } else {
+            Task::none()
+        };
         self.forget_shown_library();
         self.progress = None;
-        self.make_room_for(kind);
+        self.park_shown();
         self.library = LibraryState::Opening(path.clone());
-        let backend = backend.about(kind);
-        match kind {
+        let open = match kind {
             model::Kind::Engine => {
                 Task::perform(backend::open_library(backend, path), Message::LibraryOpened)
             }
@@ -1068,7 +1201,8 @@ impl State {
                 backend::open_local_folder(backend, path),
                 Message::LibraryOpened,
             ),
-        }
+        };
+        Task::batch([stop, open])
     }
 
     /// Whether the open library is a folder of music, which has nothing of an Engine library
@@ -1621,6 +1755,10 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::AddLocalFolder
         | Message::ChooseLibrary
         | Message::CloseLibrary
+        | Message::TabClose(..)
+        | Message::TabSelect(..)
+        | Message::UnsavedChecked(..)
+        | Message::UnsavedTick
         | Message::DriveUnmounted { .. }
         | Message::DrivesFound(..)
         | Message::ForgetRecent(..)
@@ -1885,7 +2023,7 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
         LibraryState::Open(browser) => (Some(browser), open_library(state, browser, language)),
     };
 
-    row![
+    let page = row![
         sidebar::view(
             browser,
             sidebar::Sources {
@@ -1900,8 +2038,9 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
                 shown: browser.map(|browser| browser.library.path.as_str()),
                 parked: state
                     .parked
-                    .as_ref()
-                    .map(|parked| parked.library.path.as_str()),
+                    .iter()
+                    .map(|parked| parked.library.path.as_str())
+                    .collect(),
             },
             !matches!(state.library, LibraryState::Opening(_)) && !state.locked(),
             !state.locked(),
@@ -1910,8 +2049,25 @@ fn library_page(state: &State, language: Language) -> Element<'_, Message> {
         content
     ]
     .spacing(10)
-    .height(Fill)
-    .into()
+    .height(Fill);
+
+    // The tabs of the open libraries, along the top (none while no library is open).
+    let tabs = state.tabs();
+    let opening = match &state.library {
+        LibraryState::Opening(path) => Some(path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        )),
+        _ => None,
+    };
+    if tabs.is_empty() && opening.is_none() {
+        return page.into();
+    }
+    let enabled = opening.is_none() && !state.locked();
+    column![tabs::view(tabs, opening, enabled, language), page]
+        .spacing(10)
+        .height(Fill)
+        .into()
 }
 
 /// The open library: its summary, the shown list, the player and any errors.
@@ -2529,7 +2685,8 @@ mod tests {
             open_when_ready: None,
             restore: None,
             session: SessionStore::load(temp.join("session.toml")),
-            parked: None,
+            parked: Vec::new(),
+            next_tab: 1,
             playlist_drag: None,
             moving_playlist: false,
             track_drag: None,
@@ -5178,14 +5335,21 @@ mod tests {
         assert_eq!(state.snapshot(), None);
     }
 
-    /// An app with a folder of music open (see `library_at`): the folders House (no tracks
-    /// of its own), Deep (b, c) and Pop (a).
-    /// The Engine library of `state()` is shown, with a folder of music parked.
+    /// A library as a tab: opened as the `order`th, with the id the backend would give it.
+    fn tab(path: &str, kind: model::Kind, id: u64, order: u64) -> Browser {
+        let mut browser = Browser::new(Arc::new(library_at(path).of_kind(kind).with_id(id)));
+        browser.order = order;
+        browser
+    }
+
+    /// The Engine library of `state()` is shown (id 1, the first tab), with a folder of music
+    /// (id 2, the second) parked.
     fn state_with_both_open() -> State {
+        use model::Kind::{Engine, Folder};
         let mut state = state();
-        state.parked = Some(Browser::new(Arc::new(
-            library_at("/home/me/Music").of_kind(model::Kind::Folder),
-        )));
+        state.library = LibraryState::Open(tab("/media/DRIVE/Engine Library", Engine, 1, 1));
+        state.parked.push(tab("/home/me/Music", Folder, 2, 2));
+        state.next_tab = 3;
         state
     }
 
@@ -5196,40 +5360,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_folder_of_music_and_an_engine_library_can_be_open_together_one_of_each() {
-        use model::Kind::{Engine, Folder};
-
-        // Opening a folder parks the Engine library that is shown.
-        let mut state = state();
-        state.make_room_for(Folder);
-        assert!(matches!(state.library, LibraryState::Closed { .. }));
-        assert_eq!(
-            state.parked.as_ref().map(|parked| parked.library.kind),
-            Some(Engine)
-        );
-
-        // Another folder replaces the folder, and leaves the parked Engine library.
-        state.library = LibraryState::Open(Browser::new(Arc::new(
-            library_at("/home/me/Music").of_kind(Folder),
-        )));
-        state.make_room_for(Folder);
-        assert!(state.parked.is_some());
-        assert!(matches!(state.library, LibraryState::Closed { .. }));
-
-        // An Engine library opened while the folder is shown parks the folder; the parked
-        // Engine library is the one that is replaced (one of each kind).
-        let mut state = state_with_both_open();
-        state.make_room_for(Engine);
-        assert_eq!(
-            state.parked.as_ref().map(|parked| parked.library.kind),
-            Some(Folder)
-        );
-        assert!(matches!(state.library, LibraryState::Closed { .. }));
+    fn parked_paths(state: &State) -> Vec<&str> {
+        state
+            .parked
+            .iter()
+            .map(|parked| parked.library.path.as_str())
+            .collect()
     }
 
     #[test]
-    fn the_sidebar_brings_the_parked_library_back_and_parks_the_shown_one() {
+    fn any_number_of_libraries_of_any_kind_can_be_open_as_tabs() {
+        use model::Kind::{Engine, Folder};
+
+        // Opening one parks the one that is shown, whatever kind either is.
+        let mut state = state_with_both_open();
+        state.park_shown();
+        assert!(matches!(state.library, LibraryState::Closed { .. }));
+        assert_eq!(parked_paths(&state).len(), 2);
+
+        // Two Engine libraries and two folders, in the order they were opened.
+        state.library = LibraryState::Open(tab("/media/OTHER/Engine Library", Engine, 3, 3));
+        state.park_shown();
+        state.library = LibraryState::Open(tab("/home/me/Other", Folder, 4, 4));
+        let titles: Vec<String> = state.tabs().into_iter().map(|tab| tab.title).collect();
+        assert_eq!(titles, ["DRIVE", "Music", "OTHER", "Other"]);
+        let active: Vec<bool> = state.tabs().into_iter().map(|tab| tab.active).collect();
+        assert_eq!(active, [false, false, false, true]);
+    }
+
+    #[test]
+    fn the_tabs_keep_their_places_when_another_one_is_shown() {
+        let mut state = state_with_both_open();
+        let ids = |state: &State| -> Vec<u64> { state.tabs().iter().map(|tab| tab.id).collect() };
+        assert_eq!(ids(&state), [1, 2]);
+
+        let _ = handle(&mut state, Message::TabSelect(2));
+        assert_eq!(shown_path(&state).as_deref(), Some("/home/me/Music"));
+        // (The one that was shown is parked, but still the first tab.)
+        assert_eq!(ids(&state), [1, 2]);
+        assert_eq!(
+            state
+                .tabs()
+                .iter()
+                .map(|tab| tab.active)
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
+
+        // Clicking the tab that is shown changes nothing.
+        let _ = handle(&mut state, Message::TabSelect(2));
+        assert_eq!(shown_path(&state).as_deref(), Some("/home/me/Music"));
+        assert_eq!(parked_paths(&state), ["/media/DRIVE/Engine Library"]);
+    }
+
+    #[test]
+    fn the_sidebar_brings_an_open_library_back_instead_of_reading_it_again() {
         let mut state = state_with_both_open();
         state.status.track_id = Some(3);
         state.play_source = Some(Source::Collection);
@@ -5238,19 +5423,14 @@ mod tests {
             Some("/media/DRIVE/Engine Library")
         );
 
-        // A click on the folder that is parked shows it instead of reading it again.
+        // A click on the folder that is open shows it instead of reading it again.
         let _ = handle(
             &mut state,
             Message::OpenLocalFolder(PathBuf::from("/home/me/Music")),
         );
         assert_eq!(shown_path(&state).as_deref(), Some("/home/me/Music"));
-        assert_eq!(
-            state
-                .parked
-                .as_ref()
-                .map(|parked| parked.library.path.as_str()),
-            Some("/media/DRIVE/Engine Library")
-        );
+        assert_eq!(parked_paths(&state), ["/media/DRIVE/Engine Library"]);
+        assert!(state.open_when_ready.is_none());
         // What played came from the other library: nothing of it is left to the new one.
         assert!(state.play_source.is_none());
 
@@ -5263,37 +5443,134 @@ mod tests {
             shown_path(&state).as_deref(),
             Some("/media/DRIVE/Engine Library")
         );
+        assert_eq!(parked_paths(&state), ["/home/me/Music"]);
+
+        // The one that is shown is not read again either.
+        let _ = handle(
+            &mut state,
+            Message::OpenRecent(PathBuf::from("/media/DRIVE/Engine Library")),
+        );
+        assert!(state.open_when_ready.is_none());
+        assert_eq!(parked_paths(&state), ["/home/me/Music"]);
+    }
+
+    #[test]
+    fn a_library_that_is_opened_gets_the_last_tab_and_one_opened_again_takes_its_old_place() {
+        use model::Kind::Engine;
+
+        // The shown library is parked when another one is being opened, and the new one is
+        // the last tab.
+        let mut state = state_with_both_open();
+        state.park_shown();
+        state.library = LibraryState::Opening("/media/NEW/Engine Library".into());
+        let library = Arc::new(library_at("/media/NEW/Engine Library").with_id(3));
+        let _ = handle(&mut state, Message::LibraryOpened(Ok(library)));
         assert_eq!(
-            state
-                .parked
-                .as_ref()
-                .map(|parked| parked.library.path.as_str()),
-            Some("/home/me/Music")
+            state.tabs().iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            shown_path(&state).as_deref(),
+            Some("/media/NEW/Engine Library")
+        );
+
+        // Opening the first one again (the backend replaced it and gave it a new id) leaves
+        // one tab for it, in the place it had.
+        state.park_shown();
+        state.library = LibraryState::Opening("/media/DRIVE/Engine Library".into());
+        let again = Arc::new(
+            library_at("/media/DRIVE/Engine Library")
+                .of_kind(Engine)
+                .with_id(4),
+        );
+        let _ = handle(&mut state, Message::LibraryOpened(Ok(again)));
+        assert_eq!(
+            state.tabs().iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            [4, 2, 3]
+        );
+        assert_eq!(state.shown_id(), Some(4));
+    }
+
+    #[test]
+    fn closing_the_shown_library_shows_the_next_tab_else_the_one_before() {
+        use model::Kind::Folder;
+
+        let mut state = state_with_both_open();
+        state.parked.push(tab("/home/me/Third", Folder, 3, 3));
+        // The first of three is closed: the second is next to it.
+        let _ = handle(&mut state, Message::CloseLibrary);
+        assert_eq!(shown_path(&state).as_deref(), Some("/home/me/Music"));
+        assert_eq!(parked_paths(&state), ["/home/me/Third"]);
+
+        // The last one is closed from the middle, then the one before it is shown.
+        let _ = handle(&mut state, Message::TabSelect(3));
+        let _ = handle(&mut state, Message::CloseLibrary);
+        assert_eq!(shown_path(&state).as_deref(), Some("/home/me/Music"));
+        assert!(state.parked.is_empty());
+        let _ = handle(&mut state, Message::CloseLibrary);
+        assert!(matches!(state.library, LibraryState::Closed { .. }));
+        assert!(state.tabs().is_empty());
+    }
+
+    #[test]
+    fn the_cross_of_a_tab_closes_that_library_whether_it_is_shown_or_not() {
+        let mut state = state_with_both_open();
+        // A tab that is not shown goes, and the shown one stays.
+        let _ = handle(&mut state, Message::TabClose(2));
+        assert!(state.parked.is_empty());
+        assert_eq!(
+            shown_path(&state).as_deref(),
+            Some("/media/DRIVE/Engine Library")
+        );
+        // One that is not open is ignored.
+        let _ = handle(&mut state, Message::TabClose(99));
+        assert_eq!(
+            shown_path(&state).as_deref(),
+            Some("/media/DRIVE/Engine Library")
         );
     }
 
     #[test]
-    fn closing_the_shown_library_shows_the_parked_one() {
-        let mut state = state_with_both_open();
-        let _ = handle(&mut state, Message::CloseLibrary);
-        assert_eq!(shown_path(&state).as_deref(), Some("/home/me/Music"));
-        assert!(state.parked.is_none());
-        let _ = handle(&mut state, Message::CloseLibrary);
-        assert!(matches!(state.library, LibraryState::Closed { .. }));
-    }
-
-    #[test]
-    fn taking_the_parked_folder_out_of_the_list_closes_it() {
+    fn taking_an_open_folder_out_of_the_list_closes_its_tab() {
         let mut state = state_with_both_open();
         let _ = handle(
             &mut state,
             Message::RemoveLocalFolder(PathBuf::from("/home/me/Music")),
         );
-        assert!(state.parked.is_none());
+        assert!(state.parked.is_empty());
         assert_eq!(
             shown_path(&state).as_deref(),
             Some("/media/DRIVE/Engine Library")
         );
+    }
+
+    #[test]
+    fn a_tab_gets_a_star_while_its_library_has_unsaved_changes() {
+        let mut state = state_with_both_open();
+        state.parked.push(tab(
+            "/media/OTHER/Engine Library",
+            model::Kind::Engine,
+            3,
+            3,
+        ));
+        let stars =
+            |state: &State| -> Vec<bool> { state.tabs().iter().map(|tab| tab.unsaved).collect() };
+        assert_eq!(stars(&state), [false, false, false]);
+
+        // What the backend says is shown, for the shown library and for one that is not.
+        let _ = handle(&mut state, Message::UnsavedChecked(1, Ok(true)));
+        let _ = handle(&mut state, Message::UnsavedChecked(3, Ok(true)));
+        assert_eq!(stars(&state), [true, false, true]);
+        // An answer for a library that was closed meanwhile is dropped, and so is an error.
+        let _ = handle(&mut state, Message::UnsavedChecked(99, Ok(true)));
+        let _ = handle(&mut state, Message::UnsavedChecked(1, Err("gone".into())));
+        assert_eq!(stars(&state), [true, false, true]);
+        let _ = handle(&mut state, Message::UnsavedChecked(1, Ok(false)));
+        assert_eq!(stars(&state), [false, false, true]);
+
+        // Showing another tab keeps the stars.
+        let _ = handle(&mut state, Message::TabSelect(3));
+        assert_eq!(stars(&state), [false, false, true]);
     }
 
     fn state_with_a_folder() -> State {

@@ -38,28 +38,28 @@ pub struct Sources<'a> {
     pub drag: Option<&'a Drag>,
 }
 
-/// The libraries that are open, to mark them in the list: the shown one, and the one of the
-/// other kind (an Engine library and a folder of music can be open at the same time) that
-/// a click on its entry brings back.
-#[derive(Clone, Copy, Default)]
+/// The libraries that are open, to mark them in the list: the shown one, and the others
+/// (any number of libraries can be open at the same time, as tabs) that a click on their
+/// entry brings back.
+#[derive(Clone, Default)]
 pub struct Open<'a> {
     pub shown: Option<&'a str>,
-    pub parked: Option<&'a str>,
+    pub parked: Vec<&'a str>,
 }
 
 impl Open<'_> {
-    fn is(self, which: Option<&str>, path: &Path) -> bool {
-        which.is_some_and(|open| Path::new(open) == path)
+    fn is_shown(&self, path: &Path) -> bool {
+        self.shown.is_some_and(|open| Path::new(open) == path)
     }
 
-    fn is_shown(self, path: &Path) -> bool {
-        self.is(self.shown, path)
+    fn is_parked(&self, path: &Path) -> bool {
+        self.parked.iter().any(|open| Path::new(open) == path)
     }
 
-    fn style(self, path: &Path) -> fn(&Theme, button::Status) -> button::Style {
+    fn style(&self, path: &Path) -> fn(&Theme, button::Status) -> button::Style {
         if self.is_shown(path) {
             button::primary
-        } else if self.is(self.parked, path) {
+        } else if self.is_parked(path) {
             button::secondary
         } else {
             button::text
@@ -93,7 +93,7 @@ pub fn view<'a>(
     } else {
         let mut list = column![].spacing(2);
         for path in recents.paths() {
-            list = list.push(entry(path, open, can_open, language));
+            list = list.push(entry(path, &open, can_open, language));
         }
         section = section.push(scrollable(list));
     }
@@ -110,7 +110,7 @@ pub fn view<'a>(
     } else {
         let mut list = column![].spacing(2);
         for drive in drives {
-            list = list.push(drive_entry(drive, open, can_open, language));
+            list = list.push(drive_entry(drive, &open, can_open, language));
         }
         drive_section = drive_section.push(scrollable(list));
     }
@@ -118,7 +118,7 @@ pub fn view<'a>(
         drive_section = drive_section.push(error_text::view(error.to_owned(), language));
     }
 
-    let local_section = local_section(local, open, can_open, language);
+    let local_section = local_section(local, &open, can_open, language);
 
     let content = match browser {
         // The folders of a folder of music, with the local music below them. There is
@@ -179,7 +179,7 @@ pub fn view<'a>(
 /// it (the open one is marked); the × takes it out of the list, closing it if it is open.
 fn local_section<'a>(
     local: &'a LocalFolders,
-    open: Open<'_>,
+    open: &Open<'_>,
     can_open: bool,
     language: Language,
 ) -> Element<'a, Message> {
@@ -228,7 +228,7 @@ fn local_section<'a>(
 
 fn entry<'a>(
     path: &'a Path,
-    open: Open<'_>,
+    open: &Open<'_>,
     can_open: bool,
     language: Language,
 ) -> Element<'a, Message> {
@@ -262,7 +262,7 @@ fn entry<'a>(
 /// is only shown, so it is clear why it can't be opened.
 fn drive_entry<'a>(
     drive: &'a Drive,
-    open: Open<'_>,
+    open: &Open<'_>,
     can_open: bool,
     language: Language,
 ) -> Element<'a, Message> {

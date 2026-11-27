@@ -83,6 +83,8 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ChooseLibrary
         | Message::CloseLibrary
+        | Message::TabClose(_)
+        | Message::TabSelect(_)
         | Message::OpenRecent(_)
         | Message::OpenDrive(_)
         | Message::AddLocalFolder
@@ -119,9 +121,10 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::LocalFolderChosen(None) => {}
         Message::OpenLocalFolder(path) => {
             if !matches!(state.library, LibraryState::Opening(_)) {
-                // One that is open already (shown or parked) is not read again.
-                if state.is_parked(&path) {
-                    return state.switch_libraries();
+                // One that is open already (shown or parked) is not read again: its tab is
+                // shown.
+                if let Some(id) = state.open_library_at(&path) {
+                    return state.switch_to(id);
                 }
                 return state.open_folder(path);
             }
@@ -132,21 +135,15 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .remove(&path)
                 .err()
                 .map(|error| error.to_string());
-            // Taking the open folder out of the list closes it.
-            let open = matches!(
-                &state.library,
-                LibraryState::Open(browser)
-                    if !browser.library.is_engine() && Path::new(&browser.library.path) == path
-            );
-            if open && !state.locked() {
-                return handle(state, Message::CloseLibrary);
-            }
-            // (One that is parked has nothing shown to close, only the backend's copy.)
-            if state.is_parked(&path) && !state.locked() {
-                state.parked = None;
-                if let Some(backend) = state.backend_about(model::Kind::Folder) {
-                    return Task::perform(backend::close_library(backend), Message::LibraryClosed);
-                }
+            // Taking an open folder out of the list closes its tab (shown or not).
+            let open = state
+                .browsers()
+                .find(|browser| {
+                    !browser.library.is_engine() && Path::new(&browser.library.path) == path
+                })
+                .map(|browser| browser.library.id);
+            if let Some(id) = open {
+                return state.close_tab(id);
             }
         }
         Message::ChooseLibrary => {
@@ -186,7 +183,22 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                         }
                         .err()
                         .map(|error| error.to_string());
-                        LibraryState::Open(Browser::new(library))
+                        let mut browser = Browser::new(library);
+                        // A library that was open already (opened again by another way to
+                        // its path, say after an import into it) was replaced in the
+                        // backend, so its old tab goes and the new one takes its place.
+                        let old = state.parked.iter().position(|parked| {
+                            parked.library.path == browser.library.path
+                                && parked.library.kind == browser.library.kind
+                        });
+                        browser.order = match old {
+                            Some(position) => state.parked.remove(position).order,
+                            None => {
+                                state.next_tab += 1;
+                                state.next_tab - 1
+                            }
+                        };
+                        LibraryState::Open(browser)
                     }
                     Err(error) => {
                         state.restore = None;
@@ -203,31 +215,29 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
         }
+        // The "Close library" button closes the shown one; a tab's cross closes its own.
         Message::CloseLibrary => {
-            // (The backend is asked to close the one that was shown, so it is told which.)
-            let closing = state.backend();
-            let was_open = matches!(state.library, LibraryState::Open(_));
-            // The library that was parked is shown now.
-            state.library = match state.parked.take() {
-                Some(browser) => LibraryState::Open(browser),
-                None => LibraryState::Closed { error: None },
-            };
-            state.forget_shown_library();
-            // Closing a library on purpose means the next start doesn't reopen what was
-            // shown; it opens the one that is now.
-            let session = state.snapshot().unwrap_or_default();
-            state.save(&session, true);
-            let scroll = match &state.library {
-                LibraryState::Open(browser) => browser.restore_scroll(),
-                _ => Task::none(),
-            };
-            let close = match closing.filter(|_| was_open) {
-                Some(backend) => {
-                    Task::perform(backend::close_library(backend), Message::LibraryClosed)
-                }
-                None => Task::none(),
-            };
-            return Task::batch([close, scroll]);
+            if let Some(id) = state.shown_id() {
+                return state.close_tab(id);
+            }
+        }
+        Message::TabSelect(id) => return state.switch_to(id),
+        Message::TabClose(id) => return state.close_tab(id),
+        Message::UnsavedTick => return state.check_unsaved(),
+        Message::UnsavedChecked(id, result) => {
+            // (An error is not worth showing: the next look asks again.)
+            if let Ok(unsaved) = result
+                && let Some(browser) = state
+                    .parked
+                    .iter_mut()
+                    .chain(match &mut state.library {
+                        LibraryState::Open(browser) => Some(browser),
+                        _ => None,
+                    })
+                    .find(|browser| browser.library.id == id)
+            {
+                browser.unsaved = unsaved;
+            }
         }
         Message::LibraryClosed(result) => state.backend_error = result.err(),
         Message::ScanDrives => {
@@ -271,9 +281,10 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         },
         Message::OpenRecent(path) | Message::OpenDrive(path) => {
             if !matches!(state.library, LibraryState::Opening(_)) {
-                // One that is open already (shown or parked) is not read again.
-                if state.is_parked(&path) {
-                    return state.switch_libraries();
+                // One that is open already (shown or parked) is not read again: its tab is
+                // shown.
+                if let Some(id) = state.open_library_at(&path) {
+                    return state.switch_to(id);
                 }
                 return state.open(path, None);
             }

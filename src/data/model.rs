@@ -151,6 +151,9 @@ pub enum Kind {
 
 #[derive(Debug)]
 pub struct Library {
+    /// What the backend calls this open library (any number can be open); the requests
+    /// about it carry it. Not saved anywhere.
+    pub id: u64,
     pub kind: Kind,
     /// The `Engine Library` folder that was opened (or the folder of music).
     pub path: String,
@@ -174,6 +177,7 @@ impl Library {
             .map(|(index, track)| (track.id, index))
             .collect();
         Self {
+            id: 0,
             kind: Kind::Engine,
             path,
             cache_path,
@@ -181,6 +185,26 @@ impl Library {
             playlists,
             index_of_id,
         }
+    }
+
+    /// The same library, with the id the backend gave it.
+    pub fn with_id(mut self, id: u64) -> Self {
+        self.id = id;
+        self
+    }
+
+    /// The name a tab shows: the drive or folder an Engine library is in (its `Engine
+    /// Library` folder is the same everywhere), or the name of a folder of music.
+    pub fn title(&self) -> String {
+        let path = Path::new(&self.path);
+        let named = if self.is_engine() {
+            path.parent().and_then(Path::file_name)
+        } else {
+            path.file_name()
+        };
+        named
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.clone())
     }
 
     /// The same library, of another kind.

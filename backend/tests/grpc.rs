@@ -14,13 +14,14 @@ use open_engine_api::v1::playback_service_client::PlaybackServiceClient;
 use open_engine_api::v1::{
     AnalysisOrigin, AnalyzeTrackRequest, CancelLearnRequest, ClearBindingRequest,
     CloseLibraryRequest, ControllerAction, CreateProfileRequest, CreateSmartPlaylistRequest, Cue,
-    DeleteProfileRequest, GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLoopsRequest,
-    GetOriginPrefixRequest, GetProgressRequest, GetSyncDiffRequest, GetWaveformRequest,
-    ImportFolderRequest, LearnRequest, ListPlaylistsRequest, ListTracksRequest, Loop,
-    MigrateOriginsRequest, NameOrder, OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest,
-    PlaybackErrorKind, PlaybackState, PreviewFolderImportRequest, PullFromSourceRequest,
-    RemoveStreamingTracksRequest, RemoveTrackFromPlaylistRequest, RemoveTracksRequest,
-    RenameProfileRequest, ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
+    DeleteProfileRequest, GetAlbumArtRequest, GetCuesRequest, GetInfoRequest,
+    GetLibraryStatusRequest, GetLoopsRequest, GetOriginPrefixRequest, GetProgressRequest,
+    GetSyncDiffRequest, GetWaveformRequest, ImportFolderRequest, LearnRequest,
+    ListPlaylistsRequest, ListTracksRequest, Loop, MigrateOriginsRequest, NameOrder,
+    OpenLibraryRequest, OpenLocalFolderRequest, PlayRequest, PlaybackErrorKind, PlaybackState,
+    PreviewFolderImportRequest, PullFromSourceRequest, RemoveStreamingTracksRequest,
+    RemoveTrackFromPlaylistRequest, RemoveTracksRequest, RenameProfileRequest,
+    ReplaceOriginPrefixRequest, SaveLibraryAsRequest, SelectProfileRequest,
     SetControllerEnabledRequest, SetCuesRequest, SetLoopsRequest, SetRatingRequest, SmartRule,
     SmartRules, SyncToSourceRequest, UpdateSmartPlaylistRequest, WatchControllerRequest,
 };
@@ -3754,6 +3755,143 @@ async fn an_engine_library_and_a_folder_of_music_are_open_at_the_same_time() {
     );
     engine.close_library(CloseLibraryRequest {}).await.unwrap();
     assert_eq!(code(tracks(engine).await), Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn several_libraries_are_open_at_once_and_each_says_whether_it_has_unsaved_changes() {
+    let temp = TempDir::new("many-open");
+    let (first_root, second_root) = (temp.0.join("one"), temp.0.join("two"));
+    std::fs::create_dir_all(&first_root).unwrap();
+    std::fs::create_dir_all(&second_root).unwrap();
+    let music = temp.0.join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+    wav(&music.join("only.wav"), &[(440.0, 1.0)]);
+    let (first_dir, second_dir) = (fixture_library(&first_root), fixture_library(&second_root));
+    for dir in [&first_dir, &second_dir] {
+        rusqlite::Connection::open(dir.join("Database2/m.db"))
+            .unwrap()
+            .execute_batch("ALTER TABLE Track ADD COLUMN rating INTEGER;")
+            .unwrap();
+    }
+
+    let running = start(&temp.0.join("cache"));
+    let channel = channel(&running).await;
+    let mut anyone = LibraryServiceClient::new(InterceptedService::new(
+        channel.clone(),
+        with_token as fn(_) -> _,
+    ));
+    let about = |id: u64| {
+        LibraryServiceClient::new(InterceptedService::new(
+            channel.clone(),
+            move |mut request: Request<()>| {
+                request
+                    .metadata_mut()
+                    .insert(LIBRARY_SLOT, id.to_string().parse().unwrap());
+                with_token(request)
+            },
+        ))
+    };
+
+    let first = anyone
+        .open_library(OpenLibraryRequest {
+            path: first_dir.display().to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    // Another Engine library does not replace the first.
+    let second = anyone
+        .open_library(OpenLibraryRequest {
+            path: second_dir.display().to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let folder = anyone
+        .open_local_folder(OpenLocalFolderRequest {
+            path: music.display().to_string(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(first.library_id != 0);
+    assert!(first.library_id != second.library_id && second.library_id != folder.library_id);
+    let (mut first_client, mut second_client, mut folder_client) = (
+        about(first.library_id),
+        about(second.library_id),
+        about(folder.library_id),
+    );
+
+    // Each answers about itself.
+    for (client, dir) in [
+        (&mut first_client, &first_dir),
+        (&mut second_client, &second_dir),
+    ] {
+        let diff = client
+            .get_sync_diff(GetSyncDiffRequest::default())
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(diff.source_path.starts_with(&dir.display().to_string()));
+        assert!(
+            !client
+                .get_library_status(GetLibraryStatusRequest {})
+                .await
+                .unwrap()
+                .into_inner()
+                .has_unsaved_changes
+        );
+    }
+
+    // An edit marks only the library it was made in, and a pull takes the mark away.
+    first_client
+        .set_rating(SetRatingRequest {
+            track_id: 0,
+            rating: 40,
+        })
+        .await
+        .unwrap();
+    let unsaved = |client: &mut LibraryServiceClient<_>| {
+        let mut client = client.clone();
+        async move {
+            client
+                .get_library_status(GetLibraryStatusRequest {})
+                .await
+                .unwrap()
+                .into_inner()
+                .has_unsaved_changes
+        }
+    };
+    assert!(unsaved(&mut first_client).await);
+    assert!(!unsaved(&mut second_client).await);
+    assert!(!unsaved(&mut folder_client).await);
+    first_client
+        .pull_from_source(PullFromSourceRequest {})
+        .await
+        .unwrap();
+    assert!(!unsaved(&mut first_client).await);
+
+    // Closing one leaves the others open.
+    first_client
+        .close_library(CloseLibraryRequest {})
+        .await
+        .unwrap();
+    assert_eq!(
+        code(first_client.list_playlists(ListPlaylistsRequest {}).await),
+        Code::FailedPrecondition
+    );
+    assert!(
+        second_client
+            .list_playlists(ListPlaylistsRequest {})
+            .await
+            .is_ok()
+    );
+    assert!(
+        folder_client
+            .list_playlists(ListPlaylistsRequest {})
+            .await
+            .is_ok()
+    );
 }
 
 /// A real folder of music, counted and timed:

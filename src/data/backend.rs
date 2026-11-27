@@ -23,13 +23,13 @@ use open_engine_api::v1::{
     BeginScratchRequest, CancelLearnRequest, ClearBindingRequest, CloseLibraryRequest,
     ControllerAction, ControllerState, CreatePlaylistRequest, CreateProfileRequest,
     CreateSmartPlaylistRequest, DeletePlaylistRequest, DeleteProfileRequest, EndScratchRequest,
-    GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLibrarySyncDiffRequest,
-    GetLibrarySyncDiffResponse, GetLoopsRequest, GetOriginPrefixRequest, GetOriginPrefixResponse,
-    GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse, GetWaveformRequest,
-    ImportFolderRequest, ImportFolderResponse, LearnRequest, ListPlaylistsRequest,
-    ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse, MovePlaylistRequest,
-    MoveScratchRequest, MoveTrackInPlaylistRequest, NameOrder, NextRequest, OpenLibraryRequest,
-    OpenLocalFolderRequest, OperationProgress, PlayRequest, PlaybackStatus,
+    GetAlbumArtRequest, GetCuesRequest, GetInfoRequest, GetLibraryStatusRequest,
+    GetLibrarySyncDiffRequest, GetLibrarySyncDiffResponse, GetLoopsRequest, GetOriginPrefixRequest,
+    GetOriginPrefixResponse, GetProgressRequest, GetSyncDiffRequest, GetSyncDiffResponse,
+    GetWaveformRequest, ImportFolderRequest, ImportFolderResponse, LearnRequest,
+    ListPlaylistsRequest, ListTracksRequest, MigrateOriginsRequest, MigrateOriginsResponse,
+    MovePlaylistRequest, MoveScratchRequest, MoveTrackInPlaylistRequest, NameOrder, NextRequest,
+    OpenLibraryRequest, OpenLocalFolderRequest, OperationProgress, PlayRequest, PlaybackStatus,
     PreviewFolderImportRequest, PreviousRequest, PullFromSourceRequest, PullFromSourceResponse,
     RemoveStreamingTracksRequest, RemoveStreamingTracksResponse, RemoveTrackFromPlaylistRequest,
     RemoveTracksRequest, RemoveTracksResponse, RenamePlaylistRequest, RenameProfileRequest,
@@ -40,9 +40,7 @@ use open_engine_api::v1::{
     SyncToSourceRequest, SyncToSourceResponse, TogglePauseRequest, UpdateSmartPlaylistRequest,
     WatchControllerRequest,
 };
-use open_engine_api::{
-    API_VERSION, AUTHORIZATION, LIBRARY_SLOT, LISTENING_PREFIX, SLOT_ENGINE, SLOT_FOLDER, TOKEN_ENV,
-};
+use open_engine_api::{API_VERSION, AUTHORIZATION, LIBRARY_SLOT, LISTENING_PREFIX, TOKEN_ENV};
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -67,7 +65,8 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 #[derive(Clone)]
 struct Token {
     bearer: MetadataValue<tonic::metadata::Ascii>,
-    slot: Option<&'static str>,
+    /// The open library the requests are about (the id the backend gave it), if one.
+    library: Option<u64>,
 }
 
 impl Interceptor for Token {
@@ -75,10 +74,13 @@ impl Interceptor for Token {
         request
             .metadata_mut()
             .insert(AUTHORIZATION, self.bearer.clone());
-        if let Some(slot) = self.slot {
-            request
-                .metadata_mut()
-                .insert(LIBRARY_SLOT, MetadataValue::from_static(slot));
+        if let Some(id) = self.library {
+            request.metadata_mut().insert(
+                LIBRARY_SLOT,
+                id.to_string()
+                    .parse()
+                    .map_err(|_| Status::internal("bad id"))?,
+            );
         }
         Ok(request)
     }
@@ -126,22 +128,23 @@ impl Backend {
         }
     }
 
-    /// The same backend, with every request about the open library of `kind`: an Engine
-    /// library and a folder of music can be open at the same time, and without this a
-    /// request is about the Engine library if there is one.
-    pub fn about(&self, kind: Kind) -> Self {
-        let slot = match kind {
-            Kind::Engine => SLOT_ENGINE,
-            Kind::Folder => SLOT_FOLDER,
-        };
+    /// The same backend, with every request about the open library with this id (any number
+    /// of libraries can be open at the same time, and without this a request is about the
+    /// Engine library that was opened last).
+    pub fn about(&self, library: u64) -> Self {
         Self::new(
             self._process.clone(),
             self.channel.clone(),
             Token {
-                slot: Some(slot),
+                library: Some(library),
                 ..self.token.clone()
             },
         )
+    }
+
+    /// The id of the library the requests are about, if they are about one.
+    fn library_id(&self) -> Option<u64> {
+        self.token.library
     }
 }
 
@@ -233,7 +236,7 @@ pub async fn start() -> Result<Backend, String> {
         bearer: format!("Bearer {token}")
             .parse()
             .map_err(|_| "invalid token".to_owned())?,
-        slot: None,
+        library: None,
     };
 
     let info = BackendServiceClient::with_interceptor(channel.clone(), token.clone())
@@ -262,6 +265,9 @@ pub async fn open_library(mut backend: Backend, path: PathBuf) -> Result<Arc<Lib
         .map_err(describe)?
         .into_inner();
 
+    // (What follows is about the library that was just opened, not the Engine library that
+    // was opened last, which another one may be by now.)
+    let mut backend = backend.about(opened.library_id);
     load_library(
         &mut backend,
         opened.path,
@@ -286,6 +292,7 @@ pub async fn open_local_folder(
         .map_err(describe)?
         .into_inner();
 
+    let mut backend = backend.about(opened.library_id);
     let library = load_library(
         &mut backend,
         opened.path,
@@ -385,7 +392,20 @@ async fn load_library(
         .playlists;
     let playlists = playlists_from(playlists, |id| index_of.get(&id).copied());
 
-    Ok(Arc::new(Library::new(path, cache_path, tracks, playlists)))
+    let id = backend.library_id().unwrap_or_default();
+    Ok(Arc::new(
+        Library::new(path, cache_path, tracks, playlists).with_id(id),
+    ))
+}
+
+/// Whether the library the backend is about has edits that were not written to the source.
+pub async fn has_unsaved_changes(mut backend: Backend) -> Result<bool, String> {
+    backend
+        .library
+        .get_library_status(GetLibraryStatusRequest {})
+        .await
+        .map(|response| response.into_inner().has_unsaved_changes)
+        .map_err(describe)
 }
 
 /// The UI's playlists from the backend's, with the tracks as indices into the UI's list.

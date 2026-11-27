@@ -222,9 +222,13 @@ service LibraryService {
   // asked again and again while it runs. Not running: `running` is false and the rest is
   // empty. Does not need a library to be open.
   rpc GetProgress(GetProgressRequest) returns (OperationProgress);
-  // Closes the library the request is about (both, if it names none) and stops playback.
-  // Succeeds if none is open.
+  // Closes the library the request is about (all of them, if it names none) and stops
+  // playback if it was playing from it. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
+  // Whether the working copy of the library the request is about has edits that were not
+  // written to the source yet (the `edited` mark, which a sync or a pull clears). Always
+  // false for a folder of music. Cheap: it looks at one file.
+  rpc GetLibraryStatus(GetLibraryStatusRequest) returns (GetLibraryStatusResponse);
   // Streams every track of the open library in id order, in batches.
   // Error: FAILED_PRECONDITION if no library is open.
   rpc ListTracks(ListTracksRequest) returns (stream TrackBatch);
@@ -316,6 +320,16 @@ message OpenLibraryResponse {
   uint32 playlist_count = 3;
   // The backend's cached copy of the databases, which is what it reads.
   string cache_path = 4;
+  // Names this open library in the metadata `x-open-engine-library` of the requests that
+  // are about it. Any number of libraries can be open at once; the id is only good while it
+  // stays open.
+  uint64 library_id = 5;
+}
+
+message GetLibraryStatusRequest {}
+
+message GetLibraryStatusResponse {
+  bool has_unsaved_changes = 1;
 }
 
 message OpenLocalFolderRequest {

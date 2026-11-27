@@ -272,6 +272,9 @@ playlist_delete_question: "„{name}“ löschen?"
 playlist_delete_inside: "Die Playlists darin werden mit gelöscht: {count}."
 playlist_delete_note: "Die Titel bleiben in der Bibliothek. Die Quelle wird erst beim Speichern der Änderungen geändert, und dabei wird eine Sicherung angelegt."
 playlist_failed: "Die Playlists konnten nicht geändert werden: {error}"
+tab_close: "Schließen"
+tab_unsaved: "Diese Bibliothek hat Änderungen, die noch nicht gespeichert sind. „Änderungen speichern…“ schreibt sie in die Bibliothek; bis dahin sind sie nur in der Arbeitskopie."
+tab_opening: "(wird geöffnet…)"
 col_origin: Herkunft
 col_origin_info: "Die Herkunft ist der Dateipfad, den Open Engine Lib früher gespeichert hat, in seiner eigenen Datenbank (nicht in der Engine-Bibliothek). Sie ist nur ein Ersatz: Ein Titel wird von seinem Speicherort gespielt, von der Herkunft nur, wenn dort keine Datei liegt. „Orte als Herkunft speichern“ füllt sie; „Herkunftsordner ändern…“ verlegt alle Herkünfte in einen anderen Ordner. (Nicht dasselbe wie die Herkunftsdatenbank von Engine, die sagt, wo ein Titel zuerst angelegt wurde.)"
 origin_migrate: Orte als Herkunft speichern

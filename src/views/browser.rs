@@ -159,6 +159,12 @@ struct SavedOrigins {
 
 pub struct Browser {
     pub library: Arc<Library>,
+    /// When the library was opened, counted from the start of the program: the tabs are in
+    /// this order.
+    pub order: u64,
+    /// The working copy has edits that were not written to the source, as the backend last
+    /// said (an Engine library only).
+    pub unsaved: bool,
     pub source: Source,
     /// Row (position in the shown list) the user clicked.
     pub selected: Option<usize>,
@@ -299,6 +305,8 @@ impl Browser {
         let all = (0..library.tracks.len()).collect();
         Self {
             library,
+            order: 0,
+            unsaved: false,
             source: Source::Collection,
             selected: None,
             all,

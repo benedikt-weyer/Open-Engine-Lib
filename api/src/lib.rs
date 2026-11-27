@@ -49,11 +49,14 @@ pub const TOKEN_ENV: &str = "OPEN_ENGINE_BACKEND_TOKEN";
 /// The metadata key of the bearer token.
 pub const AUTHORIZATION: &str = "authorization";
 
-/// The metadata key that says which of the open libraries a request is about: `engine` for
-/// the Engine library, `folder` for the folder of music (one of each can be open at the same
-/// time). Without it a request is about the Engine library if there is one, else the folder.
+/// The metadata key that says which of the open libraries a request is about: the
+/// `library_id` that `OpenLibrary` and `OpenLocalFolder` answered with (any number of
+/// libraries can be open at the same time). Two older values still work: `engine` is the
+/// Engine library that was opened last and `folder` the folder of music that was opened last.
+/// Without the key a request is about the Engine library that was opened last if there is
+/// one, else the last folder.
 pub const LIBRARY_SLOT: &str = "x-open-engine-library";
-/// The values of [`LIBRARY_SLOT`].
+/// The older values of [`LIBRARY_SLOT`].
 pub const SLOT_ENGINE: &str = "engine";
 pub const SLOT_FOLDER: &str = "folder";
 

@@ -115,7 +115,14 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                     // Pulling from the source can have replaced the cues.
                     state.cues.clear();
                     state.loops.clear();
-                    state.library = LibraryState::Open(Browser::new(library));
+                    // (It keeps its tab: the place among them, and whether it has unsaved
+                    // changes until the next look says otherwise.)
+                    let mut browser = Browser::new(library);
+                    if let LibraryState::Open(old) = &state.library {
+                        browser.order = old.order;
+                        browser.unsaved = old.unsaved;
+                    }
+                    state.library = LibraryState::Open(browser);
                     if let Some(session) = session {
                         return state.restore_session(session);
                     }

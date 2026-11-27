@@ -272,6 +272,9 @@ playlist_delete_question: "Delete “{name}”?"
 playlist_delete_inside: "The playlists inside it are deleted too: {count}."
 playlist_delete_note: "Its tracks stay in the library. The source is only changed when you save changes, and saving keeps a backup."
 playlist_failed: "Could not change the playlists: {error}"
+tab_close: "Close"
+tab_unsaved: "This library has changes that were not saved yet. “Save changes…” writes them to the library; until then they are only in the working copy."
+tab_opening: "(opening…)"
 col_origin: Origin
 col_origin_info: "The origin is the file path Open Engine Lib saved earlier, kept in its own database (not in the Engine library). It is only a fallback: a track plays from its location, and from its origin only if no file is there. “Save locations as origins” fills it; “Change origin folder…” moves all origins to another folder. (Not the same as Engine's origin database, which says where a track was first created.)"
 origin_migrate: Save locations as origins
