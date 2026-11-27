@@ -7,13 +7,13 @@ Open the app and choose **Open library…**, then pick the `Engine Library` fold
 
 **Analysing a track:** right-click a track and choose **Analyse track** to find its beats and key (a progress toast shows how far it is). This writes a beatgrid, tempo and key to the working copy as Engine would, and the **Analysis** and **Analysis origin** columns of the track list show what a track has and who made it. It needs the weights of Beat This!, which the Nix package installs; when building from source run `scripts/fetch-models` once (see [docs/architecture.md](docs/architecture.md#analysing-a-track)). Which columns the list shows is chosen with the **Columns** button.
 
-**Stems:** a track that Engine has separated into stems (the **Stems** column) can be played from them, with a button in the player for each of drums, bass, melody and vocals to turn it off and on. Engine encrypts its stems files and Open Engine Lib does not come with the key: enter it on the Settings page (it is checked against the stems and kept in your config file, so set it in the app rather than in a Nix config, which would put it in the world-readable store). Playing stems needs `ffmpeg`, which the Nix package brings along.
+**Stems:** a track that Engine has separated into stems (the **Stems** column) can be played from them, with a button in the player for each of drums, bass, melody and vocals to turn it off and on. Engine encrypts its stems files and Open Engine Lib does not come with the key: enter it on the Settings page (it is checked against the stems and kept in your profile; the NixOS module's `settings.stems_key` sets it too, in the world-readable Nix store). Playing stems needs `ffmpeg`, which the Nix package brings along.
 
 The app never works on your library in place: it copies the databases to a cache (`~/.cache/open-engine-lib`) and reads that. Your music files are played where they are. It is split into a UI, a library process and an audio process that talk over gRPC, see [docs/architecture.md](docs/architecture.md).
 
 ## Configuration
 
-Settings (light/dark theme, the English/German UI language, how the waveform is colored (mono, RGB, 3-band stacked or spectrum, also switchable from a menu next to the waveform) and how tall each frequency band is drawn, and whether the last library is reopened at startup, and with it the playlist, song and position) can be changed on the Settings page. They are stored in `~/.config/open-engine-lib/config.toml`.
+Settings (light/dark theme, the English/German UI language, how the waveform is colored (mono, RGB, 3-band stacked or spectrum, also switchable from a menu next to the waveform) and how tall each frequency band is drawn, and whether the last library is reopened at startup, and with it the playlist, song and position) can be changed on the Settings page. They are kept in profiles, as in iron-file: each is a file in `~/.config/open-engine-lib/profiles/` (or one of the system, see below), the Settings page says which one is in use and makes new ones, and a profile can take what it does not set from another (`base_profile = "/path/to/other.toml"`). Settings from before profiles are moved into a profile called Default.
 
 On NixOS the config can be set declaratively with the flake's module:
 
@@ -33,7 +33,8 @@ programs.open-engine-lib = {
   settings.reopen_library = true;   # reopen the last library at startup (default: true)
   settings.restore_position = true; # ...and its playlist, song and position, paused (default: true)
   settings.controller_enabled = true; # control the player from a DJ controller connected over USB (default: true)
+  settings.stems_key = "…";         # Engine's stems key, 32 hex digits, to play stems (not included; ends up in the Nix store)
 };
 ```
 
-This generates a read-only `/etc/xdg/open-engine-lib/config.toml`. Users can still change settings in the app; those changes are saved as overrides (`~/.local/state/open-engine-lib/overrides.toml`) merged on top of it, and the Settings page offers a reset to the declarative config.
+This generates a read-only profile, `/etc/xdg/open-engine-lib/profiles/nixos.toml` (`programs.open-engine-lib.profileName` names it, "NixOS" by default), which is chosen on the Settings page. Users can still change settings in the app; those changes are saved as their own overlay of the profile in `~/.config/open-engine-lib/profiles/`, which the Settings page can throw away again.

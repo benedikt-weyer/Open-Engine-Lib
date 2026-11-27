@@ -74,11 +74,6 @@ reset_waveform_delay: Reset the delay
 startup_heading: Startup
 reopen_library: Reopen the last library
 restore_position: Also go back to the playlist, song and position in it (paused)
-config_read_only_notice: The config is read-only (declarative). Changes are saved as overrides on top of it.
-config_file: "Config file: {path}"
-underlying_theme: "Underlying theme: {theme}"
-underlying_language: "Underlying language: {language}"
-reset_overrides: Reset to underlying config
 save_failed: "Could not save settings: {error}"
 backend_starting: Starting the backend…
 backend_failed: "The backend could not be started: {error}"
@@ -437,3 +432,12 @@ stem_bass: "Bass"
 stem_melody: "Melody"
 stem_vocals: "Vocals"
 stem_toggle_hint: "Turn {stem} off or on"
+profiles_heading: "Profiles"
+profiles_hint: "Each profile is a set of these settings. Profiles of the system (such as one from the NixOS config) can't be changed here: a change is kept as your own changes on top of it."
+profile_read_only: "{name} (read-only)"
+profile_changed: "{name} (with your changes)"
+profile_file: "Saved in {path}"
+profile_new_placeholder: "Name of a new profile"
+profile_create: "Create profile"
+reset_overrides: "Undo your changes to {name}"
+profiles_folders: "Profiles are read from: {folders}"

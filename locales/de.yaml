@@ -74,11 +74,6 @@ reset_waveform_gains: Pegel zurücksetzen
 startup_heading: Start
 reopen_library: Letzte Bibliothek wieder öffnen
 restore_position: Auch zu Playlist, Titel und Position darin zurückkehren (pausiert)
-config_read_only_notice: Die Konfiguration ist schreibgeschützt (deklarativ). Änderungen werden als Überschreibungen darüber gespeichert.
-config_file: "Konfigurationsdatei: {path}"
-underlying_theme: "Zugrunde liegendes Design: {theme}"
-underlying_language: "Zugrunde liegende Sprache: {language}"
-reset_overrides: Auf zugrunde liegende Konfiguration zurücksetzen
 save_failed: "Einstellungen konnten nicht gespeichert werden: {error}"
 backend_starting: Das Backend wird gestartet…
 backend_failed: "Das Backend konnte nicht gestartet werden: {error}"
@@ -437,3 +432,12 @@ stem_bass: "Bass"
 stem_melody: "Melodie"
 stem_vocals: "Gesang"
 stem_toggle_hint: "{stem} aus- oder einschalten"
+profiles_heading: "Profile"
+profiles_hint: "Jedes Profil ist ein Satz dieser Einstellungen. Profile des Systems (etwa eines aus der NixOS-Konfiguration) lassen sich hier nicht ändern: eine Änderung wird als deine eigenen Änderungen darüber gespeichert."
+profile_read_only: "{name} (schreibgeschützt)"
+profile_changed: "{name} (mit deinen Änderungen)"
+profile_file: "Gespeichert in {path}"
+profile_new_placeholder: "Name eines neuen Profils"
+profile_create: "Profil anlegen"
+reset_overrides: "Deine Änderungen an {name} verwerfen"
+profiles_folders: "Profile werden gelesen aus: {folders}"

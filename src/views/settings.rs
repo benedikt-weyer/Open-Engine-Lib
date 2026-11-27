@@ -73,6 +73,87 @@ fn action_name(strings: &Strings, action: ControllerAction) -> String {
     }
 }
 
+/// The profiles: which one is in use, a new one, and throwing away the changes to a
+/// read-only one.
+fn profiles_section<'a>(
+    mut page: Column<'a, Message>,
+    strings: &'a Strings,
+    config: &'a ConfigStore,
+    new_profile_name: &'a str,
+) -> Column<'a, Message> {
+    let active = config.active_profile();
+    page = page
+        .push(text(&strings.profiles_heading).size(20))
+        .push(text(&strings.profiles_hint).size(14).style(text::secondary));
+    let active_index = config
+        .profiles()
+        .iter()
+        .position(|profile| profile.path == active.path);
+    for (index, profile) in config.profiles().iter().enumerate() {
+        let is_overlay = !profile.read_only
+            && profile.base_profile.as_ref().is_some_and(|base| {
+                config
+                    .profiles()
+                    .iter()
+                    .any(|other| &other.path == base && other.read_only)
+            });
+        let label = if profile.read_only {
+            fill(&strings.profile_read_only, &[("name", &profile.name)])
+        } else if is_overlay {
+            fill(&strings.profile_changed, &[("name", &profile.name)])
+        } else {
+            profile.name.clone()
+        };
+        let path = profile.path.clone();
+        page = page.push(radio(label, index, active_index, move |_| {
+            Message::ProfileSelected(path.clone())
+        }));
+    }
+    page = page.push(
+        text(fill(
+            &strings.profile_file,
+            &[("path", &active.path.display())],
+        ))
+        .size(14)
+        .style(text::secondary),
+    );
+    let folders: Vec<String> = config
+        .search_paths()
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    page = page.push(
+        text(fill(
+            &strings.profiles_folders,
+            &[("folders", &folders.join(", "))],
+        ))
+        .size(14)
+        .style(text::secondary),
+    );
+    if let Some(base) = config.overlaid() {
+        page = page.push(
+            button(text(fill(
+                &strings.reset_overrides,
+                &[("name", &base.name)],
+            )))
+            .on_press(Message::ResetOverrides),
+        );
+    }
+    page.push(
+        row![
+            text_input(&strings.profile_new_placeholder, new_profile_name)
+                .on_input(Message::NewProfileNameChanged)
+                .on_submit(Message::CreateProfile)
+                .width(250),
+            button(text(&strings.profile_create)).on_press_maybe(
+                (!new_profile_name.trim().is_empty()).then_some(Message::CreateProfile)
+            ),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+    )
+}
+
 /// The stems key: Open Engine Lib does not come with it, so the user enters it. Hidden as it
 /// is typed, and said whether it fits.
 fn stems_section<'a>(
@@ -287,17 +368,16 @@ pub fn view<'a>(
     draft: Option<(WaveformBand, f32)>,
     delay_draft: Option<i32>,
     stems_key_draft: Option<&'a str>,
+    new_profile_name: &'a str,
     controller: &'a Controller,
 ) -> Element<'a, Message> {
     let current = config.effective();
     let language = current.language;
     let strings = language.strings();
 
-    let mut page = column![
-        text(&language.strings().settings_title).size(30),
-        text(&language.strings().theme).size(20),
-    ]
-    .spacing(10);
+    let mut page = column![text(&language.strings().settings_title).size(30)].spacing(10);
+    page = profiles_section(page, strings, config, new_profile_name);
+    page = page.push(text(&language.strings().theme).size(20));
 
     for theme in [ThemeMode::Light, ThemeMode::Dark] {
         page = page.push(radio(
@@ -397,28 +477,6 @@ pub fn view<'a>(
                     .then_some(Message::RestorePositionToggled),
             ),
     );
-
-    if config.is_layered() {
-        let underlying = config.underlying();
-        page = page
-            .push(text(&language.strings().config_read_only_notice))
-            .push(text(fill(
-                &strings.config_file,
-                &[("path", &config.base_path().display())],
-            )))
-            .push(text(fill(
-                &strings.underlying_theme,
-                &[("theme", &theme_name(language, underlying.theme))],
-            )))
-            .push(text(fill(
-                &strings.underlying_language,
-                &[("language", &underlying.language.strings().native_name)],
-            )));
-
-        let reset = button(text(&language.strings().reset_overrides));
-        page = page
-            .push(reset.on_press_maybe(config.has_overrides().then_some(Message::ResetOverrides)));
-    }
 
     for warning in &config.warnings {
         page = page.push(error_text::view(warning.as_str(), language));

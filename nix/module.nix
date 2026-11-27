@@ -5,6 +5,8 @@ let
   cfg = config.programs.open-engine-lib;
   toml = pkgs.formats.toml { };
   settings = lib.filterAttrs (_: value: value != null) cfg.settings;
+  # The file's name: the profile's, in lower case with dashes.
+  profileFile = lib.strings.sanitizeDerivationName (lib.toLower cfg.profileName);
 in
 {
   options.programs.open-engine-lib = {
@@ -17,6 +19,18 @@ in
       description = "The open-engine-lib package to install.";
     };
 
+    profileName = lib.mkOption {
+      type = lib.types.str;
+      default = "NixOS";
+      example = "Home";
+      description = ''
+        The name of the profile the settings below make. It is written to
+        /etc/xdg/open-engine-lib/profiles/ and is listed on the settings page next to the
+        user's own profiles, where it is chosen. It is read-only: a change made in the app
+        goes to the user's own overlay of it, which the settings page can throw away again.
+      '';
+    };
+
     settings = {
       theme = lib.mkOption {
         type = lib.types.nullOr (lib.types.enum [ "light" "dark" ]);
@@ -25,9 +39,9 @@ in
         description = ''
           Color theme. Unset values use the application default.
 
-          Settings are written to a read-only /etc/xdg/open-engine-lib/config.toml.
-          Users can still change them in the app: changes are saved as overrides
-          on top of this config and can be reset to it from the settings page.
+          The settings are a read-only profile (see `profileName`). Users can still change
+          them in the app: changes are saved as an overlay of the profile and can be thrown
+          away from the settings page.
         '';
       };
 
@@ -133,14 +147,23 @@ in
           control does what is learned on the Settings page, not set here. Unset means yes.
         '';
       };
+
+      stems_key = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "[0-9a-fA-F: -]+");
+        default = null;
+        description = ''
+          The key of Engine's stems files (32 hexadecimal digits), to play tracks from their
+          stems. Open Engine Lib does not come with it. It ends up in the world-readable Nix
+          store, like the rest of the profile. Unset means none (it can be entered in the app).
+        '';
+      };
     };
   };
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
 
-    environment.etc."xdg/open-engine-lib/config.toml" = lib.mkIf (settings != { }) {
-      source = toml.generate "open-engine-lib-config.toml" settings;
-    };
+    environment.etc."xdg/open-engine-lib/profiles/${profileFile}.toml".source =
+      toml.generate "open-engine-lib-profile.toml" ({ name = cfg.profileName; } // settings);
   };
 }

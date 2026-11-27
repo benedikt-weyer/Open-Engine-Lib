@@ -146,6 +146,26 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::CloseRequested(_) => return state.exit(),
         Message::ResetOverrides => {
             state.config_error = state.config.reset_overrides().err().map(|e| e.to_string());
+            return state.profile_changed();
+        }
+        Message::ProfileSelected(path) => {
+            state.config_error = state
+                .config
+                .select_profile(&path)
+                .err()
+                .map(|e| e.to_string());
+            return state.profile_changed();
+        }
+        Message::NewProfileNameChanged(name) => state.new_profile_name = name,
+        Message::CreateProfile => {
+            match state.config.create_profile(&state.new_profile_name) {
+                Ok(()) => {
+                    state.new_profile_name.clear();
+                    state.config_error = None;
+                }
+                Err(error) => state.config_error = Some(error.to_string()),
+            }
+            return state.profile_changed();
         }
 
         Message::BackendStarted(Ok(backend)) => {

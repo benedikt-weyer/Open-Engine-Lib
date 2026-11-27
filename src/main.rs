@@ -200,6 +200,8 @@ struct State {
     /// The stems key as it is being typed in the settings, until it is a whole key (only then
     /// is it saved).
     stems_key_draft: Option<String>,
+    /// The name typed for a new profile in the settings.
+    new_profile_name: String,
     /// Whether the tracks are to be played from their stems, and which stems are off.
     stems: player_bar::StemMix,
     /// The window comparing the working copy with the source, while it is open.
@@ -299,6 +301,11 @@ pub enum Message {
     /// The stems key in the settings was edited, and the button that removes it pressed.
     StemsKeyEdited(String),
     StemsKeyRemove,
+    /// A profile was chosen in the settings; a name typed for a new one, and the button that
+    /// makes it.
+    ProfileSelected(std::path::PathBuf),
+    NewProfileNameChanged(String),
+    CreateProfile,
     ResetWaveformDelay,
     /// The border after a column header was pressed.
     ResizeStarted(Column),
@@ -685,6 +692,7 @@ impl State {
             gain_draft: None,
             delay_draft: None,
             stems_key_draft: None,
+            new_profile_name: String::new(),
             stems: player_bar::StemMix::default(),
             sync: None,
             sync_reverse: false,
@@ -1172,6 +1180,20 @@ impl State {
     }
 
     /// Sends a playback request to the backend; its answer arrives as `Message::Status`.
+    /// Another profile is in use: what is drawn from the settings is drawn again, and the
+    /// stems that play are played with its key.
+    fn profile_changed(&mut self) -> Task<Message> {
+        self.stems_key_draft = None;
+        self.gain_draft = None;
+        self.delay_draft = None;
+        self.waveforms.clear();
+        if self.stems.on {
+            self.send_stems()
+        } else {
+            Task::none()
+        }
+    }
+
     /// Tells the backend whether to play from the stems, with the key of the settings, and
     /// how loud each stem is. Without a key that fits, the tracks' own files are played.
     fn send_stems(&self) -> Task<Message> {
@@ -1710,6 +1732,9 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::WaveformDelayReleased
         | Message::StemsKeyEdited(..)
         | Message::StemsKeyRemove
+        | Message::ProfileSelected(..)
+        | Message::NewProfileNameChanged(..)
+        | Message::CreateProfile
         | Message::WaveformGainDragged(..)
         | Message::WaveformGainReleased => handlers::settings::handle(state, message),
         Message::LibraryReloaded(..)
@@ -1925,6 +1950,7 @@ fn view_page(state: &State) -> Element<'_, Message> {
             state.gain_draft,
             state.delay_draft,
             state.stems_key_draft.as_deref(),
+            &state.new_profile_name,
             &state.controller,
         ),
     };
@@ -2762,9 +2788,10 @@ mod tests {
         State {
             page: Page::Library,
             config: ConfigStore::load(Locations {
-                base_candidates: Vec::new(),
-                user_config: temp.join("config.toml"),
-                overrides: temp.join("overrides.toml"),
+                user_dir: temp.join("config"),
+                search_paths: vec![temp.join("config/profiles")],
+                legacy_config: temp.join("config/config.toml"),
+                legacy_overrides: temp.join("overrides.toml"),
             }),
             config_error: None,
             backend: BackendState::Starting,
@@ -2800,6 +2827,7 @@ mod tests {
             gain_draft: None,
             delay_draft: None,
             stems_key_draft: None,
+            new_profile_name: String::new(),
             stems: player_bar::StemMix::default(),
             sync: None,
             sync_reverse: false,
