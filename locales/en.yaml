@@ -169,6 +169,11 @@ analysis_track_data: "track data"
 analysis_waveform: waveform
 analysis_beatgrid: beatgrid
 columns_button: Columns
+recheck_list: "Recheck this list"
+recheck_list_tip: "Looks again whether the files at the location and the saved origin of the tracks in this list are there. Tracks whose files are found lose their red mark."
+recheck_library: "Recheck all tracks"
+recheck_library_tip: "Looks again whether the files at the location and the saved origin of all tracks of the library are there, which can take a while on a slow drive. Tracks whose files are found lose their red mark."
+rechecking: "Checking…"
 columns_hint: "Tick the columns to show"
 stems_rendered: "Stems are rendered for this track"
 stems_none: "No stems rendered"

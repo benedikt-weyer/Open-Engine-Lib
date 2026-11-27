@@ -164,6 +164,11 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::PathsChecked(generation, answers) => state.reachable.set(generation, answers),
+        Message::RecheckPaths(scope) => return state.recheck_paths(scope),
+        Message::PathsRechecked(generation, answers) => {
+            state.rechecking = false;
+            state.reachable.set(generation, answers);
+        }
         Message::CoverLoaded(generation, id, result) => match result {
             Ok(image) => state.covers.set(generation, id, image),
             Err(error) => {

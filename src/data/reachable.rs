@@ -9,6 +9,15 @@ use std::path::Path;
 /// finds them again, but few enough to bound memory.
 const MAX_KEPT: usize = 40_000;
 
+/// Which tracks the buttons over the track list check again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The tracks of the list that is shown.
+    List,
+    /// All tracks of the library.
+    Library,
+}
+
 #[derive(Default)]
 pub struct Reachability {
     known: HashMap<String, bool>,
@@ -30,6 +39,17 @@ impl Reachability {
 
     pub fn generation(&self) -> u32 {
         self.generation
+    }
+
+    /// Forgets what is known (and being checked) about these paths, so that they are asked
+    /// again: a file that was missing may be there now, or the other way round.
+    pub fn forget(&mut self, paths: &[String]) {
+        let forgotten: HashSet<&str> = paths.iter().map(String::as_str).collect();
+        for path in &forgotten {
+            self.known.remove(*path);
+            self.pending.remove(*path);
+        }
+        self.order.retain(|path| !forgotten.contains(path.as_str()));
     }
 
     /// Forgets everything, e.g. when another library is opened or a drive comes or goes.
@@ -121,6 +141,30 @@ mod tests {
         reachability.set(generation, vec![("/c".into(), true)]);
         assert_eq!(reachability.get("/c"), None);
         assert_eq!(reachability.claim_unrequested(["/a", "/c"]), ["/a", "/c"]);
+    }
+
+    #[test]
+    fn forgotten_paths_are_asked_again_and_the_others_are_not() {
+        let mut reachability = Reachability::default();
+        let generation = reachability.generation();
+        reachability.claim_unrequested(["/a", "/b", "/c"]);
+        reachability.set(generation, vec![("/a".into(), false), ("/b".into(), true)]);
+        assert!(reachability.claim_unrequested(["/a", "/b"]).is_empty());
+
+        // "/a" was missing and "/c" was still being checked; both are asked again.
+        reachability.forget(&["/a".to_string(), "/c".to_string(), "/never".to_string()]);
+        assert_eq!(reachability.get("/a"), None);
+        assert_eq!(
+            reachability.get("/b"),
+            Some(true),
+            "what was not forgotten stays"
+        );
+        assert_eq!(
+            reachability.claim_unrequested(["/a", "/b", "/c"]),
+            ["/a", "/c"]
+        );
+        reachability.set(generation, vec![("/a".into(), true), ("/c".into(), true)]);
+        assert_eq!(reachability.get("/a"), Some(true), "no longer missing");
     }
 
     #[test]

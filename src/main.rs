@@ -166,6 +166,8 @@ struct State {
     covers: Covers,
     /// Whether the locations and origins in view can be reached.
     reachable: Reachability,
+    /// The files of many tracks are being looked for again (a button over the list).
+    rechecking: bool,
     /// Why the recent libraries could not be saved.
     recents_error: Option<String>,
     /// Why the last drive could not be unmounted.
@@ -609,6 +611,10 @@ pub enum Message {
     ProgressTick,
     /// Which of the paths in view can be reached, in the generation they were asked in.
     PathsChecked(u32, Vec<(String, bool)>),
+    /// A button over the track list: look again whether the files of these tracks are there.
+    RecheckPaths(reachable::Scope),
+    /// The answers to that, in the generation they were asked in.
+    PathsRechecked(u32, Vec<(String, bool)>),
     /// A fetched waveform: the waveforms' generation it was asked in, the track id and the waveform.
     WaveformLoaded(u32, u32, Result<Option<Arc<Waveform>>, String>),
 }
@@ -651,6 +657,7 @@ impl State {
             scanning_drives: true,
             covers: Covers::default(),
             reachable: Reachability::default(),
+            rechecking: false,
             recents_error: None,
             drive_error: None,
             status: PlaybackStatus::default(),
@@ -1410,6 +1417,37 @@ impl State {
         })
     }
 
+    /// Looks again whether the files of the tracks of `scope` are there, and shows what is
+    /// found (a file that was missing before loses its red mark). Their old answers are
+    /// forgotten at once, so nothing is red while the answer is out.
+    fn recheck_paths(&mut self, scope: reachable::Scope) -> Task<Message> {
+        let LibraryState::Open(browser) = &self.library else {
+            return Task::none();
+        };
+        if self.rechecking {
+            return Task::none();
+        }
+        let paths: Vec<String> = match scope {
+            reachable::Scope::List => browser.list_paths(),
+            reachable::Scope::Library => browser.library_paths(),
+        }
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        self.reachable.forget(&paths);
+        let paths = self
+            .reachable
+            .claim_unrequested(paths.iter().map(String::as_str));
+        if paths.is_empty() {
+            return Task::none();
+        }
+        self.rechecking = true;
+        let generation = self.reachable.generation();
+        Task::perform(reachable::check(paths), move |answers| {
+            Message::PathsRechecked(generation, answers)
+        })
+    }
+
     /// Asks the backend for the waveform of the track in the player, if it has not been
     /// asked for yet.
     fn fetch_waveform(&mut self) -> Task<Message> {
@@ -1782,11 +1820,13 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::CoverLoaded(..)
         | Message::Next
         | Message::PathsChecked(..)
+        | Message::PathsRechecked(..)
         | Message::PlayPause
         | Message::PlayTrack(..)
         | Message::Previous
         | Message::ProgressTick
         | Message::ProgressUpdated(..)
+        | Message::RecheckPaths(..)
         | Message::RatingSet { .. }
         | Message::RevealRow(..)
         | Message::SeekTo(..)
@@ -2242,7 +2282,10 @@ fn open_library<'a>(
             state.track_drag.as_ref(),
             state.playing_row(browser),
             &state.covers,
-            &state.reachable,
+            browser::Paths {
+                reachable: &state.reachable,
+                rechecking: state.rechecking,
+            },
             browser::Columns {
                 widths: &state.columns.widths,
                 hidden: &state.columns.hidden,
@@ -2700,6 +2743,7 @@ mod tests {
             scanning_drives: false,
             covers: Covers::default(),
             reachable: Reachability::default(),
+            rechecking: false,
             recents_error: None,
             drive_error: None,
             status: PlaybackStatus::default(),
@@ -4224,6 +4268,88 @@ mod tests {
         assert!(matches!(state.library_sync, Some(LibrarySyncStage::Pick)));
         let _ = handle(&mut state, Message::LibrarySyncClose);
         assert!(state.library_sync.is_none());
+    }
+
+    #[test]
+    fn the_buttons_over_the_list_check_its_files_again_or_those_of_all_tracks() {
+        use reachable::Scope;
+
+        let mut state = state();
+        let tracks: Vec<Track> = (0..3)
+            .map(|id| {
+                let mut track = track(id);
+                track.location = format!("/media/DRIVE/Music/{id}.flac");
+                track.origin = Some(format!("/home/me/Music/{id}.flac"));
+                track
+            })
+            .collect();
+        state.library = LibraryState::Open(Browser::new(Arc::new(Library::new(
+            "/media/DRIVE/Engine Library".into(),
+            "/cache".into(),
+            tracks,
+            vec![playlist("Deep", 0, false, &[1, 2])],
+        ))));
+        // Everything was found missing once, and stays red until it is asked again.
+        let paths: Vec<String> = (0..3)
+            .flat_map(|id| {
+                [
+                    format!("/media/DRIVE/Music/{id}.flac"),
+                    format!("/home/me/Music/{id}.flac"),
+                ]
+            })
+            .collect();
+        let generation = state.reachable.generation();
+        state
+            .reachable
+            .claim_unrequested(paths.iter().map(String::as_str));
+        state.reachable.set(
+            generation,
+            paths.iter().map(|path| (path.clone(), false)).collect(),
+        );
+        let known = |state: &State| -> Vec<Option<bool>> {
+            paths.iter().map(|path| state.reachable.get(path)).collect()
+        };
+        assert_eq!(known(&state), [Some(false); 6]);
+
+        // The playlist is shown: only the location and origin of its two tracks are asked
+        // again, and nothing is red meanwhile.
+        if let LibraryState::Open(browser) = &mut state.library {
+            browser.show(Source::Playlist(0));
+        }
+        let _ = handle(&mut state, Message::RecheckPaths(Scope::List));
+        assert!(state.rechecking);
+        assert_eq!(
+            known(&state),
+            [Some(false), Some(false), None, None, None, None]
+        );
+
+        // While it runs, another press does nothing.
+        let _ = handle(&mut state, Message::RecheckPaths(Scope::Library));
+        assert_eq!(known(&state)[0], Some(false));
+
+        // The files are there now; the ones that are found are not red any more.
+        let answers = paths[2..]
+            .iter()
+            .map(|path| (path.clone(), path.starts_with("/media")))
+            .collect();
+        let _ = handle(&mut state, Message::PathsRechecked(generation, answers));
+        assert!(!state.rechecking);
+        assert_eq!(
+            known(&state),
+            [
+                Some(false),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false)
+            ]
+        );
+
+        // The other button asks about every track of the library.
+        let _ = handle(&mut state, Message::RecheckPaths(Scope::Library));
+        assert!(state.rechecking);
+        assert_eq!(known(&state), [None; 6]);
     }
 
     #[test]

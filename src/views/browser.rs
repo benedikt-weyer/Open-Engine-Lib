@@ -26,7 +26,7 @@ use crate::model::{
     Kind, Library, Lighting, Playlist, Track, analysis_count, stars_of,
 };
 use crate::playlist_drag::{self, Drag};
-use crate::reachable::Reachability;
+use crate::reachable::{self, Reachability};
 use crate::right_click::right_click;
 
 /// Height of one track row. Fixed, so only the rows in view have to be built.
@@ -493,6 +493,28 @@ impl Browser {
             let location = (!track.streaming).then_some(track.location.as_str());
             [location, self.origin(track)].into_iter().flatten()
         })
+    }
+
+    /// The locations and saved origins of the tracks of the shown list.
+    pub fn list_paths(&self) -> Vec<&str> {
+        self.paths_of(self.tracks().iter().copied())
+    }
+
+    /// The locations and saved origins of all tracks of the library.
+    pub fn library_paths(&self) -> Vec<&str> {
+        self.paths_of(0..self.library.tracks.len())
+    }
+
+    /// The locations (of the tracks that are files) and saved origins of these tracks, as
+    /// indices into `Library::tracks`.
+    fn paths_of(&self, tracks: impl Iterator<Item = usize>) -> Vec<&str> {
+        tracks
+            .flat_map(|index| {
+                let track = &self.library.tracks[index];
+                let location = (!track.streaming).then_some(track.location.as_str());
+                [location, self.origin(track)].into_iter().flatten()
+            })
+            .collect()
     }
 
     /// The covers of the rows that are built, which are the ones to have ready.
@@ -1056,17 +1078,29 @@ fn content_width(layout: Layout<'_>, numbered: bool) -> f32 {
     width + LOCATION_MIN_WIDTH
 }
 
+/// Whether the paths of the tracks can be reached, and whether they are being looked for again
+/// (which the buttons over the list start).
+#[derive(Clone, Copy)]
+pub struct Paths<'a> {
+    pub reachable: &'a Reachability,
+    pub rechecking: bool,
+}
+
 /// The tracks of the shown list. `playing` is the row that is playing, if it is in this list.
 pub fn tracks<'a>(
     browser: &'a Browser,
     drag: Option<&'a Drag>,
     playing: Option<usize>,
     covers: &'a Covers,
-    reachable: &'a Reachability,
+    paths: Paths<'a>,
     columns: Columns<'a>,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
+    let Paths {
+        reachable,
+        rechecking,
+    } = paths;
     let list = browser.tracks();
     let Columns {
         widths,
@@ -1088,9 +1122,45 @@ pub fn tracks<'a>(
     .padding([2, 10])
     .style(button::secondary)
     .on_press(Message::ColumnsMenuToggle);
-    let mut heading =
-        column![row![title, Space::new().width(Fill), columns_button].align_y(iced::Center)]
-            .spacing(8);
+    // Look again whether the files at the locations and origins are there (what was found
+    // missing stays red until then), for this list or for all tracks.
+    let recheck = |label: &'a str, tip: &'a str, scope: reachable::Scope| {
+        tooltip(
+            button(text(if rechecking {
+                strings.rechecking.as_str()
+            } else {
+                label
+            }))
+            .padding([2, 10])
+            .style(button::secondary)
+            .on_press_maybe((!rechecking).then_some(Message::RecheckPaths(scope))),
+            container(text(tip).size(13))
+                .max_width(340)
+                .padding([6, 10])
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+    };
+    let mut heading = column![
+        row![
+            title,
+            Space::new().width(Fill),
+            recheck(
+                &strings.recheck_list,
+                &strings.recheck_list_tip,
+                reachable::Scope::List
+            ),
+            recheck(
+                &strings.recheck_library,
+                &strings.recheck_library_tip,
+                reachable::Scope::Library
+            ),
+            columns_button
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+    ]
+    .spacing(8);
     if picking {
         heading = heading.push(column_picker(kind, hidden, language));
     }

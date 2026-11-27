@@ -168,6 +168,11 @@ analysis_track_data: Trackdaten
 analysis_waveform: Wellenform
 analysis_beatgrid: Beatgrid
 columns_button: Spalten
+recheck_list: "Diese Liste prüfen"
+recheck_list_tip: "Prüft erneut, ob die Dateien am Speicherort und an der gespeicherten Herkunft der Titel dieser Liste da sind. Titel, deren Dateien gefunden werden, sind nicht mehr rot markiert."
+recheck_library: "Alle Titel prüfen"
+recheck_library_tip: "Prüft erneut, ob die Dateien am Speicherort und an der gespeicherten Herkunft aller Titel der Bibliothek da sind, was auf einem langsamen Laufwerk dauern kann. Titel, deren Dateien gefunden werden, sind nicht mehr rot markiert."
+rechecking: "Wird geprüft…"
 columns_hint: "Spalten zum Anzeigen ankreuzen"
 stems_rendered: "Für diesen Titel sind Stems gerendert"
 stems_none: "Keine Stems gerendert"
