@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::player::{Output, PlayError, RodioOutput, Start};
+use crate::stems::{Key, STEMS};
 
 /// How often the engine checks whether the current track has ended.
 const TICK: Duration = Duration::from_millis(100);
@@ -25,6 +26,8 @@ pub struct QueueItem {
     /// is not there.
     pub fallback: Option<PathBuf>,
     pub streaming: bool,
+    /// The track's stems file, played instead while stems are asked for.
+    pub stems: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,6 +62,11 @@ pub struct Status {
     pub error: Option<TrackError>,
     /// The track is held by a scratch; `position` is where the hand is.
     pub scratching: bool,
+    /// The track is played from its stems.
+    pub stems: bool,
+    /// Why the track is not played from its stems, although they were asked for and it has
+    /// them.
+    pub stems_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -85,6 +93,12 @@ pub enum Command {
     Poll,
     /// Stop and release the audio device.
     Close,
+    /// Play the tracks from their stems with this key (or from their own files again, with
+    /// none), the stems this loud. The playing track switches at once.
+    SetStems {
+        key: Option<Key>,
+        gains: [f32; STEMS],
+    },
 }
 
 pub struct Playback<O> {
@@ -93,6 +107,11 @@ pub struct Playback<O> {
     /// Index of the playing track in `queue`; `None` while stopped.
     position: Option<usize>,
     error: Option<TrackError>,
+    /// The key to play stems with, while they are asked for.
+    stems_key: Option<Key>,
+    /// The playing track is played from its stems.
+    playing_stems: bool,
+    stems_error: Option<String>,
 }
 
 impl<O: Output> Playback<O> {
@@ -102,6 +121,9 @@ impl<O: Output> Playback<O> {
             queue: Vec::new(),
             position: None,
             error: None,
+            stems_key: None,
+            playing_stems: false,
+            stems_error: None,
         }
     }
 
@@ -113,6 +135,7 @@ impl<O: Output> Playback<O> {
                 start,
             } => {
                 self.error = None;
+                self.stems_error = None;
                 self.queue = queue;
                 self.position = None;
                 if position < self.queue.len() {
@@ -159,6 +182,21 @@ impl<O: Output> Playback<O> {
                 self.error = None;
                 self.output.close();
             }
+            Command::SetStems { key, gains } => {
+                self.output.set_stem_gains(gains);
+                if key == self.stems_key {
+                    return;
+                }
+                self.stems_key = key;
+                // The playing track goes on from where it is, from the other file.
+                if let Some(position) = self.position {
+                    let start = Start {
+                        paused: self.output.is_paused(),
+                        at: self.output.position(),
+                    };
+                    self.start(position, start);
+                }
+            }
         }
     }
 
@@ -197,6 +235,8 @@ impl<O: Output> Playback<O> {
             },
             error: self.error.clone(),
             scratching: item.is_some() && self.output.is_scratching(),
+            stems: item.is_some() && self.playing_stems,
+            stems_error: item.and(self.stems_error.clone()),
         }
     }
 
@@ -209,6 +249,24 @@ impl<O: Output> Playback<O> {
     /// Starts `queue[position]`. On failure records the error and stays stopped.
     fn start(&mut self, position: usize, start: Start) -> bool {
         let item = &self.queue[position];
+        self.playing_stems = false;
+        self.stems_error = None;
+        if let (Some(key), Some(stems), false) = (&self.stems_key, &item.stems, item.streaming) {
+            // Scratching reads the track's own file: where it is, or else at its origin.
+            let track = match &item.fallback {
+                Some(fallback) if !item.path.exists() && fallback.exists() => fallback,
+                _ => &item.path,
+            };
+            match self.output.play_stems(stems, key, track, start) {
+                Ok(()) => {
+                    self.playing_stems = true;
+                    self.position = Some(position);
+                    return true;
+                }
+                // Played from its own file instead, and said why.
+                Err(error) => self.stems_error = Some(error.to_string()),
+            }
+        }
         let result = if item.streaming {
             self.output.stop();
             Err((ErrorKind::Streaming, String::new()))
@@ -339,9 +397,35 @@ mod tests {
         scratching: bool,
         scratched: f64,
         scratch_error: Option<String>,
+        /// The stems' gains, and the file scratching would read while stems play.
+        gains: [f32; STEMS],
+        scratch_file: Option<PathBuf>,
     }
 
+    /// The key the fake output's stems "fit".
+    const FAKE_KEY: Key = [7; 16];
+
     impl Output for FakeOutput {
+        fn play_stems(
+            &mut self,
+            stems: &Path,
+            key: &Key,
+            track: &Path,
+            start: Start,
+        ) -> Result<(), PlayError> {
+            if key != &FAKE_KEY {
+                self.playing = None;
+                return Err(PlayError::Failed(
+                    "the stems key does not fit this file".into(),
+                ));
+            }
+            self.play(stems, start)?;
+            self.scratch_file = Some(track.to_path_buf());
+            Ok(())
+        }
+        fn set_stem_gains(&mut self, gains: [f32; STEMS]) {
+            self.gains = gains;
+        }
         fn play(&mut self, path: &Path, start: Start) -> Result<(), PlayError> {
             self.playing = None;
             self.scratching = false;
@@ -403,6 +487,7 @@ mod tests {
             path: PathBuf::from(format!("/music/{id}.flac")),
             fallback: None,
             streaming,
+            stems: None,
         }
     }
 
@@ -686,5 +771,99 @@ mod tests {
         playback.handle(Command::Next);
         assert!(!playback.status().scratching);
         assert_eq!(playback.status().track_id, Some(2));
+    }
+
+    fn with_stems(id: u32) -> QueueItem {
+        QueueItem {
+            stems: Some(PathBuf::from(format!("/stems/{id}.stems"))),
+            ..item(id, false)
+        }
+    }
+
+    fn set_stems(playback: &mut Playback<FakeOutput>, key: Option<Key>) {
+        playback.handle(Command::SetStems {
+            key,
+            gains: [1.0, 0.0, 1.0, 0.5],
+        });
+    }
+
+    #[test]
+    fn stems_are_played_when_asked_for_and_the_track_has_them() {
+        let (mut playback, finished) = playback(&[]);
+        playback.handle(Command::Play {
+            queue: vec![with_stems(1), item(2, false), with_stems(3)],
+            position: 0,
+            start: Start::default(),
+        });
+        assert!(!playback.status().stems, "not asked for yet");
+
+        // The playing track switches at once, at the same position and paused or not.
+        playback.handle(Command::TogglePause);
+        set_stems(&mut playback, Some(FAKE_KEY));
+        let status = playback.status();
+        assert!(status.stems);
+        assert_eq!((status.state, status.track_id), (State::Paused, Some(1)));
+        assert_eq!(
+            playback.output.playing.as_deref(),
+            Some(Path::new("/stems/1.stems"))
+        );
+        assert_eq!(
+            playback.output.started,
+            Start {
+                paused: true,
+                at: Duration::from_secs(5)
+            }
+        );
+        assert_eq!(playback.output.gains, [1.0, 0.0, 1.0, 0.5]);
+        // Scratching reads the track's own file.
+        assert_eq!(
+            playback.output.scratch_file.as_deref(),
+            Some(Path::new("/music/1.flac"))
+        );
+
+        // A track without stems is played from its file, the next one with stems from them.
+        finished.set(true);
+        playback.tick();
+        let status = playback.status();
+        assert_eq!(
+            (status.track_id, status.stems, status.stems_error),
+            (Some(2), false, None)
+        );
+        finished.set(true);
+        playback.tick();
+        assert!(playback.status().stems);
+
+        // Switched off, the track is played from its own file again.
+        set_stems(&mut playback, None);
+        assert!(!playback.status().stems);
+        assert_eq!(
+            playback.output.playing.as_deref(),
+            Some(Path::new("/music/3.flac"))
+        );
+    }
+
+    #[test]
+    fn stems_that_can_not_be_played_leave_the_track_playing_from_its_file_and_say_why() {
+        let (mut playback, _) = playback(&[]);
+        set_stems(&mut playback, Some([1; 16]));
+        playback.handle(Command::Play {
+            queue: vec![with_stems(1)],
+            position: 0,
+            start: Start::default(),
+        });
+        let status = playback.status();
+        assert_eq!(
+            (status.state, status.stems, status.error),
+            (State::Playing, false, None)
+        );
+        assert!(status.stems_error.unwrap().contains("does not fit"));
+        assert_eq!(
+            playback.output.playing.as_deref(),
+            Some(Path::new("/music/1.flac"))
+        );
+
+        // Stopped, there is nothing to say.
+        playback.handle(Command::Stop);
+        assert_eq!(playback.status().stems_error, None);
     }
 }

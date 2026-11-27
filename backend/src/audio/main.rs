@@ -18,6 +18,7 @@ mod overview;
 mod player;
 mod scratch;
 mod service;
+mod stems;
 mod waveform;
 
 use std::process::ExitCode;

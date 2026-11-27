@@ -30,6 +30,22 @@ service PlaybackService {
   rpc BeginScratch(BeginScratchRequest) returns (PlaybackStatus);
   rpc MoveScratch(MoveScratchRequest) returns (PlaybackStatus);
   rpc EndScratch(EndScratchRequest) returns (PlaybackStatus);
+  // Plays the tracks from their stems (Engine's `.stems` files, which hold drums, bass,
+  // melody and vocals apart) or from their own files again, and sets how loud each stem is.
+  // Engine encrypts the stems, and Open Engine Lib does not come with the key: the user gives
+  // it (`key`). A track without a stems file is played from its own file as before. The
+  // playing track switches at once, at the same position; the setting stays for the next
+  // tracks until it is changed.
+  // Errors: INVALID_ARGUMENT for a key that is not 16 bytes or does not fit Engine's stems.
+  rpc SetStems(SetStemsRequest) returns (PlaybackStatus);
+}
+
+message SetStemsRequest {
+  // The key of Engine's stems files, 16 bytes. Empty plays the tracks' own files.
+  bytes key = 1;
+  // How loud each stem is, in the order of the file's channel pairs (see
+  // docs/engine-library-format.md): 0 is silent and 1 as it was separated. Missing ones are 1.
+  repeated float gains = 2;
 }
 
 message PlayRequest {
@@ -75,6 +91,11 @@ message PlaybackStatus {
   // The track is being scratched: `position_ms` is where the hand is, and the state is
   // paused whatever it was before.
   bool scratching = 6;
+  // The track is played from its stems (see SetStems).
+  bool stems = 7;
+  // Why the track is not played from its stems although they were asked for and it has
+  // them (it is played from its own file instead). Cleared when it is.
+  optional string stems_error = 8;
 }
 
 enum PlaybackState {

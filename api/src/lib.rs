@@ -25,6 +25,9 @@ pub const WAVEFORM_GAIN_HIGH: f32 = 1.0;
 /// The largest gain accepted.
 pub const WAVEFORM_MAX_GAIN: f32 = 20.0;
 
+/// The loudest a stem can be made (`SetStems`): twice as loud as it was separated.
+pub const STEM_MAX_GAIN: f32 = 2.0;
+
 /// How far the controller's seek buttons jump, in seconds.
 pub const CONTROLLER_SEEK_SECONDS: u32 = 5;
 
@@ -63,6 +66,83 @@ pub const SLOT_FOLDER: &str = "folder";
 /// What the backend prints on its first stdout line, followed by the address it
 /// listens on, once it is ready: `LISTENING 127.0.0.1:41234`.
 pub const LISTENING_PREFIX: &str = "LISTENING ";
+
+/// The key of Engine's `.stems` files, which Open Engine Lib does not come with: the user
+/// gives it in the settings. Engine encrypts every sample of a stems file with AES-128 in ECB
+/// mode after padding it to whole blocks (PKCS#7), with one key for all files (see
+/// docs/engine-library-format.md).
+pub mod stems_key {
+    use aes::Aes128;
+    use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+
+    /// How many bytes a key has.
+    pub const LEN: usize = 16;
+
+    /// A block of padding alone (sixteen bytes of 16), encrypted with Engine's key: what the
+    /// last block of every sample whose audio fills whole blocks is, in every stems file. A key
+    /// fits Engine's stems if it encrypts the padding to this. (It says nothing about the key
+    /// itself: AES does not give the key away from a pair of plain and encrypted blocks.)
+    const PADDING_ENCRYPTED: [u8; 16] = [
+        0x17, 0x72, 0x94, 0x97, 0x5e, 0x2f, 0x12, 0xd7, 0xbf, 0x8b, 0xf6, 0x48, 0x4c, 0x69, 0x20,
+        0x71,
+    ];
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Problem {
+        /// Not 32 hexadecimal digits (spaces and colons between them are fine).
+        NotHex,
+        /// A key, but not the one Engine encrypts with.
+        DoesNotFit,
+    }
+
+    /// The key written as 32 hexadecimal digits, if it is Engine's.
+    pub fn parse(text: &str) -> Result<[u8; LEN], Problem> {
+        let digits: Vec<u8> = text
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace() && *byte != b':' && *byte != b'-')
+            .collect();
+        if digits.len() != LEN * 2 {
+            return Err(Problem::NotHex);
+        }
+        let mut key = [0; LEN];
+        for (byte, pair) in key.iter_mut().zip(digits.chunks(2)) {
+            let pair = std::str::from_utf8(pair).map_err(|_| Problem::NotHex)?;
+            *byte = u8::from_str_radix(pair, 16).map_err(|_| Problem::NotHex)?;
+        }
+        if fits(&key) {
+            Ok(key)
+        } else {
+            Err(Problem::DoesNotFit)
+        }
+    }
+
+    /// Whether `key` is the one Engine encrypts its stems with.
+    pub fn fits(key: &[u8]) -> bool {
+        if key.len() != LEN {
+            return false;
+        }
+        let cipher = Aes128::new(GenericArray::from_slice(key));
+        let mut block = GenericArray::clone_from_slice(&[LEN as u8; LEN]);
+        cipher.encrypt_block(&mut block);
+        block.as_slice() == PADDING_ENCRYPTED
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_32_hex_digits_are_a_key_and_only_engines_fits() {
+            assert_eq!(parse(""), Err(Problem::NotHex));
+            assert_eq!(parse("00"), Err(Problem::NotHex));
+            assert_eq!(parse(&"zz".repeat(16)), Err(Problem::NotHex));
+            assert_eq!(parse(&"00".repeat(16)), Err(Problem::DoesNotFit));
+            // Separators between the digits are fine.
+            assert_eq!(parse(&["00"; 16].join(":")), Err(Problem::DoesNotFit));
+            assert!(!fits(&[0; 15]));
+        }
+    }
+}
 
 pub mod v1 {
     tonic::include_proto!("openenginelib.v1");

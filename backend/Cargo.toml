@@ -23,6 +23,7 @@ analysis = ["dep:beat-this", "dep:libkeyfinder-sys"]
 
 [dependencies]
 beat-this = { version = "1.1.0", default-features = false, optional = true }
+aes = "0.8.4"
 crc32fast = "1.5.2"
 dirs = "7.0.0"
 flate2 = "1.1.10"

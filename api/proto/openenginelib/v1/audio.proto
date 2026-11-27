@@ -25,6 +25,7 @@ service AudioService {
   rpc BeginScratch(BeginScratchRequest) returns (PlaybackStatus);
   rpc MoveScratch(MoveScratchRequest) returns (PlaybackStatus);
   rpc EndScratch(EndScratchRequest) returns (PlaybackStatus);
+  rpc SetStems(SetStemsRequest) returns (PlaybackStatus);
   // Stops playback, empties the queue and releases the audio device (which the next Play
   // opens again), for when the library that the queue came from is closed.
   rpc Close(CloseRequest) returns (PlaybackStatus);
@@ -128,6 +129,9 @@ message QueueEntry {
   string fallback_path = 3;
   // A streaming track, which has no file: it is skipped and reported as an error.
   bool streaming = 4;
+  // The track's stems file (Engine's `.stems`), played instead of `path` while stems are
+  // asked for (`SetStems`). Empty for none.
+  string stems_path = 5;
 }
 
 message CloseRequest {}

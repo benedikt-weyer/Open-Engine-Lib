@@ -99,6 +99,16 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 position_ms: (seconds.max(0.0) * 1000.0) as u64,
             });
         }
+        Message::StemsToggle => {
+            state.stems.on = !state.stems.on;
+            return state.send_stems();
+        }
+        Message::StemToggle(stem) => {
+            if let Some(muted) = state.stems.muted.get_mut(stem) {
+                *muted = !*muted;
+                return state.send_stems();
+            }
+        }
         Message::ScratchStart => {
             let (true, Some(duration)) = (state.scratch.is_none(), state.playing_duration()) else {
                 return Task::none();

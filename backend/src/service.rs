@@ -1474,6 +1474,19 @@ impl PlaybackService for Service {
                         .cloned()
                         .unwrap_or_default(),
                     streaming: track.streaming,
+                    stems_path: track
+                        .origin_key
+                        .as_ref()
+                        .filter(|_| track.has_stems)
+                        .map(|(uuid, id)| {
+                            library
+                                .dir
+                                .join(library::STEMS_DIR)
+                                .join(library::stems_file_name(uuid, *id))
+                                .display()
+                                .to_string()
+                        })
+                        .unwrap_or_default(),
                 })
             })
             .collect::<Result<Vec<_>, Status>>()?;
@@ -1553,6 +1566,13 @@ impl PlaybackService for Service {
         request: Request<api::EndScratchRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
         Ok(self.audio()?.end_scratch(request.into_inner()).await?)
+    }
+
+    async fn set_stems(
+        &self,
+        request: Request<api::SetStemsRequest>,
+    ) -> Result<Response<api::PlaybackStatus>, Status> {
+        Ok(self.audio()?.set_stems(request.into_inner()).await?)
     }
 
     async fn get_status(

@@ -14,6 +14,7 @@
   alsa-lib,
   libkeyfinder,
   sqlite,
+  ffmpeg-headless,
   fetchurl,
 }:
 
@@ -71,6 +72,10 @@ rustPlatform.buildRustPackage {
   };
 
   cargoLock.lockFile = ../Cargo.lock;
+
+  # The audio process plays Engine's stems with ffmpeg (no Rust decoder takes their 8-channel
+  # AAC), and is built to run this one.
+  env.OPEN_ENGINE_LIB_FFMPEG = "${ffmpeg-headless}/bin/ffmpeg";
 
   nativeBuildInputs = [
     pkg-config

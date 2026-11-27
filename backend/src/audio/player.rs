@@ -9,6 +9,7 @@ use std::time::Duration;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink};
 
 use crate::scratch::{Scratch, Window};
+use crate::stems::{self, Gains, Key, STEMS, StemsSource};
 
 #[derive(Debug)]
 pub enum PlayError {
@@ -41,6 +42,19 @@ pub struct Start {
 pub trait Output {
     /// Stops whatever is playing and starts the file at `path`.
     fn play(&mut self, path: &Path, start: Start) -> Result<(), PlayError>;
+    /// Stops whatever is playing and starts the stems file at `stems`, decrypted with `key`,
+    /// its stems as loud as `set_stem_gains` said. `track` is the track's own file, which
+    /// scratching reads (it sounds the same as all the stems together).
+    fn play_stems(
+        &mut self,
+        stems: &Path,
+        key: &Key,
+        track: &Path,
+        start: Start,
+    ) -> Result<(), PlayError>;
+    /// How loud each stem is (0 silent, 1 as separated): for the stems playing now, and for
+    /// the ones played next.
+    fn set_stem_gains(&mut self, gains: [f32; STEMS]);
     fn is_paused(&self) -> bool;
     fn toggle_pause(&mut self);
     /// True once the current file has played to its end.
@@ -85,9 +99,43 @@ pub struct RodioOutput {
     path: Option<PathBuf>,
     /// While scratching, `current` is held (paused) where the scratch began.
     scratching: Option<Scratching>,
+    /// How loud the stems are, for every stems source.
+    gains: Gains,
+    /// The stems file that was decrypted last and with which key: the decrypted file is
+    /// kept, so that it is not decrypted again when the same track is played again.
+    decrypted: Option<(PathBuf, Key)>,
+}
+
+/// Where the decrypted stems of this process are kept, one file at a time: in the user's
+/// runtime directory (in memory on most systems) if there is one.
+fn decrypted_path() -> PathBuf {
+    dirs::runtime_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("open-engine-lib")
+        .join(format!("stems-{}.m4a", std::process::id()))
+}
+
+impl Drop for RodioOutput {
+    fn drop(&mut self) {
+        if self.decrypted.is_some() {
+            let _ = std::fs::remove_file(decrypted_path());
+        }
+    }
 }
 
 impl RodioOutput {
+    /// Opens the audio device if it is not open yet, and connects a new player to it.
+    fn new_player(&mut self) -> Result<rodio::Player, PlayError> {
+        if self.device.is_none() {
+            let mut device = DeviceSinkBuilder::open_default_sink()
+                .map_err(|error| PlayError::Failed(error.to_string()))?;
+            device.log_on_drop(false);
+            self.device = Some(device);
+        }
+        let device = self.device.as_ref().expect("device was just opened");
+        Ok(rodio::Player::connect_new(device.mixer()))
+    }
+
     /// Ends a scratch without moving the track to where the hand was; it plays on from
     /// where it was held if it was playing.
     fn cancel_scratch(&mut self) {
@@ -111,15 +159,7 @@ impl Output for RodioOutput {
         let source =
             Decoder::try_from(file).map_err(|error| PlayError::Failed(error.to_string()))?;
 
-        if self.device.is_none() {
-            let mut device = DeviceSinkBuilder::open_default_sink()
-                .map_err(|error| PlayError::Failed(error.to_string()))?;
-            device.log_on_drop(false);
-            self.device = Some(device);
-        }
-        let device = self.device.as_ref().expect("device was just opened");
-
-        let player = rodio::Player::connect_new(device.mixer());
+        let player = self.new_player()?;
         // Pause before the track is added, so that nothing is heard of it.
         if start.paused {
             player.pause();
@@ -132,6 +172,48 @@ impl Output for RodioOutput {
         self.current = Some(player);
         self.path = Some(path.to_path_buf());
         Ok(())
+    }
+
+    fn play_stems(
+        &mut self,
+        stems: &Path,
+        key: &Key,
+        track: &Path,
+        start: Start,
+    ) -> Result<(), PlayError> {
+        self.stop();
+        if !stems.is_file() {
+            return Err(PlayError::NotFound(stems.to_path_buf()));
+        }
+        let decrypted = decrypted_path();
+        let wanted = (stems.to_path_buf(), *key);
+        if self.decrypted.as_ref() != Some(&wanted) || !decrypted.is_file() {
+            self.decrypted = None;
+            stems::decrypt_file(stems, key, &decrypted).map_err(PlayError::Failed)?;
+            self.decrypted = Some(wanted);
+        }
+        // (Opened at the start and then moved, so that the player counts the position from
+        // where the track starts.)
+        let source = StemsSource::open(&decrypted, Duration::ZERO, self.gains.clone())
+            .map_err(PlayError::Failed)?;
+
+        let player = self.new_player()?;
+        if start.paused {
+            player.pause();
+        }
+        player.append(source);
+        if !start.at.is_zero() {
+            player
+                .try_seek(start.at)
+                .map_err(|error| PlayError::Failed(error.to_string()))?;
+        }
+        self.current = Some(player);
+        self.path = Some(track.to_path_buf());
+        Ok(())
+    }
+
+    fn set_stem_gains(&mut self, gains: [f32; STEMS]) {
+        self.gains.set(gains);
     }
 
     fn is_paused(&self) -> bool {

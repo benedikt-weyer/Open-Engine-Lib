@@ -114,6 +114,35 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .err()
                 .map(|e| e.to_string());
         }
+        Message::StemsKeyEdited(text) => {
+            // Saved once it is a whole key, or nothing; kept as a draft until then.
+            let whole = text.trim().is_empty()
+                || !matches!(
+                    open_engine_api::stems_key::parse(&text),
+                    Err(open_engine_api::stems_key::Problem::NotHex)
+                );
+            if whole {
+                state.stems_key_draft = None;
+                state.config_error = state
+                    .config
+                    .set_stems_key(&text)
+                    .err()
+                    .map(|e| e.to_string());
+                // The stems that play are played with the new key (or not at all).
+                if state.stems.on {
+                    return state.send_stems();
+                }
+            } else {
+                state.stems_key_draft = Some(text);
+            }
+        }
+        Message::StemsKeyRemove => {
+            state.stems_key_draft = None;
+            state.config_error = state.config.set_stems_key("").err().map(|e| e.to_string());
+            if state.stems.on {
+                return state.send_stems();
+            }
+        }
         Message::CloseRequested(_) => return state.exit(),
         Message::ResetOverrides => {
             state.config_error = state.config.reset_overrides().err().map(|e| e.to_string());

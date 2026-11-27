@@ -22,6 +22,45 @@ pub struct NowPlaying<'a> {
     pub paused: bool,
 }
 
+/// The stems in the order of the channel pairs of Engine's stems files.
+pub const STEM_COUNT: usize = 4;
+
+/// Whether the tracks are played from their stems, and which of these are off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StemMix {
+    pub on: bool,
+    pub muted: [bool; STEM_COUNT],
+}
+
+impl StemMix {
+    /// How loud each stem is: off or as it was separated.
+    pub fn gains(&self) -> [f32; STEM_COUNT] {
+        self.muted.map(|muted| if muted { 0.0 } else { 1.0 })
+    }
+}
+
+/// The name of a stem, by its channel pair in the file: vocals, bass, drums, melody (found
+/// by measuring five real stems files, see docs/engine-library-format.md).
+fn stem_name(strings: &crate::i18n::Strings, stem: usize) -> &str {
+    match stem {
+        0 => &strings.stem_vocals,
+        1 => &strings.stem_bass,
+        2 => &strings.stem_drums,
+        _ => &strings.stem_melody,
+    }
+}
+
+/// What the player shows of the stems.
+pub struct Stems<'a> {
+    pub mix: StemMix,
+    /// A key that fits Engine's stems is set.
+    pub has_key: bool,
+    /// The playing track is played from its stems, and if not although they were asked for,
+    /// why.
+    pub playing: bool,
+    pub error: Option<&'a str>,
+}
+
 pub struct Bar<'a> {
     pub now: Option<NowPlaying<'a>>,
     /// The cover of the playing track, if it has one and it has been fetched.
@@ -29,6 +68,7 @@ pub struct Bar<'a> {
     /// The play button also starts the selected track, so it is enabled whenever
     /// there is something to start.
     pub can_start: bool,
+    pub stems: Stems<'a>,
 }
 
 pub fn view<'a>(language: Language, bar: Bar<'a>) -> Element<'a, Message> {
@@ -96,6 +136,7 @@ pub fn view<'a>(language: Language, bar: Bar<'a>) -> Element<'a, Message> {
         ),
         control(Icon::Stop, &strings.stop, Message::Stop, playing),
         control(Icon::Next, &strings.next, Message::Next, playing),
+        stems_controls(strings, &bar),
         text(title).width(Fill),
         text(format!(
             "{} / {}",
@@ -106,6 +147,60 @@ pub fn view<'a>(language: Language, bar: Bar<'a>) -> Element<'a, Message> {
     .spacing(10)
     .align_y(iced::Center)
     .into()
+}
+
+/// The stems button, and while the track plays from its stems a button for each of them,
+/// lit while it is heard.
+fn stems_controls<'a>(strings: &'a crate::i18n::Strings, bar: &Bar<'a>) -> Element<'a, Message> {
+    let stems = &bar.stems;
+    let has_stems = bar.now.as_ref().is_some_and(|now| now.track.has_stems);
+    let hint = match (stems.mix.on, stems.error) {
+        (true, Some(error)) => crate::i18n::fill(&strings.stems_failed, &[("error", &error)]),
+        _ if !has_stems && bar.now.is_some() => strings.stems_missing_hint.clone(),
+        _ if !stems.has_key => strings.stems_no_key_hint.clone(),
+        _ => strings.stems_play_hint.clone(),
+    };
+    let toggle = button(text(&strings.stems_button).size(13))
+        .padding([6, 10])
+        .style(if stems.mix.on {
+            button::primary
+        } else {
+            button::secondary
+        })
+        // Switching off always works; switching on needs the key.
+        .on_press_maybe((stems.mix.on || stems.has_key).then_some(Message::StemsToggle));
+    let mut controls = row![
+        tooltip(toggle, text(hint).size(13), tooltip::Position::Top).style(container::rounded_box)
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+
+    if stems.mix.on && stems.playing {
+        for (stem, muted) in stems.mix.muted.iter().enumerate() {
+            let name = stem_name(strings, stem);
+            let stem_button = button(text(name).size(13))
+                .padding([6, 8])
+                .style(if *muted {
+                    button::secondary
+                } else {
+                    button::success
+                })
+                .on_press(Message::StemToggle(stem));
+            controls = controls.push(
+                tooltip(
+                    stem_button,
+                    text(crate::i18n::fill(
+                        &strings.stem_toggle_hint,
+                        &[("stem", &name)],
+                    ))
+                    .size(13),
+                    tooltip::Position::Top,
+                )
+                .style(container::rounded_box),
+            );
+        }
+    }
+    controls.into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

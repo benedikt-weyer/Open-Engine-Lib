@@ -130,6 +130,9 @@ pub struct Config {
     pub restore_position: bool,
     /// Listen to DJ controllers (anything that sends MIDI) to control the player.
     pub controller_enabled: bool,
+    /// The key of Engine's stems files, as the user wrote it (32 hexadecimal digits): Open
+    /// Engine Lib does not come with it. Empty for none.
+    pub stems_key: String,
 }
 
 fn gain_is_valid(gain: f32) -> bool {
@@ -137,6 +140,11 @@ fn gain_is_valid(gain: f32) -> bool {
 }
 
 impl Config {
+    /// The stems key, if one is set and it is Engine's.
+    pub fn stems_key(&self) -> Option<[u8; open_engine_api::stems_key::LEN]> {
+        open_engine_api::stems_key::parse(&self.stems_key).ok()
+    }
+
     pub fn waveform_gain(&self, band: WaveformBand) -> f32 {
         match band {
             WaveformBand::Low => self.waveform_gain_low,
@@ -192,6 +200,7 @@ impl Default for Config {
             reopen_library: true,
             restore_position: true,
             controller_enabled: true,
+            stems_key: String::new(),
         }
     }
 }
@@ -224,6 +233,8 @@ struct Layer {
     restore_position: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     controller_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stems_key: Option<String>,
 }
 
 impl Layer {
@@ -263,6 +274,9 @@ impl Layer {
         }
         if let Some(controller_enabled) = self.controller_enabled {
             config.controller_enabled = controller_enabled;
+        }
+        if let Some(stems_key) = &self.stems_key {
+            config.stems_key = stems_key.clone();
         }
     }
 }
@@ -459,6 +473,12 @@ impl ConfigStore {
 
     pub fn set_reopen_library(&mut self, reopen: bool) -> io::Result<()> {
         self.edit(|layer| layer.reopen_library = Some(reopen))
+    }
+
+    /// Sets the stems key (empty for none). Kept as it was written.
+    pub fn set_stems_key(&mut self, key: &str) -> io::Result<()> {
+        let key = key.trim().to_owned();
+        self.edit(|layer| layer.stems_key = Some(key))
     }
 
     pub fn set_controller_enabled(&mut self, enabled: bool) -> io::Result<()> {

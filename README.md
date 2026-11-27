@@ -7,6 +7,8 @@ Open the app and choose **Open library…**, then pick the `Engine Library` fold
 
 **Analysing a track:** right-click a track and choose **Analyse track** to find its beats and key (a progress toast shows how far it is). This writes a beatgrid, tempo and key to the working copy as Engine would, and the **Analysis** and **Analysis origin** columns of the track list show what a track has and who made it. It needs the weights of Beat This!, which the Nix package installs; when building from source run `scripts/fetch-models` once (see [docs/architecture.md](docs/architecture.md#analysing-a-track)). Which columns the list shows is chosen with the **Columns** button.
 
+**Stems:** a track that Engine has separated into stems (the **Stems** column) can be played from them, with a button in the player for each of drums, bass, melody and vocals to turn it off and on. Engine encrypts its stems files and Open Engine Lib does not come with the key: enter it on the Settings page (it is checked against the stems and kept in your config file, so set it in the app rather than in a Nix config, which would put it in the world-readable store). Playing stems needs `ffmpeg`, which the Nix package brings along.
+
 The app never works on your library in place: it copies the databases to a cache (`~/.cache/open-engine-lib`) and reads that. Your music files are played where they are. It is split into a UI, a library process and an audio process that talk over gRPC, see [docs/architecture.md](docs/architecture.md).
 
 ## Configuration

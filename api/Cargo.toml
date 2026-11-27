@@ -5,6 +5,7 @@ edition.workspace = true
 description = "gRPC protocol between the Open Engine Lib UI and its backend"
 
 [dependencies]
+aes = "0.8.4"
 prost = "0.14.4"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"

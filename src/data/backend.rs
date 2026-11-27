@@ -1090,6 +1090,12 @@ pub enum Control {
     ScratchMove {
         delta_seconds: f64,
     },
+    /// Play from the stems with this key (empty: from the tracks' own files), each stem this
+    /// loud.
+    SetStems {
+        key: Vec<u8>,
+        gains: Vec<f32>,
+    },
     Poll,
 }
 
@@ -1121,6 +1127,11 @@ pub async fn control(mut backend: Backend, control: Control) -> Result<PlaybackS
         Control::ScratchMove { delta_seconds } => {
             playback
                 .move_scratch(MoveScratchRequest { delta_seconds })
+                .await
+        }
+        Control::SetStems { key, gains } => {
+            playback
+                .set_stems(open_engine_api::v1::SetStemsRequest { key, gains })
                 .await
         }
         Control::Poll => {

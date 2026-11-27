@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use open_engine_api::API_VERSION;
 use open_engine_api::v1 as api;
 use open_engine_api::v1::audio_service_server::AudioService;
 use open_engine_api::v1::backend_service_server::BackendService;
+use open_engine_api::{API_VERSION, STEM_MAX_GAIN, stems_key};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -19,6 +19,7 @@ use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::midi;
 use crate::overview;
 use crate::player::Start;
+use crate::stems::{Key, STEMS};
 use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 
 /// How many MIDI messages wait for the library process before the ones of a busy control
@@ -119,6 +120,7 @@ impl AudioService for Service {
                 fallback: (!entry.fallback_path.is_empty())
                     .then(|| PathBuf::from(entry.fallback_path)),
                 streaming: entry.streaming,
+                stems: (!entry.stems_path.is_empty()).then(|| PathBuf::from(entry.stems_path)),
             })
             .collect();
 
@@ -200,6 +202,14 @@ impl AudioService for Service {
         _: Request<api::EndScratchRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
         self.command(Command::ScratchEnd).await
+    }
+
+    async fn set_stems(
+        &self,
+        request: Request<api::SetStemsRequest>,
+    ) -> Result<Response<api::PlaybackStatus>, Status> {
+        let (key, gains) = stems_request(request.into_inner())?;
+        self.command(Command::SetStems { key, gains }).await
     }
 
     async fn get_status(
@@ -396,7 +406,44 @@ fn status_message(status: crate::engine::Status) -> api::PlaybackStatus {
             detail: error.detail,
         }),
         scratching: status.scratching,
+        stems: status.stems,
+        stems_error: status.stems_error,
     }
+}
+
+/// The key (none for the tracks' own files) and the gains a `SetStems` asks for.
+fn stems_request(request: api::SetStemsRequest) -> Result<(Option<Key>, [f32; STEMS]), Status> {
+    let key = if request.key.is_empty() {
+        None
+    } else if stems_key::fits(&request.key) {
+        Some(
+            request
+                .key
+                .as_slice()
+                .try_into()
+                .expect("a key that fits has 16 bytes"),
+        )
+    } else {
+        return Err(Status::invalid_argument(
+            "the key is not the one Engine encrypts its stems with",
+        ));
+    };
+    if request.gains.len() > STEMS {
+        return Err(Status::invalid_argument(format!(
+            "there are {STEMS} stems, not {}",
+            request.gains.len()
+        )));
+    }
+    let mut gains = [1.0; STEMS];
+    for (gain, &asked) in gains.iter_mut().zip(&request.gains) {
+        if !(asked.is_finite() && (0.0..=STEM_MAX_GAIN).contains(&asked)) {
+            return Err(Status::invalid_argument(format!(
+                "a stem's gain is from 0 to {STEM_MAX_GAIN}, not {asked}"
+            )));
+        }
+        *gain = asked;
+    }
+    Ok((key, gains))
 }
 
 #[cfg(test)]
@@ -425,5 +472,34 @@ mod tests {
         std::fs::remove_file(&origin).unwrap();
         assert_eq!(resolve(&location_text, &origin_text), location);
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_stems_request_needs_engines_key_and_gains_in_range() {
+        let off = stems_request(api::SetStemsRequest {
+            key: Vec::new(),
+            gains: vec![0.0, 0.5],
+        })
+        .unwrap();
+        assert_eq!(off, (None, [0.0, 0.5, 1.0, 1.0]));
+
+        let wrong_key = stems_request(api::SetStemsRequest {
+            key: vec![0; 16],
+            gains: Vec::new(),
+        });
+        assert_eq!(wrong_key.unwrap_err().code(), tonic::Code::InvalidArgument);
+        for gains in [
+            vec![-1.0],
+            vec![f32::NAN],
+            vec![STEM_MAX_GAIN + 1.0],
+            vec![1.0; 5],
+        ] {
+            let error = stems_request(api::SetStemsRequest {
+                key: Vec::new(),
+                gains,
+            })
+            .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        }
     }
 }

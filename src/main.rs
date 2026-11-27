@@ -197,6 +197,11 @@ struct State {
     gain_draft: Option<(WaveformBand, f32)>,
     /// The waveform delay slider being dragged and where it is, in milliseconds.
     delay_draft: Option<i32>,
+    /// The stems key as it is being typed in the settings, until it is a whole key (only then
+    /// is it saved).
+    stems_key_draft: Option<String>,
+    /// Whether the tracks are to be played from their stems, and which stems are off.
+    stems: player_bar::StemMix,
     /// The window comparing the working copy with the source, while it is open.
     sync: Option<SyncStage>,
     /// The sync window is about discarding the changes, replacing the working copy by the
@@ -291,6 +296,9 @@ pub enum Message {
     /// The waveform delay slider is being dragged to a value (ms): not saved until it is let go.
     WaveformDelayDragged(i32),
     WaveformDelayReleased,
+    /// The stems key in the settings was edited, and the button that removes it pressed.
+    StemsKeyEdited(String),
+    StemsKeyRemove,
     ResetWaveformDelay,
     /// The border after a column header was pressed.
     ResizeStarted(Column),
@@ -564,6 +572,10 @@ pub enum Message {
     ScratchEnd,
     /// Jump to a point of the track, in seconds (from clicking the waveform overview).
     SeekTo(f32),
+    /// The stems button of the player: play from the stems, or from the track's own file.
+    StemsToggle,
+    /// A stem's button: turn it off, or on again.
+    StemToggle(usize),
     /// A pad of the playing track was clicked: jump to its cue.
     CueJump(usize),
     /// An empty pad of the playing track was clicked: set a cue at the playhead.
@@ -672,6 +684,8 @@ impl State {
             backend_error: None,
             gain_draft: None,
             delay_draft: None,
+            stems_key_draft: None,
+            stems: player_bar::StemMix::default(),
             sync: None,
             sync_reverse: false,
             progress: None,
@@ -1158,6 +1172,22 @@ impl State {
     }
 
     /// Sends a playback request to the backend; its answer arrives as `Message::Status`.
+    /// Tells the backend whether to play from the stems, with the key of the settings, and
+    /// how loud each stem is. Without a key that fits, the tracks' own files are played.
+    fn send_stems(&self) -> Task<Message> {
+        let key = self
+            .stems
+            .on
+            .then(|| self.config.effective().stems_key())
+            .flatten()
+            .map(|key| key.to_vec())
+            .unwrap_or_default();
+        self.control(Control::SetStems {
+            key,
+            gains: self.stems.gains().to_vec(),
+        })
+    }
+
     fn control(&self, control: Control) -> Task<Message> {
         match self.backend() {
             Some(backend) => Task::perform(backend::control(backend, control), Message::Status),
@@ -1678,6 +1708,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::WaveformColorsSelected(..)
         | Message::WaveformDelayDragged(..)
         | Message::WaveformDelayReleased
+        | Message::StemsKeyEdited(..)
+        | Message::StemsKeyRemove
         | Message::WaveformGainDragged(..)
         | Message::WaveformGainReleased => handlers::settings::handle(state, message),
         Message::LibraryReloaded(..)
@@ -1830,6 +1862,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::RatingSet { .. }
         | Message::RevealRow(..)
         | Message::SeekTo(..)
+        | Message::StemsToggle
+        | Message::StemToggle(..)
         | Message::SelectTrack(..)
         | Message::SetStars { .. }
         | Message::SortBy(..)
@@ -1890,6 +1924,7 @@ fn view_page(state: &State) -> Element<'_, Message> {
             state.config_error.as_deref(),
             state.gain_draft,
             state.delay_draft,
+            state.stems_key_draft.as_deref(),
             &state.controller,
         ),
     };
@@ -2272,6 +2307,12 @@ fn open_library<'a>(
                 .and_then(|id| state.covers.get(id)),
             now,
             can_start: !browser.tracks().is_empty(),
+            stems: player_bar::Stems {
+                mix: state.stems,
+                has_key: state.config.effective().stems_key().is_some(),
+                playing: state.status.stems,
+                error: state.status.stems_error.as_deref(),
+            },
         },
     );
 
@@ -2758,6 +2799,8 @@ mod tests {
             backend_error: None,
             gain_draft: None,
             delay_draft: None,
+            stems_key_draft: None,
+            stems: player_bar::StemMix::default(),
             sync: None,
             sync_reverse: false,
             progress: None,
@@ -2860,6 +2903,39 @@ mod tests {
         state()
     }
 
+    #[test]
+    fn the_stems_key_is_saved_once_it_is_whole_and_the_stems_are_turned_on_and_off() {
+        let mut state = state();
+        assert_eq!(state.config.effective().stems_key, "");
+
+        // Half a key is only a draft.
+        let _ = handle(&mut state, Message::StemsKeyEdited("0011".into()));
+        assert_eq!(state.stems_key_draft.as_deref(), Some("0011"));
+        assert_eq!(state.config.effective().stems_key, "");
+
+        // A whole one is saved even if it is not Engine's, which the settings say.
+        let whole = "00".repeat(16);
+        let _ = handle(&mut state, Message::StemsKeyEdited(whole.clone()));
+        assert_eq!(state.stems_key_draft, None);
+        assert_eq!(state.config.effective().stems_key, whole);
+        assert_eq!(
+            state.config.effective().stems_key(),
+            None,
+            "it does not fit"
+        );
+
+        let _ = handle(&mut state, Message::StemsKeyRemove);
+        assert_eq!(state.config.effective().stems_key, "");
+
+        let _ = handle(&mut state, Message::StemsToggle);
+        let _ = handle(&mut state, Message::StemToggle(1));
+        let _ = handle(&mut state, Message::StemToggle(9));
+        assert!(state.stems.on);
+        assert_eq!(state.stems.gains(), [1.0, 0.0, 1.0, 1.0]);
+        let _ = handle(&mut state, Message::StemsToggle);
+        assert!(!state.stems.on);
+    }
+
     fn sort_by(state: &mut State, key: SortKey) {
         let _ = handle(state, Message::SortBy(key));
     }
@@ -2900,6 +2976,7 @@ mod tests {
             position_ms: 0,
             error: None,
             scratching: false,
+            ..PlaybackStatus::default()
         };
 
         let title = SortKey::Column(Column::Title);
@@ -2975,6 +3052,7 @@ mod tests {
             position_ms: 61_250,
             error: None,
             scratching: false,
+            ..PlaybackStatus::default()
         };
 
         assert_eq!(
@@ -3109,6 +3187,7 @@ mod tests {
             position_ms: 42_000,
             error: None,
             scratching: false,
+            ..PlaybackStatus::default()
         };
         state.saving = Some("/media/NEW".into());
 
@@ -4711,6 +4790,7 @@ mod tests {
             position_ms: 10_000,
             error: None,
             scratching: false,
+            ..PlaybackStatus::default()
         };
         assert!(state.cues.claim(1));
         let generation = state.cues.generation();
@@ -4726,6 +4806,7 @@ mod tests {
             position_ms: seconds * 1000,
             error: None,
             scratching,
+            ..PlaybackStatus::default()
         }
     }
 
@@ -5085,6 +5166,7 @@ mod tests {
             position_ms: 10_000,
             error: None,
             scratching: false,
+            ..PlaybackStatus::default()
         };
         assert!(state.loops.claim(1));
         let generation = state.loops.generation();
@@ -5383,6 +5465,7 @@ mod tests {
             position_ms: 1_000,
             error: None,
             scratching: false,
+            ..PlaybackStatus::default()
         };
         let _ = state.fetch_cues();
         let _ = state.fetch_loops();

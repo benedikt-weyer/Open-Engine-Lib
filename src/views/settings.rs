@@ -73,6 +73,48 @@ fn action_name(strings: &Strings, action: ControllerAction) -> String {
     }
 }
 
+/// The stems key: Open Engine Lib does not come with it, so the user enters it. Hidden as it
+/// is typed, and said whether it fits.
+fn stems_section<'a>(
+    page: Column<'a, Message>,
+    strings: &'a Strings,
+    key: &str,
+) -> Column<'a, Message> {
+    use open_engine_api::stems_key::{self, Problem};
+
+    let (verdict, fits) = match stems_key::parse(key) {
+        _ if key.trim().is_empty() => (&strings.stems_key_none, None),
+        Ok(_) => (&strings.stems_key_fits, Some(true)),
+        Err(Problem::NotHex) => (&strings.stems_key_not_hex, Some(false)),
+        Err(Problem::DoesNotFit) => (&strings.stems_key_does_not_fit, Some(false)),
+    };
+    let verdict = text(verdict).size(14);
+    let verdict = match fits {
+        Some(true) => verdict.style(text::success),
+        Some(false) => verdict.style(text::danger),
+        None => verdict.style(text::secondary),
+    };
+    page.push(text(&strings.stems_heading).size(20))
+        .push(
+            text(&strings.stems_key_hint)
+                .size(14)
+                .style(text::secondary),
+        )
+        .push(
+            row![
+                text_input(&strings.stems_key_placeholder, key)
+                    .on_input(Message::StemsKeyEdited)
+                    .secure(true)
+                    .width(330),
+                button(text(&strings.stems_key_forget))
+                    .on_press_maybe((!key.trim().is_empty()).then_some(Message::StemsKeyRemove)),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        )
+        .push(verdict)
+}
+
 fn control_name(strings: &Strings, control: &Control) -> String {
     let template = if controller::is_note(control) {
         &strings.control_note
@@ -244,6 +286,7 @@ pub fn view<'a>(
     error: Option<&'a str>,
     draft: Option<(WaveformBand, f32)>,
     delay_draft: Option<i32>,
+    stems_key_draft: Option<&'a str>,
     controller: &'a Controller,
 ) -> Element<'a, Message> {
     let current = config.effective();
@@ -335,6 +378,8 @@ pub fn view<'a>(
     );
 
     page = controller_section(page, strings, current.controller_enabled, controller);
+    let stems_key = stems_key_draft.map_or_else(|| current.stems_key.clone(), str::to_owned);
+    page = stems_section(page, strings, &stems_key);
 
     page = page.push(text(&strings.startup_heading).size(20));
     page = page.push(
