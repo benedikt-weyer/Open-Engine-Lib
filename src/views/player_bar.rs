@@ -55,6 +55,8 @@ pub struct Stems<'a> {
     pub mix: StemMix,
     /// A key that fits Engine's stems is set.
     pub has_key: bool,
+    /// The playing track has stems (made since the library was fetched, too).
+    pub track_has_stems: bool,
     /// The playing track is played from its stems, and if not although they were asked for,
     /// why.
     pub playing: bool,
@@ -153,7 +155,7 @@ pub fn view<'a>(language: Language, bar: Bar<'a>) -> Element<'a, Message> {
 /// lit while it is heard.
 fn stems_controls<'a>(strings: &'a crate::i18n::Strings, bar: &Bar<'a>) -> Element<'a, Message> {
     let stems = &bar.stems;
-    let has_stems = bar.now.as_ref().is_some_and(|now| now.track.has_stems);
+    let has_stems = bar.now.is_some() && stems.track_has_stems;
     let hint = match (stems.mix.on, stems.error) {
         (true, Some(error)) => crate::i18n::fill(&strings.stems_failed, &[("error", &error)]),
         _ if !has_stems && bar.now.is_some() => strings.stems_missing_hint.clone(),

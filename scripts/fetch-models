@@ -30,4 +30,8 @@ get mel_spectrogram.onnx \
 get beat_this.onnx \
   "$repository/releases/download/model-large/beat_this.onnx" \
   5f810debe53459b559127fb55bbad40035bb47cc567b20e501670f968c770f02
+# BS-RoFormer (4 stems), which separates tracks into stems (MIT export; see nix/package.nix).
+get bs_roformer_4stem_rhythm_fp16.onnx \
+  "https://huggingface.co/silverdaw/bs-roformer-rhythm-onnx/resolve/main/bs_roformer_4stem_rhythm_fp16.onnx" \
+  4bac38e42c085b5d69964e2b7ff161318a1315122c10b025c718b20e94d85d6b
 echo "Done: $(pwd)/models"

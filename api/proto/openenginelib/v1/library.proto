@@ -286,7 +286,31 @@ service LibraryService {
   // track id; NOT_FOUND if the audio file does not exist; INTERNAL if it can't be decoded
   // or the result can't be written.
   rpc AnalyzeTrack(AnalyzeTrackRequest) returns (AnalyzeTrackResponse);
+  // Separates a track into stems (vocals, bass, drums, melody) and writes Engine's stems
+  // file for it, `Stems/<originTrackId> <originDatabaseUuid>.stems` in the library's folder
+  // (the file is all there is to it: Engine has no stems in its database, so this is written
+  // to the library itself, not the working copy). Engine encrypts its stems, so the key is
+  // the caller's to give. Takes minutes; `GetProgress` says how far it is (the `STEMS_*`
+  // phases) while it runs. From then on the track has stems (`Track.has_stems`) and is
+  // played from them when they are asked for.
+  // Errors: FAILED_PRECONDITION if no library is open, it is a folder of music or a
+  // streaming track, the track has no origin, it has stems already and `overwrite` is not
+  // set, the model or ONNX Runtime is not installed (the message says where they are looked
+  // for) or another operation is running; INVALID_ARGUMENT for an unknown track id or a key
+  // that is not Engine's; NOT_FOUND if the audio file does not exist; INTERNAL if it can't
+  // be decoded, separated or written.
+  rpc GenerateStems(GenerateStemsRequest) returns (GenerateStemsResponse);
 }
+
+message GenerateStemsRequest {
+  uint32 track_id = 1;
+  // The key of Engine's stems files, 16 bytes.
+  bytes key = 2;
+  // Make them again for a track that has stems, replacing its file.
+  bool overwrite = 3;
+}
+
+message GenerateStemsResponse {}
 
 message AnalyzeTrackRequest {
   uint32 track_id = 1;
@@ -697,6 +721,12 @@ enum ProgressPhase {
   PROGRESS_PHASE_ANALYSING_DECODING = 8;
   PROGRESS_PHASE_ANALYSING_BEATS = 9;
   PROGRESS_PHASE_ANALYSING_KEY = 10;
+  // Making the stems of a track (`GenerateStems`): decoding it, separating it, writing the
+  // stems file. As with the analysis, `done_bytes` of `total_bytes` (1000) is how far the
+  // whole job is and `current` the track's title.
+  PROGRESS_PHASE_STEMS_DECODING = 11;
+  PROGRESS_PHASE_STEMS_SEPARATING = 12;
+  PROGRESS_PHASE_STEMS_WRITING = 13;
 }
 
 message CloseLibraryRequest {}

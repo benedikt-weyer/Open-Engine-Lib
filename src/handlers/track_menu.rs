@@ -54,6 +54,9 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 analysed: browser.analysis(track) != 0,
                 queued: queue.is_some_and(|queue| queue.contains(track.id)),
                 analyse_all: unanalysed(browser, queue).len(),
+                can_make_stems: !track.streaming,
+                has_stems: browser.has_stems(track),
+                has_stems_key: state.config.effective().stems_key().is_some(),
             });
         }
         Message::TrackMenuClose => state.track_menu = None,
@@ -80,6 +83,72 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 unanalysed(browser, state.analysis_queue.as_ref()),
             );
             return state.start_analysis(library, tracks, false);
+        }
+        Message::TrackMenuStems => {
+            let Some(menu) = state.track_menu.take() else {
+                return Task::none();
+            };
+            let key = state.config.effective().stems_key();
+            let (true, Some(key), false, Some(backend)) =
+                (menu.can_make_stems, key, state.locked(), state.backend())
+            else {
+                return Task::none();
+            };
+            let LibraryState::Open(browser) = &state.library else {
+                return Task::none();
+            };
+            let library = browser.library.path.clone();
+            let (track, title) = (menu.track, menu.title);
+            state.toast = Some(toast::Toast::Stems {
+                library: library.clone(),
+                title: title.clone(),
+            });
+            state.progress = None;
+            return Task::perform(
+                backend::generate_stems(backend, track, key.to_vec(), menu.has_stems),
+                move |result| Message::StemsFinished {
+                    library: library.clone(),
+                    track,
+                    title: title.clone(),
+                    result,
+                },
+            );
+        }
+        Message::StemsFinished {
+            library,
+            track,
+            title,
+            result,
+        } => {
+            state.progress = None;
+            // (Only for the toast that waits for it.)
+            let waiting = matches!(
+                &state.toast,
+                Some(toast::Toast::Stems { library: waiting, .. }) if *waiting == library
+            );
+            if !waiting {
+                return Task::none();
+            }
+            let strings = state.config.effective().language.strings();
+            state.toast = Some(match result {
+                Ok(()) => {
+                    if let LibraryState::Open(browser) = &mut state.library
+                        && browser.library.path == library
+                    {
+                        browser.set_has_stems(track);
+                    }
+                    toast::Toast::Done {
+                        message: fill(&strings.toast_stems_done, &[("title", &title)]),
+                        since: std::time::Instant::now(),
+                    }
+                }
+                Err(error) => toast::Toast::Failed {
+                    message: fill(
+                        &strings.toast_stems_failed,
+                        &[("title", &title), ("error", &error)],
+                    ),
+                },
+            });
         }
         Message::AnalysisQueueStop => {
             if let Some(queue) = &mut state.analysis_queue {

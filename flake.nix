@@ -14,6 +14,13 @@
       packages = forAllSystems (pkgs: rec {
         open-engine-lib = pkgs.callPackage ./nix/package.nix { };
         default = open-engine-lib;
+      } // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+        # Makes stems on an NVIDIA GPU (CUDA is unfree, so this one is opt-in).
+        cuda =
+          (import nixpkgs {
+            inherit (pkgs.stdenv.hostPlatform) system;
+            config.allowUnfree = true;
+          }).callPackage ./nix/package.nix { cudaSupport = true; };
       });
 
       apps = forAllSystems (pkgs: rec {
@@ -62,6 +69,10 @@
           ]);
 
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+
+          # What making stems runs (the package builds these paths in; see nix/package.nix).
+          OPEN_ENGINE_LIB_FFMPEG4 = "${pkgs.ffmpeg_4-headless}/bin/ffmpeg";
+          OPEN_ENGINE_LIB_ONNXRUNTIME = "${pkgs.onnxruntime}/lib/libonnxruntime.so";
         };
       });
     };

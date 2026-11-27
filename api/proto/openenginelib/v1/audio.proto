@@ -45,7 +45,49 @@ service AudioService {
   // FAILED_PRECONDITION if the models are not installed (the message lists where they are
   // looked for) or this build has no analysis, INTERNAL if it can't be decoded or analysed.
   rpc AnalyzeTrack(AudioAnalyzeTrackRequest) returns (stream AudioAnalyzeTrackEvent);
+  // Separates an audio file into stems (vocals, bass, drums, melody) with BS-RoFormer and
+  // writes them to `stems_path` as Engine's stems file, encrypted with `key`. Streams how far
+  // it is, then `done` as the last message. Needs the model, ONNX Runtime and ffmpeg (see
+  // docs/architecture.md); takes minutes.
+  // Errors: INVALID_ARGUMENT for a key that is not Engine's, NOT_FOUND if there is no file at
+  // `path` or at `fallback_path`, FAILED_PRECONDITION if the model or ONNX Runtime is not
+  // installed (the message says where they are looked for), INTERNAL if it can't be decoded,
+  // separated or written.
+  rpc SeparateStems(AudioSeparateStemsRequest) returns (stream AudioSeparateStemsEvent);
 }
+
+message AudioSeparateStemsRequest {
+  // As in `AudioAnalyzeTrackRequest`.
+  string path = 1;
+  string fallback_path = 2;
+  // Where the stems file goes (written beside it and renamed there, so it is never half
+  // there).
+  string stems_path = 3;
+  // The key of Engine's stems files, 16 bytes.
+  bytes key = 4;
+}
+
+message AudioSeparateStemsEvent {
+  oneof event {
+    AudioStemsProgress progress = 1;
+    AudioStemsDone done = 2;
+  }
+}
+
+enum AudioStemsStage {
+  AUDIO_STEMS_STAGE_UNSPECIFIED = 0;
+  AUDIO_STEMS_STAGE_DECODING = 1;
+  AUDIO_STEMS_STAGE_SEPARATING = 2;
+  AUDIO_STEMS_STAGE_WRITING = 3;
+}
+
+message AudioStemsProgress {
+  AudioStemsStage stage = 1;
+  // How far the whole job is, 0 to 1. Only goes up.
+  float fraction = 2;
+}
+
+message AudioStemsDone {}
 
 message AudioAnalyzeTrackRequest {
   string path = 1;

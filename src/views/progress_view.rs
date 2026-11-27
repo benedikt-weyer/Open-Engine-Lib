@@ -67,6 +67,9 @@ pub fn view<'a>(
         ProgressPhase::AnalysingDecoding => &strings.toast_stage_decoding,
         ProgressPhase::AnalysingBeats => &strings.toast_stage_beats,
         ProgressPhase::AnalysingKey => &strings.toast_stage_key,
+        ProgressPhase::StemsDecoding => &strings.toast_stage_decoding,
+        ProgressPhase::StemsSeparating => &strings.toast_stage_separating,
+        ProgressPhase::StemsWriting => &strings.toast_stage_writing_stems,
         ProgressPhase::Unspecified => &strings.libsync_writing,
     };
     let mut lines = column![text(name)].spacing(6).width(Fill);

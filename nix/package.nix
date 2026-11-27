@@ -15,7 +15,12 @@
   libkeyfinder,
   sqlite,
   ffmpeg-headless,
+  ffmpeg_4-headless,
+  onnxruntime,
+  callPackage,
   fetchurl,
+  # Separate stems on an NVIDIA GPU: ONNX Runtime with CUDA (unfree, see onnxruntime-gpu.nix).
+  cudaSupport ? false,
 }:
 
 let
@@ -51,7 +56,18 @@ let
         sha256 = "5f810debe53459b559127fb55bbad40035bb47cc567b20e501670f968c770f02";
       };
     }
+    # BS-RoFormer, which separates a track into stems: ZFTurbo's 4-stem checkpoint trained on
+    # MUSDB18-HQ, exported to ONNX by Silverdaw (MIT; the dataset's terms are for research).
+    {
+      name = "bs_roformer_4stem_rhythm_fp16.onnx";
+      src = fetchurl {
+        url = "https://huggingface.co/silverdaw/bs-roformer-rhythm-onnx/resolve/main/bs_roformer_4stem_rhythm_fp16.onnx";
+        sha256 = "4bac38e42c085b5d69964e2b7ff161318a1315122c10b025c718b20e94d85d6b";
+      };
+    }
   ];
+  # What runs the stems model: ONNX Runtime, on the CPU or with CUDA.
+  ort = if cudaSupport then callPackage ./onnxruntime-gpu.nix { } else onnxruntime;
 in
 rustPlatform.buildRustPackage {
   pname = "open-engine-lib";
@@ -76,6 +92,11 @@ rustPlatform.buildRustPackage {
   # The audio process plays Engine's stems with ffmpeg (no Rust decoder takes their 8-channel
   # AAC), and is built to run this one.
   env.OPEN_ENGINE_LIB_FFMPEG = "${ffmpeg-headless}/bin/ffmpeg";
+  # Stems are written with ffmpeg 4.4, which Engine writes them with: its AAC encoder lays the
+  # eight channels out as Engine's files do.
+  env.OPEN_ENGINE_LIB_FFMPEG4 = "${ffmpeg_4-headless}/bin/ffmpeg";
+  # ONNX Runtime is loaded when stems are made, from here.
+  env.OPEN_ENGINE_LIB_ONNXRUNTIME = "${ort}/lib/libonnxruntime.so";
 
   nativeBuildInputs = [
     pkg-config

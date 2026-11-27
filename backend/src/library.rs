@@ -271,6 +271,8 @@ pub struct Library {
     loop_counts: Mutex<Vec<u32>>,
     /// What the tracks that were analysed since the library was opened have now.
     analysed: Mutex<HashMap<usize, Analysed>>,
+    /// The tracks whose stems were made since the library was opened, by index in `tracks`.
+    stems_made: Mutex<HashSet<usize>>,
     /// Kept open to read what is not loaded with the tracks (covers, beatgrids) on demand,
     /// and to write the edits.
     connection: Mutex<Connection>,
@@ -356,6 +358,7 @@ impl Library {
             cue_counts: Mutex::new(counts.clone()),
             loop_counts: Mutex::new(counts),
             analysed: Mutex::default(),
+            stems_made: Mutex::default(),
             connection: Mutex::new(Connection::open_in_memory()?),
         })
     }
@@ -407,6 +410,7 @@ impl Library {
             cue_counts: Mutex::new(cue_counts),
             loop_counts: Mutex::new(loop_counts),
             analysed: Mutex::default(),
+            stems_made: Mutex::default(),
             connection: Mutex::new(connection),
         })
     }
@@ -1366,6 +1370,30 @@ impl Library {
 
     /// Which analysis results the track at `index` in `tracks` has (the `ANALYSIS_*` bits),
     /// as it is now.
+    /// Where the stems file of the track at `index` in `tracks` goes (in the library's
+    /// `Stems` folder, named by its origin), if it can have one: not for a folder of music, a
+    /// streaming track or one without an origin.
+    pub fn stems_path(&self, index: usize) -> Option<PathBuf> {
+        let track = self.tracks.get(index).filter(|track| !track.streaming)?;
+        if self.folder {
+            return None;
+        }
+        let (uuid, id) = track.origin_key.as_ref()?;
+        Some(self.dir.join(STEMS_DIR).join(stems_file_name(uuid, *id)))
+    }
+
+    /// Whether the track at `index` in `tracks` has stems: it had them when the library was
+    /// opened, or they were made since.
+    pub fn has_stems(&self, index: usize) -> bool {
+        self.tracks.get(index).is_some_and(|track| track.has_stems)
+            || self.stems_made.lock().expect("stems lock").contains(&index)
+    }
+
+    /// The stems of the track at `index` in `tracks` were made.
+    pub fn stems_were_made(&self, index: usize) {
+        self.stems_made.lock().expect("stems lock").insert(index);
+    }
+
     pub fn analysis(&self, index: usize) -> u32 {
         let analysed = self.analysed.lock().expect("analysed lock");
         analysed

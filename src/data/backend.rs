@@ -997,6 +997,25 @@ pub async fn analyze_track(
         .map_err(describe)
 }
 
+/// Separates a track into stems and writes Engine's stems file for it (minutes).
+pub async fn generate_stems(
+    mut backend: Backend,
+    track_id: u32,
+    key: Vec<u8>,
+    overwrite: bool,
+) -> Result<(), String> {
+    backend
+        .library
+        .generate_stems(open_engine_api::v1::GenerateStemsRequest {
+            track_id,
+            key,
+            overwrite,
+        })
+        .await
+        .map(|_| ())
+        .map_err(describe)
+}
+
 /// How far the sync that is running has got.
 pub async fn progress(mut backend: Backend) -> Result<OperationProgress, String> {
     backend

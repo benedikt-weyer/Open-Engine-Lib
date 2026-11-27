@@ -35,6 +35,11 @@ pub enum Phase {
     AnalysingDecoding,
     AnalysingBeats,
     AnalysingKey,
+    /// Making a track's stems, counted the same way: decoding it, separating it, writing the
+    /// stems file.
+    StemsDecoding,
+    StemsSeparating,
+    StemsWriting,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -441,6 +441,15 @@ pub enum Message {
     TrackMenuAnalyseAll,
     /// The toast's button that leaves out the tracks of the queue that wait.
     AnalysisQueueStop,
+    /// The menu's "Generate stems": separate the track into stems.
+    TrackMenuStems,
+    /// Making the stems of a track (in the library at `library`) ended.
+    StemsFinished {
+        library: String,
+        track: u32,
+        title: String,
+        result: Result<(), String>,
+    },
     /// The analysis of a track (in the library at `library`) ended.
     AnalysisFinished {
         library: String,
@@ -1787,6 +1796,8 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::TrackMenuAnalyseAll
         | Message::AnalysisQueueStop
         | Message::AnalysisFinished { .. }
+        | Message::TrackMenuStems
+        | Message::StemsFinished { .. }
         | Message::ToastClose
         | Message::ToastTick
         | Message::TrackMenuRemoveFromLibrary
@@ -2324,6 +2335,7 @@ fn open_library<'a>(
             language,
         )
     });
+    let track_has_stems = now.as_ref().is_some_and(|now| browser.has_stems(now.track));
     let bar = player_bar::view(
         language,
         player_bar::Bar {
@@ -2336,6 +2348,7 @@ fn open_library<'a>(
             stems: player_bar::Stems {
                 mix: state.stems,
                 has_key: state.config.effective().stems_key().is_some(),
+                track_has_stems,
                 playing: state.status.stems,
                 error: state.status.stems_error.as_deref(),
             },
@@ -3459,6 +3472,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stems_are_made_from_the_context_menu_once_the_key_is_set_and_then_the_track_has_them() {
+        let mut state = state();
+        let at = iced::Point::new(120.0, 80.0);
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert!(!menu(&state).has_stems_key, "no key yet");
+        // Without a key the entry does nothing.
+        let _ = handle(&mut state, Message::TrackMenuStems);
+        assert!(state.toast.is_none());
+
+        // (Whether a key fits can't be told without Engine's, which the tests don't have:
+        // the toast and the answer are checked as if it had been set.)
+        state.toast = Some(toast::Toast::Stems {
+            library: "/media/DRIVE/Engine Library".into(),
+            title: "Track 1".into(),
+        });
+        assert!(state.locked(), "nothing else changes the library meanwhile");
+        let _ = handle(
+            &mut state,
+            Message::StemsFinished {
+                library: "/media/DRIVE/Engine Library".into(),
+                track: 1,
+                title: "Track 1".into(),
+                result: Ok(()),
+            },
+        );
+        assert!(matches!(state.toast, Some(toast::Toast::Done { .. })));
+        let track = browser(&state).library.track_by_id(1).unwrap().clone();
+        assert!(browser(&state).has_stems(&track));
+
+        // A failure says why, and an answer for another library is ignored.
+        state.toast = Some(toast::Toast::Stems {
+            library: "/media/DRIVE/Engine Library".into(),
+            title: "Track 1".into(),
+        });
+        let _ = handle(
+            &mut state,
+            Message::StemsFinished {
+                library: "/elsewhere".into(),
+                track: 1,
+                title: "Track 1".into(),
+                result: Err("no".into()),
+            },
+        );
+        assert!(matches!(state.toast, Some(toast::Toast::Stems { .. })));
+        let _ = handle(
+            &mut state,
+            Message::StemsFinished {
+                library: "/media/DRIVE/Engine Library".into(),
+                track: 1,
+                title: "Track 1".into(),
+                result: Err("the model is not installed".into()),
+            },
+        );
+        let Some(toast::Toast::Failed { message }) = &state.toast else {
+            panic!("a failure is shown");
+        };
+        assert!(message.contains("the model is not installed"));
+    }
+
     fn analysing(state: &mut State) {
         state.toast = Some(toast::Toast::Analysing {
             library: "/media/DRIVE/Engine Library".into(),
@@ -3964,6 +4037,9 @@ mod tests {
                 analysed: false,
                 queued: false,
                 analyse_all: 3,
+                can_make_stems: true,
+                has_stems: false,
+                has_stems_key: false,
             }
         );
         assert_eq!(browser(&state).selected, Some(1), "the row is selected");

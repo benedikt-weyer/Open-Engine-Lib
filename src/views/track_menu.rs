@@ -42,6 +42,13 @@ pub struct Menu {
     /// tracks): the menu offers to analyse them all one after the other when there are
     /// more than one.
     pub analyse_all: usize,
+    /// The track can have stems made: a file, not a streaming track.
+    pub can_make_stems: bool,
+    /// It has stems already, which making them again replaces.
+    pub has_stems: bool,
+    /// A stems key that fits Engine's is set in the settings: without it stems can't be
+    /// written.
+    pub has_stems_key: bool,
 }
 
 /// The menu in a layer over the whole window, whose clicks outside the menu close it.
@@ -49,7 +56,8 @@ pub fn layer(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Me
     let lines = 1
         + usize::from(menu.playlist.is_some())
         + usize::from(menu.can_analyse)
-        + usize::from(menu.analyse_all > 1);
+        + usize::from(menu.analyse_all > 1)
+        + usize::from(menu.can_make_stems);
     let height = TITLE_HEIGHT + lines as f32 * LINE_HEIGHT;
     anchored(menu.at, height, Message::TrackMenuClose, move || {
         view(menu, analysing, language)
@@ -120,6 +128,23 @@ fn view(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message
             Message::TrackMenuAnalyseAll,
             false,
         ));
+    }
+    if menu.can_make_stems {
+        // (One task at a time: not while tracks are analysed.)
+        items = items.push(if menu.has_stems_key {
+            item_if(
+                if menu.has_stems {
+                    &strings.track_menu_stems_again
+                } else {
+                    &strings.track_menu_stems
+                },
+                Message::TrackMenuStems,
+                false,
+                !analysing,
+            )
+        } else {
+            disabled_item(&strings.track_menu_stems_no_key)
+        });
     }
     if menu.playlist.is_some() {
         items = items.push(item_if(

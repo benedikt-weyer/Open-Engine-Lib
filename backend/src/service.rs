@@ -823,6 +823,9 @@ impl LibraryService for Service {
                 Phase::AnalysingDecoding => api::ProgressPhase::AnalysingDecoding,
                 Phase::AnalysingBeats => api::ProgressPhase::AnalysingBeats,
                 Phase::AnalysingKey => api::ProgressPhase::AnalysingKey,
+                Phase::StemsDecoding => api::ProgressPhase::StemsDecoding,
+                Phase::StemsSeparating => api::ProgressPhase::StemsSeparating,
+                Phase::StemsWriting => api::ProgressPhase::StemsWriting,
             }
             .into(),
             done_bytes: snapshot.done_bytes,
@@ -913,6 +916,7 @@ impl LibraryService for Service {
                                 bpm: library.analysed_bpm(id),
                                 analysis,
                                 analysis_note: ours.get(&id).cloned(),
+                                has_stems: library.has_stems(id),
                             },
                             origin,
                         )
@@ -1121,6 +1125,95 @@ impl LibraryService for Service {
             key: applied.key.map(str::to_owned),
             beats: applied.beats as u32,
         }))
+    }
+
+    async fn generate_stems(
+        &self,
+        request: Request<api::GenerateStemsRequest>,
+    ) -> Result<Response<api::GenerateStemsResponse>, Status> {
+        let library = self.library()?;
+        let request = request.into_inner();
+        let id = request.track_id;
+        let index = id as usize;
+        let track = library
+            .tracks
+            .get(index)
+            .ok_or_else(|| Status::invalid_argument(format!("unknown track id {id}")))?;
+        if library.is_folder() {
+            return Err(edit_status(EditError::NotEngine));
+        }
+        if track.streaming {
+            return Err(edit_status(EditError::Streaming));
+        }
+        if !open_engine_api::stems_key::fits(&request.key) {
+            return Err(Status::invalid_argument(
+                "the key is not the one Engine encrypts its stems with",
+            ));
+        }
+        let stems_path = library.stems_path(index).ok_or_else(|| {
+            Status::failed_precondition(
+                "the track has no origin, which Engine names its stems file by",
+            )
+        })?;
+        if library.has_stems(index) && !request.overwrite {
+            return Err(Status::failed_precondition("the track has stems already"));
+        }
+        let path = track.path.display().to_string();
+        let title = track.title.clone();
+        let mut audio = self.audio()?;
+        // (Taken after the checks, which need no progress; ends when this call does.)
+        let progress = self.0.progress.clone();
+        let _running = progress.try_begin().ok_or_else(|| {
+            Status::failed_precondition("another operation is running, try again when it is done")
+        })?;
+        progress.analysing(Phase::StemsDecoding, 0, &title);
+
+        let origin = {
+            let library = Arc::clone(&library);
+            tokio::task::spawn_blocking(move || {
+                library.tracks[index]
+                    .origin_key
+                    .as_ref()
+                    .and_then(|key| library.origins().remove(key))
+            })
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+        };
+
+        // The audio process separates the file and writes the stems, and says how far it is;
+        // its errors (no file, no model) say what is wrong and are passed on.
+        let mut events = audio
+            .separate_stems(api::AudioSeparateStemsRequest {
+                path,
+                fallback_path: origin.unwrap_or_default(),
+                stems_path: stems_path.display().to_string(),
+                key: request.key,
+            })
+            .await?
+            .into_inner();
+        loop {
+            let event = events.message().await?.ok_or_else(|| {
+                Status::internal("the audio process ended the separation without a result")
+            })?;
+            match event.event {
+                Some(api::audio_separate_stems_event::Event::Progress(step)) => {
+                    let phase = match step.stage() {
+                        api::AudioStemsStage::Separating => Phase::StemsSeparating,
+                        api::AudioStemsStage::Writing => Phase::StemsWriting,
+                        _ => Phase::StemsDecoding,
+                    };
+                    progress.analysing(
+                        phase,
+                        (step.fraction.clamp(0.0, 1.0) * 1000.0) as u64,
+                        &title,
+                    );
+                }
+                Some(api::audio_separate_stems_event::Event::Done(_)) => break,
+                None => {}
+            }
+        }
+        library.stems_were_made(index);
+        Ok(Response::new(api::GenerateStemsResponse {}))
     }
 
     async fn get_cues(
@@ -1392,6 +1485,8 @@ struct Counts {
     analysis: u32,
     /// What is saved about an analysis that Open Engine Lib made.
     analysis_note: Option<String>,
+    /// The track has stems (made since the library was opened, too).
+    has_stems: bool,
 }
 
 fn track_message(
@@ -1407,6 +1502,7 @@ fn track_message(
         bpm,
         analysis,
         analysis_note,
+        has_stems,
     } = now;
     let analysis_origin = match (analysis, &analysis_note) {
         (0, _) => api::AnalysisOrigin::Unspecified,
@@ -1426,7 +1522,7 @@ fn track_message(
         rating,
         soundswitch: track.lighting.state.into(),
         soundswitch_projects: track.lighting.projects.clone(),
-        has_stems: track.has_stems,
+        has_stems,
         analysis,
         analysis_origin: analysis_origin.into(),
         analysis_note,
@@ -1474,18 +1570,10 @@ impl PlaybackService for Service {
                         .cloned()
                         .unwrap_or_default(),
                     streaming: track.streaming,
-                    stems_path: track
-                        .origin_key
-                        .as_ref()
-                        .filter(|_| track.has_stems)
-                        .map(|(uuid, id)| {
-                            library
-                                .dir
-                                .join(library::STEMS_DIR)
-                                .join(library::stems_file_name(uuid, *id))
-                                .display()
-                                .to_string()
-                        })
+                    stems_path: library
+                        .stems_path(id as usize)
+                        .filter(|_| library.has_stems(id as usize))
+                        .map(|path| path.display().to_string())
                         .unwrap_or_default(),
                 })
             })

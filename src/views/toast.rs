@@ -32,6 +32,12 @@ pub enum Toast {
         /// There are tracks after this one that can still be left out.
         stoppable: bool,
     },
+    /// A track is being separated into stems (the backend says how far).
+    Stems {
+        /// The library it is in, to tell the answer from one for another library.
+        library: String,
+        title: String,
+    },
     /// It was done; says what came out.
     Done { message: String, since: Instant },
     /// It failed; says why.
@@ -41,7 +47,7 @@ pub enum Toast {
 impl Toast {
     /// Whether the toast is for a task that is still running.
     pub fn running(&self) -> bool {
-        matches!(self, Toast::Analysing { .. })
+        matches!(self, Toast::Analysing { .. } | Toast::Stems { .. })
     }
 
     /// Whether a finished toast has been shown long enough.
@@ -56,6 +62,8 @@ fn stage(progress: Option<&OperationProgress>, language: Language) -> &str {
     match progress.map(OperationProgress::phase) {
         Some(ProgressPhase::AnalysingBeats) => &strings.toast_stage_beats,
         Some(ProgressPhase::AnalysingKey) => &strings.toast_stage_key,
+        Some(ProgressPhase::StemsSeparating) => &strings.toast_stage_separating,
+        Some(ProgressPhase::StemsWriting) => &strings.toast_stage_writing_stems,
         _ => &strings.toast_stage_decoding,
     }
 }
@@ -109,6 +117,23 @@ pub fn layer<'a>(
                 );
             }
             lines.into()
+        }
+        Toast::Stems { title, .. } => {
+            let fraction = progress
+                .filter(|progress| progress.running)
+                .and_then(progress_view::fraction)
+                .unwrap_or(0.0);
+            column![
+                text(fill(&strings.toast_stems, &[("title", title)]))
+                    .size(14)
+                    .wrapping(text::Wrapping::None),
+                progress_bar(0.0..=1.0, fraction).girth(6),
+                text(stage(progress, language))
+                    .size(13)
+                    .style(text::secondary),
+            ]
+            .spacing(8)
+            .into()
         }
         Toast::Done { message, .. } => row![text(message).size(14).width(Fill), close()]
             .spacing(8)

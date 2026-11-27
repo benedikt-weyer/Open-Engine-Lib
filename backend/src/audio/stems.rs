@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use aes::Aes128;
-use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 use rodio::Source;
 use rodio::source::SeekError;
 
@@ -29,7 +29,7 @@ pub const STEMS: usize = 4;
 /// The channels of a stems file.
 const CHANNELS: usize = STEMS * 2;
 /// The sample rate Engine writes stems at.
-const SAMPLE_RATE: u32 = 44_100;
+pub const SAMPLE_RATE: u32 = 44_100;
 /// How many frames (of all eight channels) ffmpeg's output is handed on in.
 const CHUNK_FRAMES: usize = 2048;
 /// How many chunks are decoded ahead of what is heard (about 1.5 seconds).
@@ -42,7 +42,7 @@ pub type Key = [u8; 16];
 
 /// Where ffmpeg is: `$OPEN_ENGINE_LIB_FFMPEG`, else the one the build was told of (the Nix
 /// package names its own), else `ffmpeg` on the `PATH`.
-fn ffmpeg() -> PathBuf {
+pub fn ffmpeg() -> PathBuf {
     std::env::var_os("OPEN_ENGINE_LIB_FFMPEG")
         .map(PathBuf::from)
         .or_else(|| option_env!("OPEN_ENGINE_LIB_FFMPEG").map(PathBuf::from))
@@ -207,9 +207,14 @@ fn unpad(sample: &[u8]) -> Option<&[u8]> {
         .then_some(audio)
 }
 
-/// The stems file `data` with its samples decrypted with `key`: a plain MP4 that ffmpeg
-/// plays. Fails if it is not a stems file or the key does not fit it.
-pub fn decrypt(data: &[u8], key: &Key) -> Result<Vec<u8>, String> {
+/// The MP4 `data` with every sample of its track replaced by what `each` makes of it, and the
+/// sizes and starts of the samples changed to match. The samples are written in order, one
+/// chunk after the other, and what comes after the audio moves by as much as the audio grew
+/// or shrank.
+fn rewrite_samples(
+    data: &[u8],
+    mut each: impl FnMut(&[u8]) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
     let top = boxes(data, 0, data.len())?;
     let mdat = need(
         top.iter().copied().find(|found| &found.kind == b"mdat"),
@@ -221,48 +226,28 @@ pub fn decrypt(data: &[u8], key: &Key) -> Result<Vec<u8>, String> {
     )?;
     let table = samples(data, moov)?;
 
-    let cipher = Aes128::new(GenericArray::from_slice(key));
-    let mut decrypted = Vec::with_capacity(mdat.end - mdat.body);
+    let mut audio = Vec::with_capacity(mdat.end - mdat.body);
     let mut sizes = Vec::with_capacity(table.sizes.len());
     let mut starts = Vec::with_capacity(table.chunks.len());
-    let mut bad = 0;
     let mut sample = 0;
     for &(start, count) in &table.chunks {
-        starts.push(decrypted.len());
+        starts.push(audio.len());
         let mut at = start;
         for &size in &table.sizes[sample..sample + count] {
-            let encrypted = data
+            let bytes = data
                 .get(at..at + size)
                 .filter(|_| at >= mdat.body && at + size <= mdat.end)
                 .ok_or("a sample of the stems file is outside its audio")?;
-            if size % 16 != 0 {
-                return Err("the stems file is not encrypted the way Engine encrypts it".to_owned());
-            }
-            let mut blocks = encrypted.to_vec();
-            for block in blocks.as_chunks_mut::<16>().0 {
-                cipher.decrypt_block(GenericArray::from_mut_slice(block));
-            }
-            let audio = match unpad(&blocks) {
-                Some(audio) => audio,
-                None => {
-                    bad += 1;
-                    &blocks[..]
-                }
-            };
-            sizes.push(audio.len());
-            decrypted.extend_from_slice(audio);
+            let changed = each(bytes)?;
+            sizes.push(changed.len());
+            audio.extend_from_slice(&changed);
             at += size;
         }
         sample += count;
     }
-    if bad * BAD_PADDING_SHARE > table.sizes.len().max(1) {
-        return Err("the stems key does not fit this file".to_owned());
-    }
 
-    // The same file with the new audio, and the sizes and starts of the samples changed to
-    // match. What comes after the audio moves by as much as the audio shrank.
     let header = 8;
-    let new_mdat_len = header + decrypted.len();
+    let new_mdat_len = header + audio.len();
     let moved = |at: usize| -> usize {
         if at >= mdat.end {
             at - (mdat.end - mdat.start) + new_mdat_len
@@ -271,7 +256,7 @@ pub fn decrypt(data: &[u8], key: &Key) -> Result<Vec<u8>, String> {
         }
     };
     let audio_start = mdat.start + header;
-    let mut out = Vec::with_capacity(data.len());
+    let mut out = Vec::with_capacity(data.len() + 16 * sizes.len());
     out.extend_from_slice(&data[..mdat.start]);
     out.extend_from_slice(
         &u32::try_from(new_mdat_len)
@@ -279,7 +264,7 @@ pub fn decrypt(data: &[u8], key: &Key) -> Result<Vec<u8>, String> {
             .to_be_bytes(),
     );
     out.extend_from_slice(b"mdat");
-    out.extend_from_slice(&decrypted);
+    out.extend_from_slice(&audio);
     out.extend_from_slice(&data[mdat.end..]);
 
     for (index, size) in sizes.iter().enumerate() {
@@ -300,17 +285,132 @@ pub fn decrypt(data: &[u8], key: &Key) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The stems file `data` with its samples decrypted with `key`: a plain MP4 that ffmpeg
+/// plays. Fails if it is not a stems file or the key does not fit it.
+pub fn decrypt(data: &[u8], key: &Key) -> Result<Vec<u8>, String> {
+    let cipher = Aes128::new(GenericArray::from_slice(key));
+    let (mut bad, mut count) = (0, 0);
+    let plain = rewrite_samples(data, |encrypted| {
+        if encrypted.len() % 16 != 0 {
+            return Err("the stems file is not encrypted the way Engine encrypts it".to_owned());
+        }
+        let mut blocks = encrypted.to_vec();
+        for block in blocks.as_chunks_mut::<16>().0 {
+            cipher.decrypt_block(GenericArray::from_mut_slice(block));
+        }
+        count += 1;
+        match unpad(&blocks) {
+            Some(audio) => Ok(audio.to_vec()),
+            None => {
+                bad += 1;
+                Ok(blocks)
+            }
+        }
+    })?;
+    if bad * BAD_PADDING_SHARE > count.max(1) {
+        return Err("the stems key does not fit this file".to_owned());
+    }
+    Ok(plain)
+}
+
+/// The plain MP4 `data` with its samples encrypted as Engine encrypts its stems: each padded
+/// to whole blocks (PKCS#7) and encrypted with `key` in ECB mode.
+pub fn encrypt(data: &[u8], key: &Key) -> Result<Vec<u8>, String> {
+    let cipher = Aes128::new(GenericArray::from_slice(key));
+    rewrite_samples(data, |sample| {
+        let padding = 16 - sample.len() % 16;
+        let mut blocks = sample.to_vec();
+        blocks.extend(std::iter::repeat_n(padding as u8, padding));
+        for block in blocks.as_chunks_mut::<16>().0 {
+            cipher.encrypt_block(GenericArray::from_mut_slice(block));
+        }
+        Ok(blocks)
+    })
+}
+
+/// Writes `data` to `path` beside it first and renames it there, so that the file is never
+/// half written.
+fn write_whole(path: &Path, data: &[u8]) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    }
+    let partial = path.with_extension("partial");
+    fs::write(&partial, data).map_err(|error| format!("{}: {error}", partial.display()))?;
+    fs::rename(&partial, path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Where ffmpeg 4.4 is, which Engine encodes its stems with, and whose AAC encoder writes the
+/// same channel layout (CPE and SCE in front, a CPE at the side, CPE and SCE at the back):
+/// `$OPEN_ENGINE_LIB_FFMPEG4`, else the one the build was told of, else `ffmpeg` on the
+/// `PATH` (whose layout may differ).
+fn ffmpeg4() -> PathBuf {
+    std::env::var_os("OPEN_ENGINE_LIB_FFMPEG4")
+        .map(PathBuf::from)
+        .or_else(|| option_env!("OPEN_ENGINE_LIB_FFMPEG4").map(PathBuf::from))
+        .unwrap_or_else(ffmpeg)
+}
+
+/// Writes four stereo stems (`[stem][channel]`, 44.1 kHz, in Engine's order: vocals, bass,
+/// drums, melody) to `out` as Engine writes a stems file: 8-channel AAC-LC at 640 kbit/s
+/// (ffmpeg's octagonal layout, which is how the pairs are laid out), every sample
+/// encrypted with `key`.
+pub fn write_stems(stems: &[[Vec<f32>; 2]; STEMS], key: &Key, out: &Path) -> Result<(), String> {
+    use std::io::Write;
+
+    let frames = stems[0][0].len();
+    let dir = out.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let plain = out.with_extension("plain.m4a");
+    let mut process = Command::new(ffmpeg4())
+        .args(["-nostdin", "-v", "error", "-y", "-f", "f32le", "-ar"])
+        .arg(SAMPLE_RATE.to_string())
+        .args(["-ac", "8", "-channel_layout", "octagonal", "-i", "pipe:0"])
+        .args(["-c:a", "aac", "-b:a", "640k"])
+        .arg(&plain)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => {
+                "ffmpeg is needed to write stems, and it was not found".to_owned()
+            }
+            _ => format!("could not start ffmpeg: {error}"),
+        })?;
+    let mut input = process.stdin.take().expect("stdin is piped");
+    // (Fed from a thread, so that ffmpeg's messages can't fill up and hold it.)
+    let feeding = {
+        let mut bytes = Vec::with_capacity(frames * CHANNELS * 4);
+        for frame in 0..frames {
+            for stem in stems {
+                for channel in stem {
+                    bytes.extend_from_slice(&channel[frame].to_le_bytes());
+                }
+            }
+        }
+        thread::spawn(move || input.write_all(&bytes))
+    };
+    let output = process
+        .wait_with_output()
+        .map_err(|error| format!("ffmpeg: {error}"))?;
+    let fed = feeding.join().expect("the feeding thread does not panic");
+    if !output.status.success() || fed.is_err() {
+        let _ = fs::remove_file(&plain);
+        return Err(format!(
+            "ffmpeg could not encode the stems: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let data = fs::read(&plain).map_err(|error| format!("{}: {error}", plain.display()));
+    let _ = fs::remove_file(&plain);
+    write_whole(out, &encrypt(&data?, key)?)
+}
+
 /// Decrypts the stems file at `stems` into `out` (see [`decrypt`]). Written beside it and
 /// renamed, so that a decoder still reading the old file keeps reading that one.
 pub fn decrypt_file(stems: &Path, key: &Key, out: &Path) -> Result<(), String> {
     let data = fs::read(stems).map_err(|error| format!("{}: {error}", stems.display()))?;
-    let plain = decrypt(&data, key)?;
-    if let Some(dir) = out.parent() {
-        fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-    }
-    let partial = out.with_extension("partial");
-    fs::write(&partial, plain).map_err(|error| format!("{}: {error}", partial.display()))?;
-    fs::rename(&partial, out).map_err(|error| format!("{}: {error}", out.display()))
+    write_whole(out, &decrypt(&data, key)?)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -505,8 +605,6 @@ impl Source for StemsSource {
 
 #[cfg(test)]
 mod tests {
-    use aes::cipher::BlockEncrypt;
-
     use super::*;
 
     /// Not Engine's key: a made-up one, to encrypt made-up files with.
@@ -527,7 +625,7 @@ mod tests {
         mp4_box(kind, &body)
     }
 
-    fn encrypt(sample: &[u8]) -> Vec<u8> {
+    fn encrypt_sample(sample: &[u8]) -> Vec<u8> {
         let cipher = Aes128::new(GenericArray::from_slice(&TEST_KEY));
         let padding = 16 - sample.len() % 16;
         let mut blocks = sample.to_vec();
@@ -595,7 +693,7 @@ mod tests {
     fn decrypting_gives_back_the_samples_and_a_table_that_finds_them() {
         // One sample that fills whole blocks, so that it gets a whole block of padding.
         let samples: [&[u8]; 3] = [b"first sample", &[7; 32], b"x"];
-        let file = stems_file(&samples, encrypt);
+        let file = stems_file(&samples, encrypt_sample);
         assert_ne!(sample_bytes(&file)[0], samples[0]);
 
         let plain = decrypt(&file, &TEST_KEY).unwrap();
@@ -606,8 +704,57 @@ mod tests {
     }
 
     #[test]
+    fn encrypting_does_what_engine_does_and_decrypting_undoes_it() {
+        let samples: [&[u8]; 3] = [b"first sample", &[7; 32], b"x"];
+        let plain = stems_file(&samples, <[u8]>::to_vec);
+        let encrypted = encrypt(&plain, &TEST_KEY).unwrap();
+        assert_eq!(encrypted, stems_file(&samples, encrypt_sample));
+        assert_eq!(decrypt(&encrypted, &TEST_KEY).unwrap(), plain);
+    }
+
+    #[test]
+    fn written_stems_play_back_each_in_its_own_pair() {
+        if eight_channel_file("probe.m4a").is_none() {
+            return;
+        }
+        // Two seconds, each stem a tone of its own loudness.
+        let frames = 2 * SAMPLE_RATE as usize;
+        let stems: [[Vec<f32>; 2]; STEMS] = std::array::from_fn(|stem| {
+            let tone: Vec<f32> = (0..frames)
+                .map(|n| {
+                    (stem as f32 + 1.0)
+                        * 0.05
+                        * (n as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 44_100.0).sin()
+                })
+                .collect();
+            [tone.clone(), tone]
+        });
+        let dir = std::env::temp_dir().join(format!("open-engine-stems-{}", std::process::id()));
+        let file = dir.join("written.stems");
+        write_stems(&stems, &TEST_KEY, &file).unwrap();
+        let plain = dir.join("written.m4a");
+        decrypt_file(&file, &TEST_KEY, &plain).unwrap();
+
+        for stem in 0..STEMS {
+            let gains = Gains::default();
+            let mut alone = [0.0; STEMS];
+            alone[stem] = 1.0;
+            gains.set(alone);
+            let mut source = StemsSource::open(&plain, Duration::ZERO, gains).unwrap();
+            left_loudness(&mut source, 4410);
+            let loudness = left_loudness(&mut source, 4410);
+            let expected = (stem as f32 + 1.0) * 0.05 / 2f32.sqrt();
+            assert!(
+                (loudness - expected).abs() < 0.01,
+                "stem {stem}: {loudness} not {expected}"
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_key_that_does_not_fit_is_found_out() {
-        let file = stems_file(&[b"first sample", b"second", b"third"], encrypt);
+        let file = stems_file(&[b"first sample", b"second", b"third"], encrypt_sample);
         let error = decrypt(&file, b"some other key!!").unwrap_err();
         assert!(error.contains("does not fit"), "{error}");
     }

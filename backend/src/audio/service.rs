@@ -19,6 +19,7 @@ use crate::engine::{Command, Engine, ErrorKind, QueueItem, State};
 use crate::midi;
 use crate::overview;
 use crate::player::Start;
+use crate::separate;
 use crate::stems::{Key, STEMS};
 use crate::waveform::{self, AnalyzeError, Gains, Peaks, Split};
 
@@ -299,6 +300,73 @@ impl AudioService for Service {
                 let _ = events.blocking_send(last);
             })
             .map_err(|error| Status::internal(format!("could not start the analysis: {error}")))?;
+        Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+
+    type SeparateStemsStream = ReceiverStream<Result<api::AudioSeparateStemsEvent, Status>>;
+
+    async fn separate_stems(
+        &self,
+        request: Request<api::AudioSeparateStemsRequest>,
+    ) -> Result<Response<Self::SeparateStemsStream>, Status> {
+        let request = request.into_inner();
+        if !stems_key::fits(&request.key) {
+            return Err(Status::invalid_argument(
+                "the key is not the one Engine encrypts its stems with",
+            ));
+        }
+        let key: Key = request
+            .key
+            .as_slice()
+            .try_into()
+            .expect("a key that fits has 16 bytes");
+        let path = resolve(&request.path, &request.fallback_path);
+        let out = PathBuf::from(request.stems_path);
+        let (events, receiver) = mpsc::channel(ANALYSIS_EVENTS_BUFFERED);
+        // Minutes of work: a thread of its own, which stops when the call is dropped (the
+        // progress then finds nobody listening).
+        std::thread::Builder::new()
+            .name("stems".into())
+            .spawn(move || {
+                let progress = |stage: separate::Stage, fraction: f32| {
+                    let stage = match stage {
+                        separate::Stage::Decoding => api::AudioStemsStage::Decoding,
+                        separate::Stage::Separating => api::AudioStemsStage::Separating,
+                        separate::Stage::Writing => api::AudioStemsStage::Writing,
+                    };
+                    let _ = events.try_send(Ok(api::AudioSeparateStemsEvent {
+                        event: Some(api::audio_separate_stems_event::Event::Progress(
+                            api::AudioStemsProgress {
+                                stage: stage.into(),
+                                fraction,
+                            },
+                        )),
+                    }));
+                    !events.is_closed()
+                };
+                let last =
+                    match separate::generate(&path, &analysis::model_dirs(), &key, &out, &progress)
+                    {
+                        Ok(()) => Ok(api::AudioSeparateStemsEvent {
+                            event: Some(api::audio_separate_stems_event::Event::Done(
+                                api::AudioStemsDone {},
+                            )),
+                        }),
+                        Err(separate::SeparateError::NotFound(path)) => Err(Status::not_found(
+                            format!("{} does not exist", path.display()),
+                        )),
+                        Err(separate::SeparateError::Missing(message)) => {
+                            Err(Status::failed_precondition(message))
+                        }
+                        Err(separate::SeparateError::Failed(message)) => {
+                            Err(Status::internal(message))
+                        }
+                    };
+                let _ = events.blocking_send(last);
+            })
+            .map_err(|error| {
+                Status::internal(format!("could not start the separation: {error}"))
+            })?;
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
 

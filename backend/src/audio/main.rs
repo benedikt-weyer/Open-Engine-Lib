@@ -17,6 +17,7 @@ mod midi;
 mod overview;
 mod player;
 mod scratch;
+mod separate;
 mod service;
 mod stems;
 mod waveform;

@@ -137,6 +137,8 @@ struct SavedCounts {
     loops: HashMap<u32, u32>,
     /// The tracks analysed since the library was fetched.
     analysed: HashMap<u32, Analysed>,
+    /// The tracks whose stems were made since the library was fetched.
+    stems: std::collections::HashSet<u32>,
 }
 
 /// What a track has after Open Engine Lib analysed it, in place of what the library said when
@@ -239,6 +241,18 @@ impl Browser {
     }
 
     /// Which analysis results (the `ANALYSIS_*` bits) the track has, as it is now.
+    /// Whether the track has stems: it had them when the library was fetched, or they were
+    /// made since.
+    pub fn has_stems(&self, track: &Track) -> bool {
+        track.has_stems || self.counts.stems.contains(&track.id)
+    }
+
+    /// The stems of the track with the id `id` were made.
+    pub fn set_has_stems(&mut self, id: u32) {
+        self.counts.stems.insert(id);
+        self.resort();
+    }
+
     pub fn analysis(&self, track: &Track) -> u32 {
         self.counts
             .analysed
@@ -410,7 +424,7 @@ impl Browser {
                     Lighting::None => 0,
                 }),
                 Column::Stems if track.streaming => None,
-                Column::Stems => number(u64::from(track.has_stems)),
+                Column::Stems => number(u64::from(self.has_stems(track))),
                 Column::Origin => self.origin(track).and_then(text_value),
             },
         }
@@ -1225,6 +1239,7 @@ pub fn tracks<'a>(
                     cues: browser.cue_count(track.id),
                     loops: browser.loop_count(track.id),
                     analysis: browser.analysis(track),
+                    has_stems: browser.has_stems(track),
                     analysis_origin: browser.analysis_origin(track),
                     analysis_note: browser.analysis_note(track),
                     bpm: browser.bpm(track),
@@ -1415,12 +1430,12 @@ fn lighting_cell<'a>(track: &'a Track, language: Language) -> Element<'a, Messag
 
 /// Whether the library has stems rendered for the track: a filled dot, or a dash. Pointing
 /// at it says so in words. (Streaming tracks have no file to have stems for.)
-fn stems_cell<'a>(track: &'a Track, language: Language) -> Element<'a, Message> {
+fn stems_cell<'a>(track: &'a Track, has_stems: bool, language: Language) -> Element<'a, Message> {
     if track.streaming {
         return Space::new().into();
     }
     let strings = language.strings();
-    let (mark, style, tip) = if track.has_stems {
+    let (mark, style, tip) = if has_stems {
         (
             "●",
             text::success as fn(&Theme) -> text::Style,
@@ -1563,6 +1578,8 @@ struct RowState<'a> {
     loops: u32,
     /// Which analysis results the track has (the `ANALYSIS_*` bits).
     analysis: u32,
+    /// The track has stems.
+    has_stems: bool,
     /// Who made them, and what is known about an analysis of Open Engine Lib's.
     analysis_origin: AnalysisOrigin,
     analysis_note: Option<&'a str>,
@@ -1591,6 +1608,7 @@ fn track_row<'a>(
         cues,
         loops,
         analysis,
+        has_stems,
         analysis_origin,
         analysis_note,
         bpm,
@@ -1646,7 +1664,7 @@ fn track_row<'a>(
             analysis_cell(analysis, language),
             analysis_origin_cell(analysis_origin, analysis_note, language),
             lighting_cell(track, language),
-            stems_cell(track, language),
+            stems_cell(track, has_stems, language),
             origin_cell(origin, origin_reachable, language),
         ],
         location,
