@@ -9,30 +9,33 @@ saving_library: "Die Bibliothek wird nach {path} gespeichert…"
 save_library_failed: "Die Bibliothek konnte nicht gespeichert werden: {error}"
 reloading_library: "Die Bibliothek wird vom Datenträger neu geladen…"
 reload_done: "Vom Datenträger neu geladen."
-reload_done_kept: "Vom Datenträger neu geladen. Nicht abgeglichene Änderungen liegen in {path}"
+reload_done_kept: "Vom Datenträger neu geladen. Nicht gespeicherte Änderungen liegen in {path}"
 reload_failed: "Die Bibliothek konnte nicht neu geladen werden: {error}"
-sync_button: "Mit dem Original abgleichen…"
-sync_title: "Mit dem Original abgleichen"
+sync_save_button: "Änderungen speichern…"
+sync_discard_button: "Änderungen verwerfen…"
+sync_title: "Änderungen speichern"
+sync_discard_title: "Änderungen verwerfen"
 sync_source: "Original: {path}"
 sync_working_copy: "Arbeitskopie: {path}"
 sync_comparing: "Arbeitskopie und Original werden verglichen…"
 sync_unavailable: "Das Original ist nicht erreichbar. Ist das Laufwerk angeschlossen?"
 sync_busy: "Ein anderes Programm schreibt gerade in das Original. Versuche es gleich noch einmal."
-sync_outside_warning: "Das Original wurde nach dem Anlegen der Arbeitskopie außerhalb dieser App geändert. Der Abgleich würde diese Änderungen rückgängig machen (die Unterschiede unten enthalten sie)."
+sync_outside_warning: "Das Original wurde nach dem Anlegen der Arbeitskopie außerhalb dieser App geändert. Das Speichern würde diese Änderungen rückgängig machen (die Unterschiede unten enthalten sie)."
 sync_outside_confirm: "Außerhalb dieser App gemachte Änderungen überschreiben"
-sync_no_differences: "Arbeitskopie und Original sind gleich. Es gibt nichts abzugleichen."
-sync_direction_hint: "Der Abgleich schreibt die Arbeitskopie ins Original: „hinzugefügt“ wird dort hinzugefügt, „entfernt“ wird dort entfernt. Die ersetzten Datenbanken bleiben in einem Sicherungsordner im Original erhalten."
+sync_no_differences: "Arbeitskopie und Original sind gleich. Es gibt nichts zu speichern oder zu verwerfen."
+sync_direction_hint: "Das Speichern schreibt die Arbeitskopie ins Original: „hinzugefügt“ wird dort hinzugefügt, „entfernt“ wird dort entfernt. Die ersetzten Datenbanken bleiben in einem Sicherungsordner auf diesem Computer erhalten."
 sync_tracks_summary: "Titel: {added} hinzugefügt, {removed} entfernt, {changed} geändert"
 sync_playlists_summary: "Playlists: {count} geändert"
 sync_databases_summary: "Unterschiedliche Datenbankdateien: {names}"
 sync_more: "… und {count} weitere"
-sync_run: "Abgleichen"
+sync_run: "Änderungen speichern"
 sync_refresh: "Erneut vergleichen"
 sync_close: "Schließen"
 sync_writing: "Die Arbeitskopie wird ins Original geschrieben…"
-sync_done: "{count} Datenbankdatei(en) ins Original übertragen. Die ersetzten liegen in {backup}."
+sync_done: "{count} Datenbankdatei(en) im Original gespeichert. Die ersetzten liegen in {backup}."
 sync_nothing_written: "Es musste nichts geschrieben werden."
-sync_failed: "Der Abgleich ist fehlgeschlagen: {error}"
+sync_failed: "Das Speichern ist fehlgeschlagen: {error}"
+sync_discard_failed: "Das Verwerfen ist fehlgeschlagen: {error}"
 sync_load_failed: "Der Vergleich mit dem Original ist fehlgeschlagen: {error}"
 sync_playlist_added: "hinzugefügt"
 sync_playlist_removed: "entfernt"
@@ -196,7 +199,7 @@ cue_editor_remove: "Entfernen"
 cue_editor_add: "An der Position hinzufügen"
 cue_editor_empty: "Leer"
 cue_editor_save: "Speichern"
-cue_editor_note: "Cues werden in der Arbeitskopie geändert. Mit dem Abgleich werden sie in die Bibliothek selbst geschrieben."
+cue_editor_note: "Cues werden in der Arbeitskopie geändert. Mit „Änderungen speichern“ werden sie in die Bibliothek selbst geschrieben."
 cue_bad_position: "Cue {number}: „{text}“ ist keine Position. Gib Minuten und Sekunden an, etwa 1:23,5."
 cue_failed: "Die Cues konnten nicht geändert werden: {error}"
 col_loops: "Loops"
@@ -211,7 +214,7 @@ loop_editor_start_to_playhead: "Anfang an die Position setzen"
 loop_editor_end_to_playhead: "Ende an die Position setzen"
 loop_editor_go: "Zum Anfang springen"
 loop_editor_add: "An der Position hinzufügen"
-loop_editor_note: "Loops werden in der Arbeitskopie geändert. Mit dem Abgleich werden sie in die Bibliothek selbst geschrieben."
+loop_editor_note: "Loops werden in der Arbeitskopie geändert. Mit „Änderungen speichern“ werden sie in die Bibliothek selbst geschrieben."
 loop_bad_position: "Loop {number}: „{text}“ ist keine Position. Gib Minuten und Sekunden an, etwa 1:23,5."
 loop_bad_range: "Loop {number} muss nach seinem Anfang enden."
 loop_failed: "Die Loops konnten nicht geändert werden: {error}"
@@ -267,7 +270,7 @@ playlist_rename_confirm: Umbenennen
 playlist_delete_confirm: Löschen
 playlist_delete_question: "„{name}“ löschen?"
 playlist_delete_inside: "Die Playlists darin werden mit gelöscht: {count}."
-playlist_delete_note: "Die Titel bleiben in der Bibliothek. Die Quelle wird erst beim Abgleich geändert, und dabei wird eine Sicherung angelegt."
+playlist_delete_note: "Die Titel bleiben in der Bibliothek. Die Quelle wird erst beim Speichern der Änderungen geändert, und dabei wird eine Sicherung angelegt."
 playlist_failed: "Die Playlists konnten nicht geändert werden: {error}"
 col_origin: Herkunft
 col_origin_info: "Die Herkunft ist der Dateipfad, den Open Engine Lib früher gespeichert hat, in seiner eigenen Datenbank (nicht in der Engine-Bibliothek). Sie ist nur ein Ersatz: Ein Titel wird von seinem Speicherort gespielt, von der Herkunft nur, wenn dort keine Datei liegt. „Orte als Herkunft speichern“ füllt sie; „Herkunftsordner ändern…“ verlegt alle Herkünfte in einen anderen Ordner. (Nicht dasselbe wie die Herkunftsdatenbank von Engine, die sagt, wo ein Titel zuerst angelegt wurde.)"
@@ -275,7 +278,7 @@ origin_migrate: Orte als Herkunft speichern
 streaming_remove: "{count} Streaming-Titel entfernen"
 streaming_remove_confirm: "Zum Entfernen von {count} Streaming-Titeln erneut klicken"
 streaming_remove_cancel: Abbrechen
-streaming_remove_tip: "Entfernt alle Streaming-Titel (TIDAL usw.) aus der Bibliothek und ihren Playlists; sie haben hier keine Datei. Die Änderung wird in der Arbeitskopie gemacht und die Wiedergabe gestoppt; „Mit dem Original abgleichen“ schreibt sie in die Bibliothek."
+streaming_remove_tip: "Entfernt alle Streaming-Titel (TIDAL usw.) aus der Bibliothek und ihren Playlists; sie haben hier keine Datei. Die Änderung wird in der Arbeitskopie gemacht und die Wiedergabe gestoppt; „Änderungen speichern“ schreibt sie in die Bibliothek."
 streaming_removed: "{tracks} Streaming-Titel und {entries} Playlist-Einträge entfernt."
 track_menu_playlist: Titel aus der Playlist löschen
 track_menu_library: Titel aus der Bibliothek löschen
@@ -293,7 +296,7 @@ origin_prefix_common: "Der Ordner, in dem alle {count} gespeicherten Herkünfte 
 origin_prefix_new: "Durch diesen Ordner ersetzen:"
 origin_prefix_placeholder: Neuer Ordner
 origin_prefix_browse: Durchsuchen…
-origin_prefix_note: "Jede Herkunft, die mit dem Ordner oben beginnt, bekommt stattdessen den neuen Ordner. Es wird nicht geprüft, ob die Dateien am neuen Ort liegen. Die Änderung wird in der Arbeitskopie gemacht; „Mit der Quelle abgleichen“ schreibt sie in die Bibliothek."
+origin_prefix_note: "Jede Herkunft, die mit dem Ordner oben beginnt, bekommt stattdessen den neuen Ordner. Es wird nicht geprüft, ob die Dateien am neuen Ort liegen. Die Änderung wird in der Arbeitskopie gemacht; „Änderungen speichern“ schreibt sie in die Bibliothek."
 origin_prefix_apply: Änderungen übernehmen
 origin_prefix_changed: "Herkünfte geändert: {changed}."
 origin_prefix_failed: "Die Herkünfte konnten nicht geändert werden: {error}"
@@ -354,22 +357,20 @@ progress_updating: Titel, Playlists und Herkünfte werden geändert…
 progress_writing: Datenbanken werden geschrieben…
 progress_bytes: "{done} von {total}"
 progress_files: "{done} von {total} Dateien"
-sync_direction_push: Die Arbeitskopie in die Quelle schreiben
-sync_direction_pull: Die Arbeitskopie durch die Quelle ersetzen (Rückabgleich)
-sync_pull_run: Arbeitskopie ersetzen
-sync_pull_hint: "Die Arbeitskopie wird so, wie die Quelle ist. Änderungen, die noch nicht abgeglichen waren, werden im Cache-Ordner aufbewahrt. In die Quelle wird nichts geschrieben."
-sync_pull_done: "Die Arbeitskopie entspricht jetzt der Quelle. Nicht abgeglichene Änderungen liegen in {path}"
-sync_pull_done_clean: Die Arbeitskopie entspricht jetzt der Quelle.
+sync_pull_run: "Änderungen verwerfen"
+sync_pull_hint: "Beim Verwerfen wird die Arbeitskopie durch das Original ersetzt: deine nicht gespeicherten Änderungen verschwinden aus der Liste (eine Kopie wird im Cache-Ordner aufbewahrt). In das Original wird nichts geschrieben."
+sync_pull_done: "Die Änderungen wurden verworfen: Die Arbeitskopie entspricht jetzt dem Original. Die nicht gespeicherten Änderungen liegen in {path}"
+sync_pull_done_clean: "Die Änderungen wurden verworfen: Die Arbeitskopie entspricht jetzt dem Original."
 libsync_direction_forward: Von der geöffneten Bibliothek in die andere kopieren
 libsync_direction_reverse: Aus der anderen Bibliothek in die geöffnete kopieren (Rückabgleich)
 libsync_from: "Abgleich von: {path}"
-libsync_hint_reverse: "Die Arbeitskopie der geöffneten Bibliothek bekommt die Playlists und Smart-Playlists der anderen und die unten angehakten Dinge. In die geöffnete Bibliothek selbst wird erst geschrieben, wenn du mit der Quelle abgleichst."
+libsync_hint_reverse: "Die Arbeitskopie der geöffneten Bibliothek bekommt die Playlists und Smart-Playlists der anderen und die unten angehakten Dinge. In die geöffnete Bibliothek selbst wird erst geschrieben, wenn du die Änderungen speicherst."
 libsync_remove_reverse: Auch Playlists und Streaming-Titel löschen, die nur die geöffnete Bibliothek hat
 libsync_stars_reverse: Die Sterne auf die der anderen Bibliothek setzen
 libsync_locations_reverse: Die Orte (Pfade) mit denen der anderen Bibliothek überschreiben
 libsync_copy_reverse: "Die Titel in einen Ordner Engine-Tracks (Interpret/Album) neben der geöffneten Bibliothek kopieren und fehlende hinzufügen"
 libsync_run_reverse: In die geöffnete Bibliothek kopieren
-libsync_done_reverse: "Fertig: {count} Playlists, {tracks} Titel und {origins} Herkünfte in der Arbeitskopie geändert, {files} Dateien kopiert. Mit „Mit der Quelle abgleichen“ schreibst du sie in die Bibliothek. Die Arbeitskopie davor liegt in {backup}"
+libsync_done_reverse: "Fertig: {count} Playlists, {tracks} Titel und {origins} Herkünfte in der Arbeitskopie geändert, {files} Dateien kopiert. Mit „Änderungen speichern“ schreibst du sie in die Bibliothek. Die Arbeitskopie davor liegt in {backup}"
 progress_pulling: Die Datenbanken der Quelle werden geholt…
 progress_scanning: Musik wird gesucht…
 progress_found: "{done} Dateien gefunden"

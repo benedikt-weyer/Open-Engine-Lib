@@ -9,30 +9,33 @@ saving_library: "Saving the library to {path}…"
 save_library_failed: "Could not save the library: {error}"
 reloading_library: "Reloading the library from disk…"
 reload_done: "Reloaded from disk."
-reload_done_kept: "Reloaded from disk. Edits that were not synced are kept in {path}"
+reload_done_kept: "Reloaded from disk. Edits that were not saved are kept in {path}"
 reload_failed: "Could not reload the library: {error}"
-sync_button: "Sync with the source…"
-sync_title: "Sync with the source"
+sync_save_button: "Save changes…"
+sync_discard_button: "Discard changes…"
+sync_title: "Save changes"
+sync_discard_title: "Discard changes"
 sync_source: "Source: {path}"
 sync_working_copy: "Working copy: {path}"
 sync_comparing: "Comparing the working copy with the source…"
 sync_unavailable: "The source can't be reached. Is its drive connected?"
 sync_busy: "Another program is writing to the source right now. Try again in a moment."
-sync_outside_warning: "The source was changed outside this app after the working copy was made. Syncing would undo those changes (the differences below include them)."
+sync_outside_warning: "The source was changed outside this app after the working copy was made. Saving would undo those changes (the differences below include them)."
 sync_outside_confirm: "Overwrite the changes made outside this app"
-sync_no_differences: "The working copy and the source are the same. There is nothing to sync."
-sync_direction_hint: "Syncing writes the working copy to the source: “added” is added there, “removed” is removed there. The databases it replaces are kept in a backup folder in the source."
+sync_no_differences: "The working copy and the source are the same. There is nothing to save or discard."
+sync_direction_hint: "Saving writes the working copy to the source: “added” is added there, “removed” is removed there. The databases it replaces are kept in a backup folder on this computer."
 sync_tracks_summary: "Tracks: {added} added, {removed} removed, {changed} changed"
 sync_playlists_summary: "Playlists: {count} changed"
 sync_databases_summary: "Database files that differ: {names}"
 sync_more: "… and {count} more"
-sync_run: "Sync"
+sync_run: "Save changes"
 sync_refresh: "Compare again"
 sync_close: "Close"
 sync_writing: "Writing the working copy to the source…"
-sync_done: "Synced {count} database file(s) to the source. The ones that were replaced are kept in {backup}."
+sync_done: "Saved {count} database file(s) to the source. The ones that were replaced are kept in {backup}."
 sync_nothing_written: "Nothing needed to be written."
-sync_failed: "Syncing failed: {error}"
+sync_failed: "Saving failed: {error}"
+sync_discard_failed: "Discarding failed: {error}"
 sync_load_failed: "Could not compare with the source: {error}"
 sync_playlist_added: "added"
 sync_playlist_removed: "removed"
@@ -196,7 +199,7 @@ cue_editor_remove: "Remove"
 cue_editor_add: "Add at playhead"
 cue_editor_empty: "Empty"
 cue_editor_save: "Save"
-cue_editor_note: "Cues are changed in the working copy. Sync to write them to the library itself."
+cue_editor_note: "Cues are changed in the working copy. Save changes to write them to the library itself."
 cue_bad_position: "Cue {number}: “{text}” is not a position. Use minutes and seconds, like 1:23.5."
 cue_failed: "Could not change the cues: {error}"
 col_loops: "Loops"
@@ -211,7 +214,7 @@ loop_editor_start_to_playhead: "Start at the playhead"
 loop_editor_end_to_playhead: "End at the playhead"
 loop_editor_go: "Go to the start"
 loop_editor_add: "Add at playhead"
-loop_editor_note: "Loops are changed in the working copy. Sync to write them to the library itself."
+loop_editor_note: "Loops are changed in the working copy. Save changes to write them to the library itself."
 loop_bad_position: "Loop {number}: “{text}” is not a position. Use minutes and seconds, like 1:23.5."
 loop_bad_range: "Loop {number} has to end after it starts."
 loop_failed: "Could not change the loops: {error}"
@@ -267,7 +270,7 @@ playlist_rename_confirm: Rename
 playlist_delete_confirm: Delete
 playlist_delete_question: "Delete “{name}”?"
 playlist_delete_inside: "The playlists inside it are deleted too: {count}."
-playlist_delete_note: "Its tracks stay in the library. The source is only changed when you sync, and syncing keeps a backup."
+playlist_delete_note: "Its tracks stay in the library. The source is only changed when you save changes, and saving keeps a backup."
 playlist_failed: "Could not change the playlists: {error}"
 col_origin: Origin
 col_origin_info: "The origin is the file path Open Engine Lib saved earlier, kept in its own database (not in the Engine library). It is only a fallback: a track plays from its location, and from its origin only if no file is there. “Save locations as origins” fills it; “Change origin folder…” moves all origins to another folder. (Not the same as Engine's origin database, which says where a track was first created.)"
@@ -275,7 +278,7 @@ origin_migrate: Save locations as origins
 streaming_remove: "Remove {count} streaming songs"
 streaming_remove_confirm: "Click again to remove {count} streaming songs"
 streaming_remove_cancel: Cancel
-streaming_remove_tip: "Removes every streaming song (TIDAL and so on) from the library and from its playlists; they have no file here. The change is made in the working copy and playback is stopped; “Sync with the source” writes it to the library."
+streaming_remove_tip: "Removes every streaming song (TIDAL and so on) from the library and from its playlists; they have no file here. The change is made in the working copy and playback is stopped; “Save changes” writes it to the library."
 streaming_removed: "Removed {tracks} streaming songs and {entries} playlist entries."
 track_menu_playlist: Delete track from playlist
 track_menu_library: Delete track from library
@@ -293,7 +296,7 @@ origin_prefix_common: "The folder all {count} saved origins are in:"
 origin_prefix_new: "Replace it with this folder:"
 origin_prefix_placeholder: New folder
 origin_prefix_browse: Browse…
-origin_prefix_note: "Every origin that starts with the folder above gets the new folder in its place. It is not checked whether the files are at the new place. The change is made in the working copy; “Sync with the source” writes it to the library."
+origin_prefix_note: "Every origin that starts with the folder above gets the new folder in its place. It is not checked whether the files are at the new place. The change is made in the working copy; “Save changes” writes it to the library."
 origin_prefix_apply: Apply changes
 origin_prefix_changed: "Origins changed: {changed}."
 origin_prefix_failed: "Could not change the origins: {error}"
@@ -354,22 +357,20 @@ progress_updating: Changing the tracks, playlists and origins…
 progress_writing: Writing the databases…
 progress_bytes: "{done} of {total}"
 progress_files: "{done} of {total} files"
-sync_direction_push: Write the working copy to the source
-sync_direction_pull: Replace the working copy with the source (back-sync)
-sync_pull_run: Replace the working copy
-sync_pull_hint: "The working copy becomes what the source is. Edits that were not synced yet are kept aside in the cache folder. Nothing is written to the source."
-sync_pull_done: "The working copy now matches the source. Edits that were not synced are kept in {path}"
-sync_pull_done_clean: The working copy now matches the source.
+sync_pull_run: "Discard changes"
+sync_pull_hint: "Discarding replaces the working copy with the source: your edits that were not saved are lost from the list (a copy is kept aside in the cache folder). Nothing is written to the source."
+sync_pull_done: "The changes were discarded: the working copy now matches the source. The unsaved edits are kept in {path}"
+sync_pull_done_clean: "The changes were discarded: the working copy now matches the source."
 libsync_direction_forward: Copy from the open library to the other one
 libsync_direction_reverse: Copy from the other library into the open one (back-sync)
 libsync_from: "Syncing from: {path}"
-libsync_hint_reverse: "The working copy of the open library gets the playlists and smart playlists of the other one, and the ticked things below. Nothing is written to the open library itself until you sync with the source."
+libsync_hint_reverse: "The working copy of the open library gets the playlists and smart playlists of the other one, and the ticked things below. Nothing is written to the open library itself until you save changes."
 libsync_remove_reverse: Also delete playlists and streaming songs that only the open library has
 libsync_stars_reverse: Set the stars to those of the other library
 libsync_locations_reverse: Overwrite the locations (paths) with those of the other library
 libsync_copy_reverse: "Copy the tracks into an Engine-Tracks folder (Artist/Album) beside the open library, and add the ones it lacks"
 libsync_run_reverse: Copy into the open library
-libsync_done_reverse: "Done: {count} playlists, {tracks} tracks and {origins} origins changed in the working copy, {files} files copied. Use “Sync with the source” to write them to the library. The working copy before is kept in {backup}"
+libsync_done_reverse: "Done: {count} playlists, {tracks} tracks and {origins} origins changed in the working copy, {files} files copied. Use “Save changes” to write them to the library. The working copy before is kept in {backup}"
 progress_pulling: Getting the databases of the source…
 progress_scanning: Looking for music…
 progress_found: "{done} files found"

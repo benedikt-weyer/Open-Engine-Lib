@@ -190,7 +190,8 @@ struct State {
     delay_draft: Option<i32>,
     /// The window comparing the working copy with the source, while it is open.
     sync: Option<SyncStage>,
-    /// The sync window is about replacing the working copy by the source (the reverse).
+    /// The sync window is about discarding the changes, replacing the working copy by the
+    /// source (the reverse of saving them).
     sync_reverse: bool,
     /// How far the sync that is writing has got, as the backend last said.
     progress: Option<open_engine_api::v1::OperationProgress>,
@@ -292,14 +293,17 @@ pub enum Message {
     /// A column was ticked (shown) or unticked (hidden) in that menu.
     ColumnShown(Column, bool),
 
-    /// The Sync button: open the window and compare (also "Compare again").
+    /// The "Save changes" button: open the window that writes the working copy to the source.
+    SyncSave,
+    /// The "Discard changes" button: open the window that replaces the working copy by the
+    /// source.
+    SyncDiscard,
+    /// Compare again, in the direction the open window has (also what the two buttons end in).
     SyncOpen,
     SyncDiffLoaded(Result<Arc<open_engine_api::v1::GetSyncDiffResponse>, String>),
     /// The tick that allows overwriting changes made outside this app.
     SyncAcknowledged(bool),
     SyncStart,
-    /// Which way the sync window works: `true` replaces the working copy by the source.
-    SyncDirection(bool),
     /// The working copy was replaced by the source.
     SyncPulled(Result<open_engine_api::v1::PullFromSourceResponse, String>),
     /// The library was read again, because its working copy was replaced or changed.
@@ -1461,7 +1465,9 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
     if state.is_folder()
         && matches!(
             message,
-            Message::SyncOpen
+            Message::SyncSave
+                | Message::SyncDiscard
+                | Message::SyncOpen
                 | Message::LibrarySyncOpen
                 | Message::PlaylistNew
                 | Message::PlaylistRename(_)
@@ -1504,10 +1510,11 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::SyncAcknowledged(..)
         | Message::SyncClose
         | Message::SyncDiffLoaded(..)
-        | Message::SyncDirection(..)
+        | Message::SyncDiscard
         | Message::SyncFinished(..)
         | Message::SyncOpen
         | Message::SyncPulled(..)
+        | Message::SyncSave
         | Message::SyncStart => handlers::sync::handle(state, message),
         Message::ControllerClear(..)
         | Message::ControllerEnabledToggled(..)
@@ -4165,17 +4172,14 @@ mod tests {
             changed_databases: vec!["m.db".into()],
             ..Default::default()
         });
-        state.sync = Some(SyncStage::Ready {
-            diff: Arc::clone(&diff),
-            acknowledged: false,
-            error: None,
-        });
 
-        // The direction is chosen in the window; opening it again starts the usual way.
-        let _ = handle(&mut state, Message::SyncDirection(true));
+        // The two buttons choose the direction (without a backend the window stays closed,
+        // but the direction is set), and "compare again" keeps it.
+        let _ = handle(&mut state, Message::SyncDiscard);
         assert!(state.sync_reverse);
-        state.sync = None;
         let _ = handle(&mut state, Message::SyncOpen);
+        assert!(state.sync_reverse);
+        let _ = handle(&mut state, Message::SyncSave);
         assert!(!state.sync_reverse);
         assert!(sync_view::can_pull(&diff));
         assert!(!sync_view::can_pull(

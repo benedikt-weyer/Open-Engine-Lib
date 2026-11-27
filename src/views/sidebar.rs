@@ -139,10 +139,15 @@ pub fn view<'a>(
                 .width(Fill)
                 .style(button::secondary)
                 .on_press_maybe(can_sync.then_some(Message::SmartNew)),
-            // Compare the working copy with the library it was made from, and write it there.
-            button(text(&strings.sync_button))
+            // Compare the working copy with the library it was made from, and write it there
+            // (save) or replace it by the library (discard).
+            button(text(&strings.sync_save_button))
                 .width(Fill)
-                .on_press_maybe(can_sync.then_some(Message::SyncOpen)),
+                .on_press_maybe(can_sync.then_some(Message::SyncSave)),
+            button(text(&strings.sync_discard_button))
+                .width(Fill)
+                .style(button::secondary)
+                .on_press_maybe(can_sync.then_some(Message::SyncDiscard)),
             button(text(&strings.libsync_button))
                 .width(Fill)
                 .on_press_maybe(can_sync.then_some(Message::LibrarySyncOpen)),

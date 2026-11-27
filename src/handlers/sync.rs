@@ -1,9 +1,17 @@
-//! The window that syncs the working copy with the library on the drive.
+//! The window that saves the working copy to the library on the drive, or discards it by
+//! replacing it with the library.
 
 use crate::*;
 
 pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
     match message {
+        // The two buttons choose the direction; "compare again" (`SyncOpen`) keeps it.
+        Message::SyncSave | Message::SyncDiscard => {
+            if state.sync.is_none() {
+                state.sync_reverse = matches!(message, Message::SyncDiscard);
+            }
+            return handle(state, Message::SyncOpen);
+        }
         Message::SyncOpen => {
             let busy = state.locked()
                 || matches!(state.sync, Some(SyncStage::Syncing { .. }))
@@ -13,10 +21,6 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 || state.origin_prefix.is_some()
                 || state.cue_editor.is_some()
                 || state.loop_editor.is_some();
-            // (The button starts in the usual direction; "compare again" keeps it.)
-            if !busy && state.sync.is_none() {
-                state.sync_reverse = false;
-            }
             if !busy
                 && matches!(state.library, LibraryState::Open(_))
                 && let Some(backend) = state.backend()
@@ -44,15 +48,6 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::SyncAcknowledged(ticked) => {
             if let Some(SyncStage::Ready { acknowledged, .. }) = &mut state.sync {
                 *acknowledged = ticked;
-            }
-        }
-        Message::SyncDirection(reverse) => {
-            if matches!(
-                state.sync,
-                Some(SyncStage::Ready { .. } | SyncStage::Failed(_))
-            ) {
-                state.sync_reverse = reverse;
-                return handle(state, Message::SyncOpen);
             }
         }
         Message::SyncStart => {

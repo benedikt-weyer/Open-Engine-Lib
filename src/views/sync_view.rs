@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use iced::widget::{
-    Space, button, center, checkbox, column, container, opaque, radio, row, scrollable, text,
+    Space, button, center, checkbox, column, container, opaque, row, scrollable, text,
 };
 use iced::{Color, Element, Fill, Theme};
 use open_engine_api::v1::{
@@ -131,7 +131,12 @@ pub fn modal<'a>(
         }
     };
 
-    let dialog = container(column![text(&strings.sync_title).size(24), body].spacing(14))
+    let title = if reverse {
+        &strings.sync_discard_title
+    } else {
+        &strings.sync_title
+    };
+    let dialog = container(column![text(title).size(24), body].spacing(14))
         .padding(20)
         .width(WIDTH)
         .style(container::rounded_box);
@@ -162,18 +167,6 @@ fn ready<'a>(
     let secondary = |content: String| text(content).size(13).style(text::secondary);
 
     let mut content = column![
-        radio(
-            &strings.sync_direction_push,
-            false,
-            Some(reverse),
-            Message::SyncDirection
-        ),
-        radio(
-            &strings.sync_direction_pull,
-            true,
-            Some(reverse),
-            Message::SyncDirection
-        ),
         secondary(fill(&strings.sync_source, &[("path", &diff.source_path)])),
         secondary(fill(
             &strings.sync_working_copy,
@@ -212,7 +205,14 @@ fn ready<'a>(
     }
     if let Some(error) = error {
         content = content.push(error_text::view(
-            fill(&strings.sync_failed, &[("error", &error)]),
+            fill(
+                if reverse {
+                    &strings.sync_discard_failed
+                } else {
+                    &strings.sync_failed
+                },
+                &[("error", &error)],
+            ),
             language,
         ));
     }
