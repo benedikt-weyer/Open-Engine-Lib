@@ -9,6 +9,7 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::SyncSave | Message::SyncDiscard => {
             if state.sync.is_none() {
                 state.sync_reverse = matches!(message, Message::SyncDiscard);
+                state.stop_jobs_tick = false;
             }
             return handle(state, Message::SyncOpen);
         }
@@ -66,11 +67,18 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             {
                 // Overwriting what was changed outside is allowed only if it was ticked.
                 let overwrite = diff.source_changed_outside;
+                let stop = reverse && state.stop_jobs_tick;
                 state.progress = None;
                 state.sync = Some(SyncStage::Syncing {
                     diff: Arc::clone(diff),
                     acknowledged: *acknowledged,
                 });
+                // (Asked in the last step: the jobs of the library go, or they go on and find
+                // their tracks in the new working copy.)
+                if stop && let LibraryState::Open(browser) = &state.library {
+                    let library = browser.library.path.clone();
+                    state.stop_jobs(&library);
+                }
                 return if reverse {
                     Task::perform(backend::pull_from_source(backend), Message::SyncPulled)
                 } else {

@@ -49,6 +49,10 @@ struct Shared {
     cache_root: PathBuf,
     /// How far the sync that is running has got.
     progress: Progress,
+    /// How far the analysis or stem generation that is running has got. One of these jobs
+    /// runs alongside an operation (`progress`): it only takes that for the moment it writes
+    /// its result.
+    jobs: Progress,
     /// The DJ controller, and the task that listens to it while it is turned on.
     controller: Controller,
     listener: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -66,6 +70,7 @@ impl Service {
             audio,
             cache_root,
             progress: Progress::default(),
+            jobs: Progress::default(),
             controller,
             listener: Mutex::new(None),
         }))
@@ -145,6 +150,38 @@ impl Service {
         self.requested()
             .map(|(_, library)| library)
             .ok_or_else(|| Status::failed_precondition("no library is open"))
+    }
+
+    /// Waits until no operation (a sync, a reload, an import...) is running and holds them
+    /// back until the guard is dropped: for the moment a job writes its result.
+    async fn wait_for_operations(&self) -> crate::progress::Running {
+        loop {
+            if let Some(running) = self.0.progress.try_begin() {
+                return running;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// The library with the id `id` as it is now, and the track `reference` (its origin, else
+    /// its path) in it: where a job's result goes, after the working copy may have been
+    /// replaced or the track deleted while the job ran.
+    fn find_again(
+        &self,
+        id: u64,
+        reference: &(Option<(String, i64)>, PathBuf),
+        title: &str,
+    ) -> Result<(Arc<Library>, usize), Status> {
+        let gone = || {
+            Status::not_found(format!(
+                "{title} is no longer in the library, so the result was dropped"
+            ))
+        };
+        let library = self.by_id(id).ok_or_else(gone)?;
+        let index = library
+            .find(reference.0.as_ref(), &reference.1)
+            .ok_or_else(gone)?;
+        Ok((library, index))
     }
 
     /// The library the player plays from (what the DJ controller acts on), else the one a
@@ -808,32 +845,14 @@ impl LibraryService for Service {
         &self,
         _: Request<api::GetProgressRequest>,
     ) -> Result<Response<api::OperationProgress>, Status> {
-        let snapshot = self.0.progress.snapshot();
-        Ok(Response::new(api::OperationProgress {
-            running: snapshot.running,
-            phase: match snapshot.phase {
-                Phase::Idle => api::ProgressPhase::Unspecified,
-                Phase::Preparing => api::ProgressPhase::Preparing,
-                Phase::CopyingTracks => api::ProgressPhase::CopyingTracks,
-                Phase::Updating => api::ProgressPhase::Updating,
-                Phase::Writing => api::ProgressPhase::Writing,
-                Phase::Pulling => api::ProgressPhase::Pulling,
-                Phase::Scanning => api::ProgressPhase::Scanning,
-                Phase::ReadingTags => api::ProgressPhase::ReadingTags,
-                Phase::AnalysingDecoding => api::ProgressPhase::AnalysingDecoding,
-                Phase::AnalysingBeats => api::ProgressPhase::AnalysingBeats,
-                Phase::AnalysingKey => api::ProgressPhase::AnalysingKey,
-                Phase::StemsDecoding => api::ProgressPhase::StemsDecoding,
-                Phase::StemsSeparating => api::ProgressPhase::StemsSeparating,
-                Phase::StemsWriting => api::ProgressPhase::StemsWriting,
-            }
-            .into(),
-            done_bytes: snapshot.done_bytes,
-            total_bytes: snapshot.total_bytes,
-            done_files: snapshot.done_files,
-            total_files: snapshot.total_files,
-            current: snapshot.current,
-        }))
+        Ok(Response::new(progress_message(self.0.progress.snapshot())))
+    }
+
+    async fn get_job_progress(
+        &self,
+        _: Request<api::GetProgressRequest>,
+    ) -> Result<Response<api::OperationProgress>, Status> {
+        Ok(Response::new(progress_message(self.0.jobs.snapshot())))
     }
 
     async fn close_library(
@@ -1031,7 +1050,9 @@ impl LibraryService for Service {
         &self,
         request: Request<api::AnalyzeTrackRequest>,
     ) -> Result<Response<api::AnalyzeTrackResponse>, Status> {
-        let library = self.library()?;
+        let (library_id, library) = self
+            .requested()
+            .ok_or_else(|| Status::failed_precondition("no library is open"))?;
         let request = request.into_inner();
         let id = request.track_id;
         let index = id as usize;
@@ -1050,13 +1071,17 @@ impl LibraryService for Service {
         }
         let path = track.path.display().to_string();
         let title = track.title.clone();
+        let reference = (track.origin_key.clone(), track.path.clone());
         let mut audio = self.audio()?;
-        // (Taken after the checks, which need no progress; ends when this call does.)
-        let progress = self.0.progress.clone();
-        let _running = progress.try_begin().ok_or_else(|| {
-            Status::failed_precondition("another operation is running, try again when it is done")
+        // (Taken after the checks, which need no progress; ends when this call does. A job,
+        // not an operation: syncs and edits go on meanwhile.)
+        let jobs = self.0.jobs.clone();
+        let _running = jobs.try_begin().ok_or_else(|| {
+            Status::failed_precondition(
+                "another analysis or stem generation is running, try again when it is done",
+            )
         })?;
-        progress.analysing(Phase::AnalysingDecoding, 0, &title);
+        jobs.analysing(Phase::AnalysingDecoding, 0, &title);
 
         let origin = {
             let library = Arc::clone(&library);
@@ -1069,6 +1094,7 @@ impl LibraryService for Service {
             .await
             .map_err(|error| Status::internal(error.to_string()))?
         };
+        drop(library);
 
         // The audio process decodes the file and finds the beats and the key, and says how
         // far it is; its errors (no file, no models) say what is wrong and are passed on.
@@ -1090,7 +1116,7 @@ impl LibraryService for Service {
                         api::AudioAnalysisStage::Key => Phase::AnalysingKey,
                         _ => Phase::AnalysingDecoding,
                     };
-                    progress.analysing(
+                    jobs.analysing(
                         phase,
                         (step.fraction.clamp(0.0, 1.0) * 1000.0) as u64,
                         &title,
@@ -1100,7 +1126,7 @@ impl LibraryService for Service {
                 None => {}
             }
         };
-        progress.analysing(Phase::AnalysingKey, 1000, &title);
+        jobs.analysing(Phase::AnalysingKey, 1000, &title);
 
         let found = Found {
             beats: found.beats,
@@ -1111,6 +1137,10 @@ impl LibraryService for Service {
             overview: found.overview,
         };
         let overwrite = request.overwrite;
+        // The short moment everything else waits for: the library as it is now (its working
+        // copy may have been replaced meanwhile), and the track in it.
+        let _writing = self.wait_for_operations().await;
+        let (library, index) = self.find_again(library_id, &reference, &title)?;
         // Writes the database: not on the async threads.
         let applied =
             tokio::task::spawn_blocking(move || library.apply_analysis(index, &found, overwrite))
@@ -1131,7 +1161,9 @@ impl LibraryService for Service {
         &self,
         request: Request<api::GenerateStemsRequest>,
     ) -> Result<Response<api::GenerateStemsResponse>, Status> {
-        let library = self.library()?;
+        let (library_id, library) = self
+            .requested()
+            .ok_or_else(|| Status::failed_precondition("no library is open"))?;
         let request = request.into_inner();
         let id = request.track_id;
         let index = id as usize;
@@ -1160,11 +1192,15 @@ impl LibraryService for Service {
         }
         let path = track.path.display().to_string();
         let title = track.title.clone();
+        let reference = (track.origin_key.clone(), track.path.clone());
         let mut audio = self.audio()?;
-        // (Taken after the checks, which need no progress; ends when this call does.)
-        let progress = self.0.progress.clone();
+        // (Taken after the checks, which need no progress; ends when this call does. A job,
+        // not an operation: syncs and edits go on meanwhile.)
+        let progress = self.0.jobs.clone();
         let _running = progress.try_begin().ok_or_else(|| {
-            Status::failed_precondition("another operation is running, try again when it is done")
+            Status::failed_precondition(
+                "another analysis or stem generation is running, try again when it is done",
+            )
         })?;
         progress.analysing(Phase::StemsDecoding, 0, &title);
 
@@ -1179,6 +1215,7 @@ impl LibraryService for Service {
             .await
             .map_err(|error| Status::internal(error.to_string()))?
         };
+        drop(library);
 
         // The audio process separates the file and writes the stems, and says how far it is;
         // its errors (no file, no model) say what is wrong and are passed on.
@@ -1212,6 +1249,10 @@ impl LibraryService for Service {
                 None => {}
             }
         }
+        // (The file is written already, by its origin's name, wherever the track went: only the
+        // library as it is now is told.)
+        let _writing = self.wait_for_operations().await;
+        let (library, index) = self.find_again(library_id, &reference, &title)?;
         library.stems_were_made(index);
         Ok(Response::new(api::GenerateStemsResponse {}))
     }
@@ -1523,6 +1564,8 @@ fn track_message(
         soundswitch: track.lighting.state.into(),
         soundswitch_projects: track.lighting.projects.clone(),
         has_stems,
+        origin_database_uuid: track.origin_key.as_ref().map(|(uuid, _)| uuid.clone()),
+        origin_track_id: track.origin_key.as_ref().map(|(_, id)| *id),
         analysis,
         analysis_origin: analysis_origin.into(),
         analysis_note,
@@ -1668,6 +1711,35 @@ impl PlaybackService for Service {
         _: Request<api::GetStatusRequest>,
     ) -> Result<Response<api::PlaybackStatus>, Status> {
         Ok(self.audio()?.get_status(api::GetStatusRequest {}).await?)
+    }
+}
+
+/// What `GetProgress` and `GetJobProgress` say of a snapshot.
+fn progress_message(snapshot: crate::progress::Snapshot) -> api::OperationProgress {
+    api::OperationProgress {
+        running: snapshot.running,
+        phase: match snapshot.phase {
+            Phase::Idle => api::ProgressPhase::Unspecified,
+            Phase::Preparing => api::ProgressPhase::Preparing,
+            Phase::CopyingTracks => api::ProgressPhase::CopyingTracks,
+            Phase::Updating => api::ProgressPhase::Updating,
+            Phase::Writing => api::ProgressPhase::Writing,
+            Phase::Pulling => api::ProgressPhase::Pulling,
+            Phase::Scanning => api::ProgressPhase::Scanning,
+            Phase::ReadingTags => api::ProgressPhase::ReadingTags,
+            Phase::AnalysingDecoding => api::ProgressPhase::AnalysingDecoding,
+            Phase::AnalysingBeats => api::ProgressPhase::AnalysingBeats,
+            Phase::AnalysingKey => api::ProgressPhase::AnalysingKey,
+            Phase::StemsDecoding => api::ProgressPhase::StemsDecoding,
+            Phase::StemsSeparating => api::ProgressPhase::StemsSeparating,
+            Phase::StemsWriting => api::ProgressPhase::StemsWriting,
+        }
+        .into(),
+        done_bytes: snapshot.done_bytes,
+        total_bytes: snapshot.total_bytes,
+        done_files: snapshot.done_files,
+        total_files: snapshot.total_files,
+        current: snapshot.current,
     }
 }
 

@@ -1382,6 +1382,16 @@ impl Library {
         Some(self.dir.join(STEMS_DIR).join(stems_file_name(uuid, *id)))
     }
 
+    /// The index in `tracks` of the track with Engine's identity `origin` (the same in every
+    /// library it was copied to, and across reloads), else of the one at `path`, if the
+    /// library has it.
+    pub fn find(&self, origin: Option<&(String, i64)>, path: &Path) -> Option<usize> {
+        match origin {
+            Some(key) => self.by_origin.get(key).copied(),
+            None => self.tracks.iter().position(|track| track.path == path),
+        }
+    }
+
     /// Whether the track at `index` in `tracks` has stems: it had them when the library was
     /// opened, or they were made since.
     pub fn has_stems(&self, index: usize) -> bool {
@@ -3631,6 +3641,38 @@ mod tests {
         assert_eq!(written, 2);
         assert_eq!(library.origins().len(), 2);
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_track_is_found_again_by_its_origin_else_its_path_and_made_stems_count() {
+        let root = std::env::temp_dir().join(format!(
+            "open-engine-lib-library-find-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (dir, cache) = (root.join("Engine Library"), root.join("cache"));
+        std::fs::create_dir_all(cache.join(DATABASE_DIR)).unwrap();
+        let library = Library::load(database(), dir, cache).unwrap();
+        let track = &library.tracks[1];
+        let origin = track.origin_key.clone().unwrap();
+        assert_eq!(
+            library.find(Some(&origin), Path::new("/no/such/path")),
+            Some(1)
+        );
+        assert_eq!(library.find(None, &track.path), Some(1));
+        assert_eq!(
+            library.find(Some(&("other".into(), origin.1)), &track.path),
+            None
+        );
+        assert_eq!(library.find(None, Path::new("/no/such/path")), None);
+
+        // Stems made since it was opened count, and their file is named by the origin.
+        assert!(!library.has_stems(1));
+        library.stems_were_made(1);
+        assert!(library.has_stems(1) && !library.has_stems(0));
+        let path = library.stems_path(1).unwrap();
+        assert!(path.ends_with(stems_file_name(&origin.0, origin.1)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

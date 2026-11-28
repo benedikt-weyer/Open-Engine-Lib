@@ -4,11 +4,12 @@
 
 use std::time::{Duration, Instant};
 
-use iced::widget::{button, column, container, progress_bar, row, text};
+use iced::widget::{button, column, container, progress_bar, row, scrollable, text};
 use iced::{Element, Fill, Theme};
 use open_engine_api::v1::{OperationProgress, ProgressPhase};
 
 use crate::Message;
+use crate::analysis_queue::{Kind, Queue, Status};
 use crate::config::Language;
 use crate::i18n::fill;
 use crate::progress_view;
@@ -22,21 +23,15 @@ const WIDTH: f32 = 380.0;
 
 #[derive(Debug, Clone)]
 pub enum Toast {
-    /// A track is being analysed (the backend says how far, see `progress_view`).
-    Analysing {
-        /// The library it is in, to tell the answer from one for another library.
-        library: String,
+    /// A job (an analysis, a stem generation) runs (the backend says how far, see
+    /// `progress_view`).
+    Job {
+        kind: Kind,
         title: String,
-        /// Which track of how many it is, when a list of tracks is analysed.
+        /// Which job of how many it is, when several are queued.
         position: Option<(u32, u32)>,
-        /// There are tracks after this one that can still be left out.
+        /// There are jobs after this one that can still be left out.
         stoppable: bool,
-    },
-    /// A track is being separated into stems (the backend says how far).
-    Stems {
-        /// The library it is in, to tell the answer from one for another library.
-        library: String,
-        title: String,
     },
     /// It was done; says what came out.
     Done { message: String, since: Instant },
@@ -45,9 +40,9 @@ pub enum Toast {
 }
 
 impl Toast {
-    /// Whether the toast is for a task that is still running.
+    /// Whether the toast is for a job that is still running.
     pub fn running(&self) -> bool {
-        matches!(self, Toast::Analysing { .. } | Toast::Stems { .. })
+        matches!(self, Toast::Job { .. })
     }
 
     /// Whether a finished toast has been shown long enough.
@@ -56,7 +51,7 @@ impl Toast {
     }
 }
 
-/// The name of what the analysis is doing.
+/// The name of what the job is doing.
 fn stage(progress: Option<&OperationProgress>, language: Language) -> &str {
     let strings = language.strings();
     match progress.map(OperationProgress::phase) {
@@ -68,10 +63,80 @@ fn stage(progress: Option<&OperationProgress>, language: Language) -> &str {
     }
 }
 
+/// The jobs of the queue, each with where it is; one that waits can be taken out.
+fn queue_list<'a>(queue: &'a Queue, language: Language) -> Element<'a, Message> {
+    let strings = language.strings();
+    let mut list = column![].spacing(2);
+    for (index, item) in queue.items().iter().enumerate() {
+        let what = match item.entry.kind {
+            Kind::Analyse => &strings.queue_kind_analyse,
+            Kind::Stems => &strings.queue_kind_stems,
+        };
+        let (status, style): (&str, fn(&Theme) -> text::Style) = match &item.status {
+            Status::Waiting => (&strings.queue_waiting, text::secondary),
+            Status::Running => (&strings.queue_running, text::primary),
+            Status::Done => (&strings.queue_done, text::success),
+            Status::Failed(_) => (&strings.queue_failed, text::danger),
+            Status::Stopped => (&strings.queue_stopped, text::secondary),
+        };
+        let mut line = row![
+            text(what).size(12).width(70).style(text::secondary),
+            text(&item.entry.title)
+                .size(12)
+                .width(Fill)
+                .wrapping(text::Wrapping::None),
+            text(status).size(12).style(style),
+        ]
+        .spacing(6)
+        .align_y(iced::Center);
+        if item.status == Status::Waiting {
+            line = line.push(
+                button(text("×").size(12))
+                    .padding([0, 4])
+                    .style(button::text)
+                    .on_press(Message::JobRemove(index)),
+            );
+        }
+        let line: Element<'a, Message> = match &item.status {
+            Status::Failed(reason) => iced::widget::tooltip(
+                line,
+                text(reason).size(12),
+                iced::widget::tooltip::Position::Top,
+            )
+            .style(container::rounded_box)
+            .into(),
+            _ => line.into(),
+        };
+        list = list.push(line);
+    }
+    scrollable(list).height(iced::Length::Shrink).into()
+}
+
+/// The tick in the last step of replacing the working copy (discarding the changes, copying
+/// from another library) that stops the jobs queued for the library: off, they go on and
+/// write their results to the library as it is then. Nothing while no job is queued.
+pub fn stop_option<'a>(
+    pending: usize,
+    stop: bool,
+    language: Language,
+) -> Option<Element<'a, Message>> {
+    (pending > 0).then(|| {
+        iced::widget::checkbox(stop)
+            .label(fill(
+                &language.strings().jobs_stop_option,
+                &[("count", &pending)],
+            ))
+            .on_toggle(Message::StopJobsToggled)
+            .into()
+    })
+}
+
 /// The toast in the bottom right corner of the window.
 pub fn layer<'a>(
     toast: &'a Toast,
     progress: Option<&'a OperationProgress>,
+    // The queue, when it is to be shown.
+    queue: Option<&'a Queue>,
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -82,7 +147,8 @@ pub fn layer<'a>(
             .on_press(Message::ToastClose)
     };
     let content: Element<'a, Message> = match toast {
-        Toast::Analysing {
+        Toast::Job {
+            kind,
             title,
             position,
             stoppable,
@@ -93,47 +159,52 @@ pub fn layer<'a>(
                 .filter(|progress| progress.running)
                 .and_then(progress_view::fraction)
                 .unwrap_or(0.0);
+            let (alone, queued) = match kind {
+                Kind::Analyse => (&strings.toast_analysing, &strings.toast_analysing_queue),
+                Kind::Stems => (&strings.toast_stems, &strings.toast_stems_queue),
+            };
             let heading = match position {
                 Some((done, total)) => fill(
-                    &strings.toast_analysing_queue,
+                    queued,
                     &[("title", title), ("done", done), ("total", total)],
                 ),
-                None => fill(&strings.toast_analysing, &[("title", title)]),
+                None => fill(alone, &[("title", title)]),
             };
-            let mut lines = column![
-                text(heading).size(14).wrapping(text::Wrapping::None),
-                progress_bar(0.0..=1.0, fraction).girth(6),
-                text(stage(progress, language))
+            let mut buttons = row![
+                button(
+                    text(if queue.is_some() {
+                        &strings.toast_queue_hide
+                    } else {
+                        &strings.toast_queue_show
+                    })
                     .size(13)
-                    .style(text::secondary),
+                )
+                .padding([2, 8])
+                .style(button::secondary)
+                .on_press(Message::JobQueueToggle)
             ]
-            .spacing(8);
+            .spacing(6);
             if *stoppable {
-                lines = lines.push(
+                buttons = buttons.push(
                     button(text(&strings.toast_queue_stop).size(13))
                         .padding([2, 8])
                         .style(button::secondary)
                         .on_press(Message::AnalysisQueueStop),
                 );
             }
-            lines.into()
-        }
-        Toast::Stems { title, .. } => {
-            let fraction = progress
-                .filter(|progress| progress.running)
-                .and_then(progress_view::fraction)
-                .unwrap_or(0.0);
-            column![
-                text(fill(&strings.toast_stems, &[("title", title)]))
-                    .size(14)
-                    .wrapping(text::Wrapping::None),
+            let mut lines = column![
+                text(heading).size(14).wrapping(text::Wrapping::None),
                 progress_bar(0.0..=1.0, fraction).girth(6),
                 text(stage(progress, language))
                     .size(13)
                     .style(text::secondary),
+                buttons,
             ]
-            .spacing(8)
-            .into()
+            .spacing(8);
+            if let Some(queue) = queue {
+                lines = lines.push(queue_list(queue, language));
+            }
+            lines.into()
         }
         Toast::Done { message, .. } => row![text(message).size(14).width(Fill), close()]
             .spacing(8)
@@ -194,8 +265,8 @@ mod tests {
             }
             .expired(later)
         );
-        let running = Toast::Analysing {
-            library: "/lib".into(),
+        let running = Toast::Job {
+            kind: Kind::Analyse,
             title: "Song".into(),
             position: None,
             stoppable: false,

@@ -49,10 +49,12 @@ pub struct Menu {
     /// A stems key that fits Engine's is set in the settings: without it stems can't be
     /// written.
     pub has_stems_key: bool,
+    /// The track's stems are being made or wait to be.
+    pub stems_queued: bool,
 }
 
 /// The menu in a layer over the whole window, whose clicks outside the menu close it.
-pub fn layer(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message> {
+pub fn layer(menu: &Menu, language: Language) -> Element<'_, Message> {
     let lines = 1
         + usize::from(menu.playlist.is_some())
         + usize::from(menu.can_analyse)
@@ -60,7 +62,7 @@ pub fn layer(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Me
         + usize::from(menu.can_make_stems);
     let height = TITLE_HEIGHT + lines as f32 * LINE_HEIGHT;
     anchored(menu.at, height, Message::TrackMenuClose, move || {
-        view(menu, analysing, language)
+        view(menu, language)
     })
 }
 
@@ -88,7 +90,7 @@ pub(crate) fn anchored<'a>(
     .into()
 }
 
-fn view(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message> {
+fn view(menu: &Menu, language: Language) -> Element<'_, Message> {
     let strings = language.strings();
 
     let title = container(
@@ -131,8 +133,10 @@ fn view(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message
     }
     if menu.can_make_stems {
         // (One task at a time: not while tracks are analysed.)
-        items = items.push(if menu.has_stems_key {
-            item_if(
+        items = items.push(if menu.stems_queued {
+            disabled_item(&strings.track_menu_stems_queued)
+        } else if menu.has_stems_key {
+            item(
                 if menu.has_stems {
                     &strings.track_menu_stems_again
                 } else {
@@ -140,22 +144,20 @@ fn view(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message
                 },
                 Message::TrackMenuStems,
                 false,
-                !analysing,
             )
         } else {
             disabled_item(&strings.track_menu_stems_no_key)
         });
     }
     if menu.playlist.is_some() {
-        items = items.push(item_if(
+        items = items.push(item(
             &strings.track_menu_playlist,
             Message::TrackMenuRemoveFromPlaylist,
             false,
-            !analysing,
         ));
     }
-    // (What changes the library waits for the analysis, which writes to it when it is done.)
-    items = items.push(item_if(
+    // (A job for the track finds it gone when it ends, and drops its result.)
+    items = items.push(item(
         if menu.confirm_library {
             &strings.track_menu_library_confirm
         } else {
@@ -163,7 +165,6 @@ fn view(menu: &Menu, analysing: bool, language: Language) -> Element<'_, Message
         },
         Message::TrackMenuRemoveFromLibrary,
         menu.confirm_library,
-        !analysing,
     ));
     // (No padding, so that a click on the menu is always on one of its lines.)
     container(items)

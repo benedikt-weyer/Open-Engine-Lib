@@ -222,6 +222,10 @@ service LibraryService {
   // asked again and again while it runs. Not running: `running` is false and the rest is
   // empty. Does not need a library to be open.
   rpc GetProgress(GetProgressRequest) returns (OperationProgress);
+  // How far the analysis (`AnalyzeTrack`) or stem generation (`GenerateStems`) that is
+  // running has got, as `GetProgress` says it of an operation. These jobs run alongside the
+  // operations: one job and one operation can run at the same time.
+  rpc GetJobProgress(GetProgressRequest) returns (OperationProgress);
   // Closes the library the request is about (all of them, if it names none) and stops
   // playback if it was playing from it. Succeeds if none is open.
   rpc CloseLibrary(CloseLibraryRequest) returns (CloseLibraryResponse);
@@ -277,28 +281,35 @@ service LibraryService {
   // with libKeyFinder) and writes the result to the working copy: the beatgrid, the BPM,
   // the key and the track data, marked as analysed by Open Engine Lib (`Track.analysis_origin`).
   // The waveform overview, the cues and the loops are left as they are. It takes seconds to
-  // minutes; `GetProgress` says how far it is (the `ANALYSING_*` phases) while it runs. The
+  // minutes; `GetJobProgress` says how far it is (the `ANALYSING_*` phases) while it runs. The
   // source only gets the result when the working copy is written to it.
   // Errors: FAILED_PRECONDITION if no library is open, it is a folder of music or a
   // streaming track, the track is analysed already and `overwrite` is not set, the models
   // of Beat This! are not installed (the message says where they are looked for), another
-  // operation is running or this build has no analysis; INVALID_ARGUMENT for an unknown
-  // track id; NOT_FOUND if the audio file does not exist; INTERNAL if it can't be decoded
-  // or the result can't be written.
+  // analysis or stem generation is running or this build has no analysis; INVALID_ARGUMENT
+  // for an unknown track id; NOT_FOUND if the audio file does not exist, or the track is no
+  // longer in the library when the result is ready (it is dropped then); INTERNAL if it
+  // can't be decoded or the result can't be written.
+  // The work runs alongside the other calls (edits, syncs, a reload): only the writing of
+  // the result at the end waits for an operation that is running (`GetProgress`) and holds
+  // operations back for that moment. The track is then looked up again in the library as it
+  // is by then (by its origin, else its path), in case the working copy was replaced
+  // meanwhile, and the result is written to it there.
   rpc AnalyzeTrack(AnalyzeTrackRequest) returns (AnalyzeTrackResponse);
   // Separates a track into stems (vocals, bass, drums, melody) and writes Engine's stems
   // file for it, `Stems/<originTrackId> <originDatabaseUuid>.stems` in the library's folder
   // (the file is all there is to it: Engine has no stems in its database, so this is written
   // to the library itself, not the working copy). Engine encrypts its stems, so the key is
-  // the caller's to give. Takes minutes; `GetProgress` says how far it is (the `STEMS_*`
+  // the caller's to give. Takes minutes; `GetJobProgress` says how far it is (the `STEMS_*`
   // phases) while it runs. From then on the track has stems (`Track.has_stems`) and is
   // played from them when they are asked for.
   // Errors: FAILED_PRECONDITION if no library is open, it is a folder of music or a
   // streaming track, the track has no origin, it has stems already and `overwrite` is not
   // set, the model or ONNX Runtime is not installed (the message says where they are looked
-  // for) or another operation is running; INVALID_ARGUMENT for an unknown track id or a key
-  // that is not Engine's; NOT_FOUND if the audio file does not exist; INTERNAL if it can't
-  // be decoded, separated or written.
+  // for) or another analysis or stem generation is running; INVALID_ARGUMENT for an unknown
+  // track id or a key that is not Engine's; NOT_FOUND if the audio file does not exist;
+  // INTERNAL if it can't be decoded, separated or written. Runs alongside the other calls as
+  // `AnalyzeTrack` does (`GetJobProgress`), and finds the track again at the end.
   rpc GenerateStems(GenerateStemsRequest) returns (GenerateStemsResponse);
 }
 
@@ -768,6 +779,11 @@ message Track {
   // folder. Unlike `id`, it stays the same across opens, so it identifies the track
   // between sessions (the library keeps it unique).
   string path = 10;
+  // Engine's identity of the track, the same in every library it was copied to and across
+  // syncs and reloads: `originDatabaseUuid` and `originTrackId`. Unset for a folder of music
+  // and a track without one.
+  optional string origin_database_uuid = 21;
+  optional int64 origin_track_id = 22;
   // Where the track's file was when its origin was saved (`MigrateOrigins`), kept in
   // Open Engine Lib's own database and shared by all libraries the track is in. Not set
   // if none was saved.

@@ -1,32 +1,104 @@
-//! The tracks that wait to be analysed. The backend analyses one track at a time (and
-//! refuses a second request while one runs), so a list of tracks is analysed by asking for
-//! the next one when the answer to the last has come. The queue is the UI's: it remembers
-//! which library the tracks are in, so that it never asks the backend to analyse a track
-//! of a library that is no longer open.
+//! The jobs that wait for their turn: analyses and stem generations of tracks. The backend
+//! runs one job at a time (alongside edits, syncs and the rest), so the UI asks for the next
+//! one when the answer to the last has come. The queue is the UI's: it remembers which
+//! library the tracks are in, and each track by a reference that outlives the track's id
+//! (Engine's origin of the track, else its path), so that a track is found again after the
+//! library was read again, and one that is gone is left out.
 
-use std::collections::VecDeque;
+use crate::model::{Library, Track};
 
-/// A track to analyse: the backend's id for it and its title.
-pub type Entry = (u32, String);
+/// What is done with a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Find its beats and key.
+    Analyse,
+    /// Separate it into stems and write Engine's stems file.
+    Stems,
+}
 
-/// Tracks of one library, analysed one after the other.
+/// A track, as it is found again in the library even when its id changed: by Engine's
+/// identity of it (its origin) if it has one, else by its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackRef {
+    pub origin: Option<(String, i64)>,
+    pub path: String,
+}
+
+impl TrackRef {
+    pub fn of(track: &Track) -> Self {
+        Self {
+            origin: track.origin_key.clone(),
+            path: track.path.clone(),
+        }
+    }
+
+    /// The track in `library`, if it is there.
+    pub fn find<'a>(&self, library: &'a Library) -> Option<&'a Track> {
+        match &self.origin {
+            Some(origin) => library
+                .tracks
+                .iter()
+                .find(|track| track.origin_key.as_ref() == Some(origin)),
+            None => library.tracks.iter().find(|track| track.path == self.path),
+        }
+    }
+}
+
+/// A job: what to do with which track.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub kind: Kind,
+    pub track: TrackRef,
+    pub title: String,
+    /// Replace what the track has (its analysis, its stems file).
+    pub overwrite: bool,
+}
+
+impl Entry {
+    pub fn new(kind: Kind, track: &Track, overwrite: bool) -> Self {
+        Self {
+            kind,
+            track: TrackRef::of(track),
+            title: if track.title.is_empty() {
+                track.path.clone()
+            } else {
+                track.title.clone()
+            },
+            overwrite,
+        }
+    }
+
+    pub fn analyse(track: &Track, overwrite: bool) -> Self {
+        Self::new(Kind::Analyse, track, overwrite)
+    }
+}
+
+/// Where a job is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Status {
+    Waiting,
+    Running,
+    Done,
+    /// It failed, or its track was no longer in the library when its turn came: why.
+    Failed(String),
+    /// Taken out of the queue before its turn, or stopped while it ran.
+    Stopped,
+}
+
+/// A job and where it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Item {
+    pub entry: Entry,
+    pub status: Status,
+}
+
+/// The jobs of one library, run one after the other.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Queue {
     /// The library the tracks are in (as the backend names it).
     pub library: String,
-    /// Whether the track that was last taken is analysed even if it has an analysis, replacing
-    /// it. (Each track of the queue has its own: tracks can be added later, in another mode.)
-    pub overwrite: bool,
-    /// The tracks that wait, each with whether it replaces an analysis.
-    waiting: VecDeque<(Entry, bool)>,
-    /// The track that was last taken, until its analysis is over.
-    running: Option<u32>,
-    total: u32,
-    started: u32,
-    done: u32,
-    failed: u32,
-    /// The first track that failed and why.
-    first_failure: Option<(String, String)>,
+    /// All jobs since the queue was made, in order, with where each is.
+    items: Vec<Item>,
 }
 
 /// How a queue ended.
@@ -40,91 +112,162 @@ pub struct Summary {
 }
 
 impl Queue {
-    pub fn new(library: String, tracks: Vec<Entry>, overwrite: bool) -> Self {
-        Self {
+    pub fn new(library: String, entries: Vec<Entry>) -> Self {
+        let mut queue = Self {
             library,
-            overwrite,
-            total: tracks.len() as u32,
-            waiting: tracks.into_iter().map(|track| (track, overwrite)).collect(),
-            running: None,
-            started: 0,
-            done: 0,
-            failed: 0,
-            first_failure: None,
-        }
+            items: Vec::new(),
+        };
+        queue.add(entries);
+        queue
     }
 
-    /// Takes the next track to analyse (`overwrite` says how).
+    /// Takes the next job to run.
     pub fn next(&mut self) -> Option<Entry> {
-        let (next, overwrite) = self.waiting.pop_front()?;
-        self.started += 1;
-        self.overwrite = overwrite;
-        self.running = Some(next.0);
-        Some(next)
+        let item = self
+            .items
+            .iter_mut()
+            .find(|item| item.status == Status::Waiting)?;
+        item.status = Status::Running;
+        Some(item.entry.clone())
     }
 
-    /// Whether the track is being analysed or waits for its turn.
-    pub fn contains(&self, track: u32) -> bool {
-        self.running == Some(track) || self.waiting.iter().any(|((id, _), _)| *id == track)
+    /// The job that runs, if one does.
+    pub fn running(&self) -> Option<&Entry> {
+        self.items
+            .iter()
+            .find(|item| item.status == Status::Running)
+            .map(|item| &item.entry)
     }
 
-    /// Puts tracks at the end of the queue, even while it runs. A track that is in the queue
-    /// already (being analysed or waiting) is not put in again, but one that waits to be
-    /// analysed without replacing its analysis is made to replace it if `overwrite` says so.
-    /// Returns how many tracks were added.
-    pub fn add(&mut self, tracks: Vec<Entry>, overwrite: bool) -> usize {
+    /// Whether the job (that kind, that track) runs or waits for its turn.
+    pub fn contains(&self, kind: Kind, track: &TrackRef) -> bool {
+        self.items.iter().any(|item| {
+            matches!(item.status, Status::Waiting | Status::Running)
+                && item.entry.kind == kind
+                && &item.entry.track == track
+        })
+    }
+
+    /// Puts jobs at the end of the queue, even while it runs. One that runs or waits already
+    /// is not put in again, but one that waits without replacing is made to replace if the
+    /// new one says so. Returns how many were added.
+    pub fn add(&mut self, entries: Vec<Entry>) -> usize {
         let mut added = 0;
-        for track in tracks {
-            if self.running == Some(track.0) {
-                continue;
-            }
-            match self.waiting.iter_mut().find(|((id, _), _)| *id == track.0) {
-                Some((_, replaces)) => *replaces |= overwrite,
+        for entry in entries {
+            let same = |item: &Item| {
+                item.entry.kind == entry.kind
+                    && item.entry.track == entry.track
+                    && matches!(item.status, Status::Waiting | Status::Running)
+            };
+            match self.items.iter_mut().find(|item| same(item)) {
+                Some(item) => {
+                    if item.status == Status::Waiting {
+                        item.entry.overwrite |= entry.overwrite;
+                    }
+                }
                 None => {
-                    self.waiting.push_back((track, overwrite));
+                    self.items.push(Item {
+                        entry,
+                        status: Status::Waiting,
+                    });
                     added += 1;
                 }
             }
         }
-        self.total += added as u32;
         added
     }
 
-    /// Whether tracks wait for their turn.
+    /// Whether jobs wait for their turn.
     pub fn has_next(&self) -> bool {
-        !self.waiting.is_empty()
+        self.items.iter().any(|item| item.status == Status::Waiting)
     }
 
-    /// The track that was last taken: which of how many.
+    /// The job that was last taken: which of how many (the ones taken out count too).
     pub fn position(&self) -> (u32, u32) {
-        (self.started, self.total)
+        let started = self
+            .items
+            .iter()
+            .filter(|item| item.status != Status::Waiting)
+            .count() as u32;
+        (started, self.items.len() as u32)
     }
 
-    /// Notes how the analysis of the track that was last taken went.
-    pub fn finished(&mut self, title: &str, error: Option<&str>) {
-        self.running = None;
-        match error {
-            None => self.done += 1,
-            Some(error) => {
-                self.failed += 1;
-                self.first_failure
-                    .get_or_insert_with(|| (title.to_owned(), error.to_owned()));
+    /// Notes how the job that runs went.
+    pub fn finished(&mut self, error: Option<&str>) {
+        if let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| item.status == Status::Running)
+        {
+            item.status = match error {
+                None => Status::Done,
+                Some(error) => Status::Failed(error.to_owned()),
+            };
+        }
+    }
+
+    /// Takes the waiting job at `index` of `items` out.
+    pub fn remove(&mut self, index: usize) {
+        if let Some(item) = self.items.get_mut(index)
+            && item.status == Status::Waiting
+        {
+            item.status = Status::Stopped;
+        }
+    }
+
+    /// The jobs that wait are not run after all (the one that runs goes on).
+    pub fn stop(&mut self) {
+        for item in &mut self.items {
+            if item.status == Status::Waiting {
+                item.status = Status::Stopped;
             }
         }
     }
 
-    /// The tracks that wait are not analysed after all (the one that is being analysed is).
-    pub fn stop(&mut self) {
-        self.waiting.clear();
+    /// The jobs that wait and the one that runs are not done after all: the one that runs
+    /// counts as stopped (its answer is not waited for).
+    pub fn stop_all(&mut self) {
+        self.stop();
+        for item in &mut self.items {
+            if item.status == Status::Running {
+                item.status = Status::Stopped;
+            }
+        }
+    }
+
+    /// How many jobs wait or run.
+    pub fn pending(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| matches!(item.status, Status::Waiting | Status::Running))
+            .count()
+    }
+
+    pub fn items(&self) -> &[Item] {
+        &self.items
     }
 
     pub fn summary(&self) -> Summary {
-        Summary {
-            total: self.total,
-            done: self.done,
-            failed: self.failed,
-            first_failure: self.first_failure.clone(),
+        let mut summary = Summary {
+            total: 0,
+            done: 0,
+            failed: 0,
+            first_failure: None,
+        };
+        for item in &self.items {
+            match &item.status {
+                Status::Done => summary.done += 1,
+                Status::Failed(error) => {
+                    summary.failed += 1;
+                    summary
+                        .first_failure
+                        .get_or_insert_with(|| (item.entry.title.clone(), error.clone()));
+                }
+                Status::Waiting | Status::Running | Status::Stopped => {}
+            }
+            summary.total += 1;
         }
+        summary
     }
 }
 
@@ -133,7 +276,7 @@ impl Queue {
 pub struct AfterOpen {
     /// The library, as the backend names it once it is open.
     pub library: String,
-    /// The title of the playlist to show.
+    /// The playlist to show.
     pub playlist: String,
     /// The paths (as the library records them) of the new tracks.
     pub added: Vec<String>,
@@ -145,92 +288,139 @@ pub struct AfterOpen {
 mod tests {
     use super::*;
 
+    fn entry(id: u32) -> Entry {
+        Entry {
+            kind: Kind::Analyse,
+            track: TrackRef {
+                origin: Some(("db".into(), i64::from(id))),
+                path: format!("{id}.flac"),
+            },
+            title: format!("Track {id}"),
+            overwrite: false,
+        }
+    }
+
     fn queue(count: u32) -> Queue {
-        Queue::new(
-            "/lib".into(),
-            (0..count).map(|id| (id, format!("Track {id}"))).collect(),
-            false,
-        )
+        Queue::new("/lib".into(), (0..count).map(entry).collect())
+    }
+
+    fn title(entry: Option<Entry>) -> Option<String> {
+        entry.map(|entry| entry.title)
     }
 
     #[test]
-    fn the_tracks_come_one_after_the_other_in_order() {
+    fn the_jobs_come_one_after_the_other_in_order() {
         let mut queue = queue(3);
         assert_eq!(queue.position(), (0, 3));
-        assert_eq!(queue.next(), Some((0, "Track 0".into())));
+        assert_eq!(title(queue.next()), Some("Track 0".into()));
         assert_eq!(queue.position(), (1, 3));
+        assert_eq!(
+            queue.running().map(|entry| entry.title.as_str()),
+            Some("Track 0")
+        );
         assert!(queue.has_next());
-        assert_eq!(queue.next().map(|entry| entry.0), Some(1));
-        assert_eq!(queue.next().map(|entry| entry.0), Some(2));
+        queue.finished(None);
+        assert_eq!(title(queue.next()), Some("Track 1".into()));
+        queue.finished(None);
+        assert_eq!(title(queue.next()), Some("Track 2".into()));
+        queue.finished(None);
         assert!(!queue.has_next());
         assert_eq!(queue.next(), None);
     }
 
     #[test]
-    fn tracks_can_be_added_while_it_runs_but_none_twice() {
+    fn jobs_can_be_added_while_it_runs_but_none_twice() {
         let mut queue = queue(3);
         queue.next();
-        // Track 0 runs, 1 and 2 wait. 0, 1 and 2 are in; 3 and 4 are new, one of them twice.
-        assert!(queue.contains(0) && queue.contains(2) && !queue.contains(3));
-        let entry = |id: u32| (id, format!("Track {id}"));
+        let track = |id: u32| entry(id).track;
+        assert!(queue.contains(Kind::Analyse, &track(0)));
+        assert!(!queue.contains(Kind::Analyse, &track(3)));
+        assert!(
+            !queue.contains(Kind::Stems, &track(0)),
+            "another kind of job is another job"
+        );
         assert_eq!(
-            queue.add(
-                vec![entry(0), entry(1), entry(3), entry(3), entry(4)],
-                false
-            ),
+            queue.add(vec![entry(0), entry(1), entry(3), entry(3), entry(4)]),
             2
         );
         assert_eq!(queue.position(), (1, 5), "the total grows");
-        let order: Vec<_> = std::iter::from_fn(|| queue.next().map(|entry| entry.0)).collect();
-        assert_eq!(order, [1, 2, 3, 4]);
+        // Stems of a track that is analysed are a job of their own.
+        let stems = Entry {
+            kind: Kind::Stems,
+            ..entry(1)
+        };
+        assert_eq!(queue.add(vec![stems]), 1);
 
-        // Once its analysis is over, a track can be put in again.
-        assert!(queue.contains(4));
-        queue.finished("Track 4", None);
-        assert!(!queue.contains(4));
-        assert_eq!(queue.add(vec![entry(4)], false), 1);
-        assert_eq!(queue.next().map(|entry| entry.0), Some(4));
+        // Once its job is over, a track can be put in again.
+        queue.finished(None);
+        assert!(!queue.contains(Kind::Analyse, &track(0)));
+        assert_eq!(queue.add(vec![entry(0)]), 1);
     }
 
     #[test]
-    fn every_track_keeps_the_mode_it_was_asked_for_in() {
+    fn a_waiting_job_takes_the_replacing_mode_of_the_same_job_added_later() {
         let mut queue = queue(2);
-        let entry = |id: u32| (id, format!("Track {id}"));
-        // 5 is new and replaces; 1 waits already and is made to replace too.
-        assert_eq!(queue.add(vec![entry(5), entry(1)], true), 1);
-        let modes: Vec<_> =
-            std::iter::from_fn(|| queue.next().map(|entry| (entry.0, queue.overwrite))).collect();
-        assert_eq!(modes, [(0, false), (1, true), (5, true)]);
+        let replacing = Entry {
+            overwrite: true,
+            ..entry(1)
+        };
+        assert_eq!(queue.add(vec![replacing]), 0);
+        queue.next();
+        assert!(queue.next().unwrap().overwrite);
     }
 
     #[test]
     fn the_summary_counts_what_worked_and_remembers_the_first_failure() {
-        let mut queue = queue(4);
+        let mut queue = queue(5);
         queue.next();
-        queue.finished("Track 0", None);
+        queue.finished(None);
         queue.next();
-        queue.finished("Track 1", Some("no models"));
+        queue.finished(Some("no models"));
         queue.next();
-        queue.finished("Track 2", Some("no file"));
+        queue.finished(Some("gone"));
+        queue.next();
+        queue.finished(Some("no file"));
+        queue.remove(4);
         assert_eq!(
             queue.summary(),
             Summary {
-                total: 4,
+                total: 5,
                 done: 1,
-                failed: 2,
+                failed: 3,
                 first_failure: Some(("Track 1".into(), "no models".into())),
             }
         );
+        assert_eq!(queue.items()[2].status, Status::Failed("gone".into()));
+        assert_eq!(queue.items()[4].status, Status::Stopped);
     }
 
     #[test]
-    fn stopping_leaves_the_track_that_runs_and_drops_the_rest() {
+    fn stopping_leaves_the_job_that_runs_unless_all_are_stopped() {
         let mut queue = queue(5);
         queue.next();
         queue.stop();
         assert!(!queue.has_next());
-        queue.finished("Track 0", None);
+        assert_eq!(queue.pending(), 1);
+        queue.finished(None);
         assert_eq!(queue.summary().done, 1);
-        assert_eq!(queue.summary().total, 5);
+        assert_eq!(queue.summary().total, 5, "of all that were queued");
+
+        let mut queue = self::queue(3);
+        queue.next();
+        queue.stop_all();
+        assert_eq!(queue.pending(), 0);
+        assert!(queue.running().is_none());
+    }
+
+    #[test]
+    fn only_a_waiting_job_can_be_taken_out() {
+        let mut queue = queue(3);
+        queue.next();
+        queue.remove(0);
+        assert_eq!(queue.items()[0].status, Status::Running);
+        queue.remove(1);
+        assert_eq!(queue.items()[1].status, Status::Stopped);
+        queue.finished(None);
+        assert_eq!(title(queue.next()), Some("Track 2".into()), "1 is skipped");
     }
 }

@@ -168,6 +168,8 @@ pub struct Sources<'a> {
     pub drives: &'a [Drive],
     /// The open library's `Engine Library` folder, which can't be the one to sync to.
     pub current: &'a str,
+    /// How many jobs are queued for the open library, and whether copying into it stops them.
+    pub jobs: (usize, bool),
 }
 
 /// The window, centred over a dimmed view of the app that can't be clicked.
@@ -228,9 +230,16 @@ pub fn modal<'a>(
             diff,
             error,
             ..
-        } => ready(diff, *options, error.as_deref(), true, language),
+        } => ready(
+            diff,
+            *options,
+            error.as_deref(),
+            true,
+            sources.jobs,
+            language,
+        ),
         Stage::Syncing { options, diff, .. } => column![
-            ready(diff, *options, None, false, language),
+            ready(diff, *options, None, false, sources.jobs, language),
             progress_view::view(progress, language),
         ]
         .spacing(12)
@@ -375,6 +384,7 @@ fn ready<'a>(
     options: Options,
     error: Option<&'a str>,
     active: bool,
+    jobs: (usize, bool),
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -524,6 +534,13 @@ fn ready<'a>(
         if count > 0 {
             content = content.push(text(fill(label, &[("count", &count)])).style(style));
         }
+    }
+    // (Copying into the open library replaces its working copy.)
+    if options.reverse
+        && has_changes(diff)
+        && let Some(option) = crate::toast::stop_option(jobs.0, jobs.1, language)
+    {
+        content = content.push(option);
     }
     if let Some(error) = error {
         content = content.push(error_text::view(

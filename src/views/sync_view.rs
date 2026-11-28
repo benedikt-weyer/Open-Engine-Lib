@@ -72,6 +72,8 @@ pub fn modal<'a>(
     stage: &'a Stage,
     progress: Option<&'a OperationProgress>,
     reverse: bool,
+    // How many jobs are queued for the library, and whether discarding stops them.
+    jobs: (usize, bool),
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -95,7 +97,14 @@ pub fn modal<'a>(
             diff,
             acknowledged,
             error,
-        } => ready(diff, *acknowledged, error.as_deref(), reverse, language),
+        } => ready(
+            diff,
+            *acknowledged,
+            error.as_deref(),
+            reverse,
+            jobs,
+            language,
+        ),
         Stage::Syncing { .. } => crate::progress_view::view(progress, language),
         Stage::Pulled(done) => {
             let message = if done.kept_edits_path.is_empty() {
@@ -161,6 +170,7 @@ fn ready<'a>(
     acknowledged: bool,
     error: Option<&'a str>,
     reverse: bool,
+    jobs: (usize, bool),
     language: Language,
 ) -> Element<'a, Message> {
     let strings = language.strings();
@@ -202,6 +212,12 @@ fn ready<'a>(
         } else {
             strings.sync_direction_hint.clone()
         }));
+    }
+    if reverse
+        && can_pull(diff)
+        && let Some(option) = crate::toast::stop_option(jobs.0, jobs.1, language)
+    {
+        content = content.push(option);
     }
     if let Some(error) = error {
         content = content.push(error_text::view(

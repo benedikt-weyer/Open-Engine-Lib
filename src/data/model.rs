@@ -34,6 +34,9 @@ pub struct Track {
     pub lighting_projects: Vec<String>,
     /// The track has stems rendered in the library.
     pub has_stems: bool,
+    /// Engine's identity of the track (`originDatabaseUuid`, `originTrackId`), the same across
+    /// syncs and reloads: how a job finds it again. Unset for a folder of music.
+    pub origin_key: Option<(String, i64)>,
     /// How many cues the track had set when the library was fetched (the browser knows
     /// what it is now).
     pub cue_count: u32,
@@ -413,6 +416,7 @@ mod tests {
             lighting: Lighting::None,
             lighting_projects: Vec::new(),
             has_stems: false,
+            origin_key: None,
             cue_count: 0,
             loop_count: 0,
             analysis: 0,
@@ -462,6 +466,7 @@ mod tests {
             lighting: Lighting::None,
             lighting_projects: Vec::new(),
             has_stems: false,
+            origin_key: None,
             cue_count: 0,
             loop_count: 0,
             analysis: 0,

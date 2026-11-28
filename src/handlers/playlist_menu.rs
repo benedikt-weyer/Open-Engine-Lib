@@ -6,8 +6,7 @@ use crate::*;
 pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::PlaylistMenuOpen { playlist, at } => {
-            // (While a track is analysed the menu opens, with what changes the library greyed out.)
-            if (state.locked() && !state.analysing()) || state.window_open() || state.syncing() {
+            if state.locked() || state.window_open() || state.syncing() {
                 return Task::none();
             }
             let LibraryState::Open(browser) = &state.library else {
@@ -25,10 +24,12 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 .map(|&index| &browser.library.tracks[index])
                 .filter(|track| {
                     !track.streaming
-                        && !state
-                            .analysis_queue
-                            .as_ref()
-                            .is_some_and(|queue| queue.contains(track.id))
+                        && !state.analysis_queue.as_ref().is_some_and(|queue| {
+                            queue.contains(
+                                analysis_queue::Kind::Analyse,
+                                &analysis_queue::TrackRef::of(track),
+                            )
+                        })
                 })
                 .collect();
             let menu = playlist_menu::Menu {
@@ -106,8 +107,8 @@ fn analyse(state: &mut State, menu: &playlist_menu::Menu, overwrite: bool) -> Ta
         .iter()
         .map(|&index| &browser.library.tracks[index])
         .filter(|track| !track.streaming && (overwrite || browser.analysis(track) == 0))
-        .map(|track| (track.id, track.title.clone()))
+        .map(|track| analysis_queue::Entry::analyse(track, overwrite))
         .collect();
     let library = browser.library.path.clone();
-    state.start_analysis(library, tracks, overwrite)
+    state.start_jobs(library, tracks)
 }

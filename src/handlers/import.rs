@@ -269,7 +269,7 @@ pub(crate) fn opened_after_import(
         tasks.push(handle_show(state, playlist));
     }
     if after.analyse {
-        tasks.push(state.start_analysis(library, tracks, false));
+        tasks.push(state.start_jobs(library, tracks));
     }
     Task::batch(tasks)
 }
@@ -288,6 +288,6 @@ fn new_tracks(browser: &Browser, added: &[String]) -> Vec<analysis_queue::Entry>
         .filter(|track| {
             !track.streaming && browser.analysis(track) == 0 && added.contains(&track.path)
         })
-        .map(|track| (track.id, track.title.clone()))
+        .map(|track| analysis_queue::Entry::analyse(track, false))
         .collect()
 }

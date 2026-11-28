@@ -217,8 +217,17 @@ struct State {
     import: Option<import_view::Import>,
     /// The menu of a folder of the playlist tree, while it is open.
     folder_menu: Option<folder_menu::Menu>,
-    /// The tracks that wait to be analysed.
+    /// The jobs (analyses, stem generations) that run and wait, of one library.
     analysis_queue: Option<analysis_queue::Queue>,
+    /// Stops the job that runs: dropping the call tells the backend.
+    job_abort: Option<iced::task::Handle>,
+    /// How far the job that runs is, as the backend said last.
+    job_progress: Option<open_engine_api::v1::OperationProgress>,
+    /// The toast shows the queue.
+    queue_shown: bool,
+    /// Replacing the working copy (discarding the changes, copying from another library)
+    /// stops the jobs queued for the library.
+    stop_jobs_tick: bool,
     /// What to do when the library that was imported into has been opened.
     after_open: Option<analysis_queue::AfterOpen>,
     /// The window for repairing a library, while it is open.
@@ -260,6 +269,13 @@ struct State {
     /// last told, to tell it again only when that changed.
     mpris: Option<mpris::Handle>,
     mpris_told: Option<handlers::mpris::Told>,
+}
+
+/// What a job that worked came to.
+#[derive(Debug, Clone)]
+pub enum JobDone {
+    Analysed(open_engine_api::v1::AnalyzeTrackResponse),
+    Stems,
 }
 
 #[derive(Debug, Clone)]
@@ -443,20 +459,20 @@ pub enum Message {
     AnalysisQueueStop,
     /// The menu's "Generate stems": separate the track into stems.
     TrackMenuStems,
-    /// Making the stems of a track (in the library at `library`) ended.
-    StemsFinished {
+    /// The job that ran (`entry`, of the library at `library`) ended.
+    JobFinished {
         library: String,
-        track: u32,
-        title: String,
-        result: Result<(), String>,
+        entry: analysis_queue::Entry,
+        result: Result<JobDone, String>,
     },
-    /// The analysis of a track (in the library at `library`) ended.
-    AnalysisFinished {
-        library: String,
-        track: u32,
-        title: String,
-        result: Result<open_engine_api::v1::AnalyzeTrackResponse, String>,
-    },
+    /// The tick that stops the queued jobs when the working copy is replaced.
+    StopJobsToggled(bool),
+    /// Take the job at this place of the queue out (one that waits).
+    JobRemove(usize),
+    /// The toast's button that shows or hides the queue.
+    JobQueueToggle,
+    /// How far the job that runs is, as the backend said.
+    JobProgressUpdated(Result<open_engine_api::v1::OperationProgress, String>),
     /// The close button of the toast.
     ToastClose,
     /// Time to look whether a finished toast has been shown long enough.
@@ -710,6 +726,10 @@ impl State {
             import: None,
             folder_menu: None,
             analysis_queue: None,
+            job_abort: None,
+            job_progress: None,
+            queue_shown: false,
+            stop_jobs_tick: false,
             after_open: None,
             repair: None,
             smart: None,
@@ -829,7 +849,7 @@ impl State {
             Subscription::none()
         };
         // While a sync is writing, a library is opening or a track is analysed, ask how far it is.
-        let progress = if self.reporting_progress() {
+        let progress = if self.reporting_progress() || self.analysing() {
             iced::time::every(progress_view::POLL_INTERVAL).map(|_| Message::ProgressTick)
         } else {
             Subscription::none()
@@ -919,6 +939,18 @@ impl State {
             _ => None,
         };
         shown.into_iter().chain(self.parked.iter())
+    }
+
+    /// The open library (shown or parked) at `path`.
+    fn browser_at_mut(&mut self, path: &str) -> Option<&mut Browser> {
+        let shown = match &mut self.library {
+            LibraryState::Open(browser) => Some(browser),
+            _ => None,
+        };
+        shown
+            .into_iter()
+            .chain(self.parked.iter_mut())
+            .find(|browser| browser.library.path == path)
     }
 
     /// The id of the open library (shown or parked) at `path`, if there is one: it is not
@@ -1084,10 +1116,11 @@ impl State {
     /// Whether the library is being saved or read again, so that nothing may replace or
     /// change it meanwhile.
     fn locked(&self) -> bool {
-        self.saving.is_some() || self.reloading || self.analysing()
+        self.saving.is_some() || self.reloading
     }
 
-    /// Whether a track is being analysed, which writes to the working copy when it is done.
+    /// Whether a job (an analysis, a stem generation) runs. Nothing waits for it: it writes
+    /// its result to the library as it is when it ends.
     fn analysing(&self) -> bool {
         self.toast.as_ref().is_some_and(toast::Toast::running)
     }
@@ -1135,7 +1168,7 @@ impl State {
     /// Whether the backend is doing something it reports progress on: a sync writing, or a
     /// library being opened.
     fn reporting_progress(&self) -> bool {
-        self.syncing() || self.analysing() || matches!(self.library, LibraryState::Opening(_))
+        self.syncing() || matches!(self.library, LibraryState::Opening(_))
     }
 
     /// Whether one of the windows that lie over the app is open. Only one is at a time.
@@ -1795,9 +1828,11 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::TrackMenuAnalyse
         | Message::TrackMenuAnalyseAll
         | Message::AnalysisQueueStop
-        | Message::AnalysisFinished { .. }
         | Message::TrackMenuStems
-        | Message::StemsFinished { .. }
+        | Message::JobFinished { .. }
+        | Message::JobRemove(..)
+        | Message::StopJobsToggled(..)
+        | Message::JobQueueToggle
         | Message::ToastClose
         | Message::ToastTick
         | Message::TrackMenuRemoveFromLibrary
@@ -1893,6 +1928,7 @@ fn handle(state: &mut State, message: Message) -> Task<Message> {
         | Message::PlayTrack(..)
         | Message::Previous
         | Message::ProgressTick
+        | Message::JobProgressUpdated(..)
         | Message::ProgressUpdated(..)
         | Message::RecheckPaths(..)
         | Message::RatingSet { .. }
@@ -1942,7 +1978,8 @@ fn view(state: &State) -> Element<'_, Message> {
             content,
             toast::layer(
                 toast,
-                state.progress.as_ref(),
+                state.job_progress.as_ref(),
+                state.analysis_queue.as_ref().filter(|_| state.queue_shown),
                 state.config.effective().language
             )
         ]
@@ -2003,7 +2040,16 @@ fn with_windows<'a>(
     if let Some(stage) = &state.sync {
         return iced::widget::stack![
             window,
-            sync_view::modal(stage, state.progress.as_ref(), state.sync_reverse, language)
+            sync_view::modal(
+                stage,
+                state.progress.as_ref(),
+                state.sync_reverse,
+                (
+                    state.pending_jobs(current_path(state)),
+                    state.stop_jobs_tick
+                ),
+                language
+            )
         ]
         .into();
     }
@@ -2016,6 +2062,10 @@ fn with_windows<'a>(
             recents: &state.recents,
             drives: &state.drives,
             current,
+            jobs: (
+                state.pending_jobs(current_path(state)),
+                state.stop_jobs_tick,
+            ),
         };
         return iced::widget::stack![
             window,
@@ -2032,6 +2082,10 @@ fn with_windows<'a>(
             recents: &state.recents,
             drives: &state.drives,
             current,
+            jobs: (
+                state.pending_jobs(current_path(state)),
+                state.stop_jobs_tick,
+            ),
         };
         return iced::widget::stack![
             window,
@@ -2059,8 +2113,7 @@ fn with_windows<'a>(
         return iced::widget::stack![window, origin_prefix_dialog::modal(dialog, language)].into();
     }
     if let (Some(menu), LibraryState::Open(_)) = (&state.track_menu, &state.library) {
-        return iced::widget::stack![window, track_menu::layer(menu, state.analysing(), language)]
-            .into();
+        return iced::widget::stack![window, track_menu::layer(menu, language)].into();
     }
     if let (Some(menu), LibraryState::Open(_)) = (&state.playlist_menu, &state.library) {
         return iced::widget::stack![
@@ -2088,6 +2141,14 @@ fn with_windows<'a>(
         ]
         .into(),
         _ => iced::widget::stack![window].into(),
+    }
+}
+
+/// The path of the library that is shown, as the job queue names it (empty if none is).
+fn current_path(state: &State) -> &str {
+    match &state.library {
+        LibraryState::Open(browser) => &browser.library.path,
+        _ => "",
     }
 }
 
@@ -2461,6 +2522,7 @@ mod tests {
             lighting: model::Lighting::None,
             lighting_projects: Vec::new(),
             has_stems: false,
+            origin_key: None,
             cue_count: 0,
             loop_count: 0,
             analysis: 0,
@@ -2849,6 +2911,10 @@ mod tests {
             import: None,
             folder_menu: None,
             analysis_queue: None,
+            job_abort: None,
+            job_progress: None,
+            queue_shown: false,
+            stop_jobs_tick: false,
             after_open: None,
             repair: None,
             smart: None,
@@ -3472,6 +3538,35 @@ mod tests {
         }
     }
 
+    const DRIVE: &str = "/media/DRIVE/Engine Library";
+
+    /// Puts a job for track 1 of `state()` in the queue and runs it (as far as the UI goes:
+    /// there is no backend in the tests).
+    fn running_job(state: &mut State, kind: analysis_queue::Kind) -> analysis_queue::Entry {
+        let track = browser(state).library.track_by_id(1).unwrap().clone();
+        let entry = analysis_queue::Entry::new(kind, &track, false);
+        let mut queue = analysis_queue::Queue::new(DRIVE.into(), vec![entry.clone()]);
+        queue.next();
+        state.analysis_queue = Some(queue);
+        state.update_job_toast();
+        entry
+    }
+
+    fn job_finished(
+        state: &mut State,
+        entry: &analysis_queue::Entry,
+        result: Result<JobDone, String>,
+    ) {
+        let _ = handle(
+            state,
+            Message::JobFinished {
+                library: DRIVE.into(),
+                entry: entry.clone(),
+                result,
+            },
+        );
+    }
+
     #[test]
     fn stems_are_made_from_the_context_menu_once_the_key_is_set_and_then_the_track_has_them() {
         let mut state = state();
@@ -3480,65 +3575,35 @@ mod tests {
         assert!(!menu(&state).has_stems_key, "no key yet");
         // Without a key the entry does nothing.
         let _ = handle(&mut state, Message::TrackMenuStems);
-        assert!(state.toast.is_none());
+        assert!(state.toast.is_none() && state.analysis_queue.is_none());
 
-        // (Whether a key fits can't be told without Engine's, which the tests don't have:
-        // the toast and the answer are checked as if it had been set.)
-        state.toast = Some(toast::Toast::Stems {
-            library: "/media/DRIVE/Engine Library".into(),
-            title: "Track 1".into(),
-        });
-        assert!(state.locked(), "nothing else changes the library meanwhile");
-        let _ = handle(
-            &mut state,
-            Message::StemsFinished {
-                library: "/media/DRIVE/Engine Library".into(),
-                track: 1,
-                title: "Track 1".into(),
-                result: Ok(()),
-            },
-        );
+        // (Whether a key fits can't be told without Engine's, which the tests don't have: the
+        // job is put in the queue by hand.)
+        let entry = running_job(&mut state, analysis_queue::Kind::Stems);
+        assert!(matches!(
+            state.toast,
+            Some(toast::Toast::Job {
+                kind: analysis_queue::Kind::Stems,
+                ..
+            })
+        ));
+        assert!(!state.locked(), "the library can be changed meanwhile");
+        let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
+        assert!(menu(&state).stems_queued);
+        let _ = handle(&mut state, Message::TrackMenuClose);
+
+        job_finished(&mut state, &entry, Ok(JobDone::Stems));
         assert!(matches!(state.toast, Some(toast::Toast::Done { .. })));
         let track = browser(&state).library.track_by_id(1).unwrap().clone();
         assert!(browser(&state).has_stems(&track));
 
-        // A failure says why, and an answer for another library is ignored.
-        state.toast = Some(toast::Toast::Stems {
-            library: "/media/DRIVE/Engine Library".into(),
-            title: "Track 1".into(),
-        });
-        let _ = handle(
-            &mut state,
-            Message::StemsFinished {
-                library: "/elsewhere".into(),
-                track: 1,
-                title: "Track 1".into(),
-                result: Err("no".into()),
-            },
-        );
-        assert!(matches!(state.toast, Some(toast::Toast::Stems { .. })));
-        let _ = handle(
-            &mut state,
-            Message::StemsFinished {
-                library: "/media/DRIVE/Engine Library".into(),
-                track: 1,
-                title: "Track 1".into(),
-                result: Err("the model is not installed".into()),
-            },
-        );
+        // A failure says why.
+        let entry = running_job(&mut state, analysis_queue::Kind::Stems);
+        job_finished(&mut state, &entry, Err("the model is not installed".into()));
         let Some(toast::Toast::Failed { message }) = &state.toast else {
             panic!("a failure is shown");
         };
         assert!(message.contains("the model is not installed"));
-    }
-
-    fn analysing(state: &mut State) {
-        state.toast = Some(toast::Toast::Analysing {
-            library: "/media/DRIVE/Engine Library".into(),
-            title: "Track 1".into(),
-            position: None,
-            stoppable: false,
-        });
     }
 
     #[test]
@@ -3572,45 +3637,45 @@ mod tests {
     }
 
     #[test]
-    fn while_a_track_is_analysed_the_menu_opens_but_changes_nothing() {
+    fn while_a_job_runs_the_library_can_be_changed_and_the_job_is_not_put_in_twice() {
         let mut state = state();
-        analysing(&mut state);
+        running_job(&mut state, analysis_queue::Kind::Analyse);
+        assert!(state.analysing() && !state.locked());
         let at = iced::Point::new(10.0, 10.0);
         let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
-        assert!(state.track_menu.is_some(), "it can be looked at");
+        assert!(menu(&state).queued);
 
-        // Taking a track out of the library waits (it would not even ask for the second click).
+        // Taking a track out of the library asks for the second click as always.
         let _ = handle(&mut state, Message::TrackMenuRemoveFromLibrary);
-        assert!(!menu(&state).confirm_library);
-        // And a second analysis does not start.
+        assert!(menu(&state).confirm_library);
+        // And the track that runs is not put in again.
         let _ = handle(&mut state, Message::TrackMenuAnalyse);
-        assert!(state.track_menu.is_none() || state.analysing());
+        assert_eq!(state.analysis_queue.as_ref().unwrap().position(), (1, 1));
         assert!(matches!(
             state.toast,
-            Some(toast::Toast::Analysing { ref title, .. }) if title == "Track 1"
+            Some(toast::Toast::Job { ref title, .. }) if title == "Track 1"
         ));
     }
 
     #[test]
     fn a_track_that_was_analysed_shows_its_new_analysis_tempo_and_origin() {
         let mut state = state();
-        analysing(&mut state);
+        let entry = running_job(&mut state, analysis_queue::Kind::Analyse);
+        assert!(!state.reporting_progress(), "no operation runs");
         assert!(
-            state.analysing() && state.locked(),
-            "nothing else writes meanwhile"
+            state.analysing(),
+            "but a job does, whose progress is asked for"
         );
-        assert!(state.reporting_progress(), "the progress is asked for");
 
-        let _ = handle(
+        job_finished(
             &mut state,
-            Message::AnalysisFinished {
-                library: "/media/DRIVE/Engine Library".into(),
-                track: 1,
-                title: "Track 1".into(),
-                result: Ok(analysis_response(126.04, Some("A♭ minor"))),
-            },
+            &entry,
+            Ok(JobDone::Analysed(analysis_response(
+                126.04,
+                Some("A♭ minor"),
+            ))),
         );
-        assert!(!state.analysing() && !state.locked());
+        assert!(!state.analysing());
         match &state.toast {
             Some(toast::Toast::Done { message, .. }) => {
                 assert!(
@@ -3637,15 +3702,11 @@ mod tests {
         assert_eq!(browser.analysis_origin(other), model::AnalysisOrigin::None);
 
         // A key that was not heard is said.
-        analysing(&mut state);
-        let _ = handle(
+        let entry = running_job(&mut state, analysis_queue::Kind::Analyse);
+        job_finished(
             &mut state,
-            Message::AnalysisFinished {
-                library: "/media/DRIVE/Engine Library".into(),
-                track: 1,
-                title: "Track 1".into(),
-                result: Ok(analysis_response(90.0, None)),
-            },
+            &entry,
+            Ok(JobDone::Analysed(analysis_response(90.0, None))),
         );
         match &state.toast {
             Some(toast::Toast::Done { message, .. }) => assert!(message.contains("no key")),
@@ -3654,38 +3715,63 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_analysis_is_shown_until_it_is_closed_and_a_late_answer_is_dropped() {
+    fn the_result_goes_to_the_track_as_the_library_has_it_when_the_job_ends() {
         let mut state = state();
-        analysing(&mut state);
+        let entry = running_job(&mut state, analysis_queue::Kind::Analyse);
+        // Meanwhile the library was read again and the track is now the first one (its id 0).
+        if let LibraryState::Open(browser) = &mut state.library {
+            let mut tracks = browser.library.tracks.clone();
+            tracks.swap(0, 1);
+            for (id, track) in tracks.iter_mut().enumerate() {
+                track.id = id as u32;
+            }
+            browser.library = Arc::new(Library::new(
+                DRIVE.into(),
+                "/cache".into(),
+                tracks,
+                Vec::new(),
+            ));
+        }
+        job_finished(
+            &mut state,
+            &entry,
+            Ok(JobDone::Analysed(analysis_response(128.0, None))),
+        );
+        let browser = browser(&state);
+        let moved = browser.library.track_by_id(0).unwrap();
+        assert_eq!(moved.path, entry.track.path);
+        assert_eq!(browser.bpm(moved), Some(128.0), "found by its reference");
+        assert_eq!(browser.bpm(browser.library.track_by_id(1).unwrap()), None);
+    }
+
+    #[test]
+    fn a_failed_job_is_shown_until_it_is_closed_and_an_answer_nobody_waits_for_is_dropped() {
+        let mut state = state();
+        let entry = running_job(&mut state, analysis_queue::Kind::Analyse);
         // A running toast can't be closed.
         let _ = handle(&mut state, Message::ToastClose);
         assert!(state.analysing());
 
-        // The answer for another library than the one open is not for this toast.
+        // The answer for another library than the queue's, or for another job, is not waited for.
         let _ = handle(
             &mut state,
-            Message::AnalysisFinished {
+            Message::JobFinished {
                 library: "/elsewhere".into(),
-                track: 1,
-                title: "Track 1".into(),
-                result: Ok(analysis_response(100.0, None)),
+                entry: entry.clone(),
+                result: Ok(JobDone::Analysed(analysis_response(100.0, None))),
             },
         );
+        let stems = analysis_queue::Entry {
+            kind: analysis_queue::Kind::Stems,
+            ..entry.clone()
+        };
+        job_finished(&mut state, &stems, Ok(JobDone::Stems));
         assert!(state.analysing());
-        assert_eq!(
-            browser(&state).bpm(browser(&state).library.track_by_id(1).unwrap()),
-            None
-        );
+        let track = browser(&state).library.track_by_id(1).unwrap().clone();
+        assert_eq!(browser(&state).bpm(&track), None);
+        assert!(!browser(&state).has_stems(&track));
 
-        let _ = handle(
-            &mut state,
-            Message::AnalysisFinished {
-                library: "/media/DRIVE/Engine Library".into(),
-                track: 1,
-                title: "Track 1".into(),
-                result: Err("the models were not found".into()),
-            },
-        );
+        job_finished(&mut state, &entry, Err("the models were not found".into()));
         match &state.toast {
             Some(toast::Toast::Failed { message }) => {
                 assert!(
@@ -3695,8 +3781,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // The track keeps what it had, and the list can be used again.
-        assert!(!state.locked());
         let browser = browser(&state);
         assert_eq!(browser.analysis(browser.library.track_by_id(1).unwrap()), 0);
 
@@ -3704,6 +3788,33 @@ mod tests {
         assert!(state.toast.is_some(), "a failure stays");
         let _ = handle(&mut state, Message::ToastClose);
         assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn stopping_the_jobs_drops_the_one_that_runs_and_its_late_answer() {
+        let mut state = state();
+        let entry = running_job(&mut state, analysis_queue::Kind::Analyse);
+        assert_eq!(state.pending_jobs(DRIVE), 1);
+        assert_eq!(state.pending_jobs("/elsewhere"), 0);
+        // (Another library's jobs are not touched.)
+        state.stop_jobs("/elsewhere");
+        assert!(state.analysing());
+
+        state.stop_jobs(DRIVE);
+        assert!(state.analysis_queue.is_none() && !state.analysing());
+        assert!(matches!(state.toast, Some(toast::Toast::Done { .. })));
+        // Its answer, if it still comes, is dropped.
+        job_finished(
+            &mut state,
+            &entry,
+            Ok(JobDone::Analysed(analysis_response(100.0, None))),
+        );
+        let track = browser(&state).library.track_by_id(1).unwrap().clone();
+        assert_eq!(browser(&state).bpm(&track), None);
+
+        // The tick of the restore windows is the user's.
+        let _ = handle(&mut state, Message::StopJobsToggled(true));
+        assert!(state.stop_jobs_tick);
     }
 
     fn smart(title: &str, tracks: &[usize]) -> Playlist {
@@ -4040,6 +4151,7 @@ mod tests {
                 can_make_stems: true,
                 has_stems: false,
                 has_stems_key: false,
+                stems_queued: false,
             }
         );
         assert_eq!(browser(&state).selected, Some(1), "the row is selected");
@@ -6398,42 +6510,37 @@ mod tests {
         assert!(!other.analysing());
     }
 
+    fn analyse_entry(state: &State, id: u32) -> analysis_queue::Entry {
+        let track = browser(state).library.track_by_id(id).unwrap().clone();
+        analysis_queue::Entry::analyse(&track, false)
+    }
+
     /// The Engine library of `state()` with the tracks 0 to 2 (none analysed) and a queue
     /// that is running on track 1, with track 2 waiting.
     fn state_analysing_one_and_waiting_for_another() -> State {
         let mut state = state();
-        let library = "/media/DRIVE/Engine Library".to_owned();
-        let mut queue = analysis_queue::Queue::new(
-            library.clone(),
-            vec![(1, "Track 1".into()), (2, "Track 2".into())],
-            false,
-        );
+        let entries = vec![analyse_entry(&state, 1), analyse_entry(&state, 2)];
+        let mut queue = analysis_queue::Queue::new(DRIVE.into(), entries);
         queue.next();
         state.analysis_queue = Some(queue);
-        state.toast = Some(toast::Toast::Analysing {
-            library,
-            title: "Track 1".into(),
-            position: Some((1, 2)),
-            stoppable: true,
-        });
+        state.update_job_toast();
         state
     }
 
     #[test]
     fn tracks_join_the_queue_while_it_runs_and_none_is_in_it_twice() {
         let mut state = state_analysing_one_and_waiting_for_another();
-        let library = "/media/DRIVE/Engine Library".to_owned();
-        let entry = |id: u32| (id, format!("Track {id}"));
+        let entry = |state: &State, id: u32| analyse_entry(state, id);
 
         // Track 1 runs, 2 waits: only 0 is new.
-        let _ = state.start_analysis(library.clone(), vec![entry(0), entry(1), entry(2)], false);
+        let entries = vec![entry(&state, 0), entry(&state, 1), entry(&state, 2)];
+        let _ = state.start_jobs(DRIVE.into(), entries);
         let queue = state.analysis_queue.as_ref().unwrap();
         assert_eq!(queue.position(), (1, 3));
-        assert!(queue.contains(0));
         assert!(
             matches!(
                 state.toast,
-                Some(toast::Toast::Analysing {
+                Some(toast::Toast::Job {
                     position: Some((1, 3)),
                     stoppable: true,
                     ..
@@ -6443,36 +6550,61 @@ mod tests {
             state.toast
         );
         // The same again adds nothing.
-        let _ = state.start_analysis(library.clone(), vec![entry(0), entry(1)], false);
+        let entries = vec![entry(&state, 0), entry(&state, 1)];
+        let _ = state.start_jobs(DRIVE.into(), entries);
         assert_eq!(state.analysis_queue.as_ref().unwrap().position(), (1, 3));
 
-        // Another library's tracks are not put in this one's queue, and nothing is added
-        // while the working copy is being saved.
-        let _ = state.start_analysis("/elsewhere".into(), vec![entry(9)], false);
-        state.saving = Some(PathBuf::from("/saved"));
-        let _ = state.start_analysis(library, vec![entry(7)], false);
+        // Another library's tracks are not put in this one's queue; saving the working copy
+        // does not stop tracks from joining.
+        let _ = state.start_jobs("/elsewhere".into(), vec![entry(&state, 0)]);
         assert_eq!(state.analysis_queue.as_ref().unwrap().position(), (1, 3));
+        state.saving = Some(PathBuf::from("/saved"));
+        let stems = analysis_queue::Entry {
+            kind: analysis_queue::Kind::Stems,
+            ..entry(&state, 0)
+        };
+        let _ = state.start_jobs(DRIVE.into(), vec![stems]);
+        assert_eq!(state.analysis_queue.as_ref().unwrap().position(), (1, 4));
     }
 
     #[test]
-    fn the_last_track_running_does_not_stop_the_queue_from_taking_more() {
-        let mut state = state();
-        let library = "/media/DRIVE/Engine Library".to_owned();
-        let mut queue =
-            analysis_queue::Queue::new(library.clone(), vec![(1, "Track 1".into())], false);
-        queue.next();
-        state.analysis_queue = Some(queue);
-        // A queue of one: the toast has no count and no stop button.
-        state.toast = Some(toast::Toast::Analysing {
-            library: library.clone(),
-            title: "Track 1".into(),
-            position: None,
-            stoppable: false,
-        });
-        let _ = state.start_analysis(library, vec![(2, "Track 2".into())], false);
+    fn a_job_that_waits_can_be_taken_out_and_the_queue_can_be_shown() {
+        let mut state = state_analysing_one_and_waiting_for_another();
+        let _ = handle(&mut state, Message::JobQueueToggle);
+        assert!(state.queue_shown);
+        // Track 2 waits at place 1; the one that runs can't be taken out.
+        let _ = handle(&mut state, Message::JobRemove(0));
+        let _ = handle(&mut state, Message::JobRemove(1));
+        let queue = state.analysis_queue.as_ref().unwrap();
+        assert_eq!(queue.items()[0].status, analysis_queue::Status::Running);
+        assert_eq!(queue.items()[1].status, analysis_queue::Status::Stopped);
         assert!(matches!(
             state.toast,
-            Some(toast::Toast::Analysing {
+            Some(toast::Toast::Job {
+                stoppable: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_last_job_running_does_not_stop_the_queue_from_taking_more() {
+        let mut state = state();
+        running_job(&mut state, analysis_queue::Kind::Analyse);
+        // A queue of one: the toast has no count and no stop button.
+        assert!(matches!(
+            state.toast,
+            Some(toast::Toast::Job {
+                position: None,
+                stoppable: false,
+                ..
+            })
+        ));
+        let entry = analyse_entry(&state, 2);
+        let _ = state.start_jobs(DRIVE.into(), vec![entry]);
+        assert!(matches!(
+            state.toast,
+            Some(toast::Toast::Job {
                 position: Some((1, 2)),
                 stoppable: true,
                 ..
@@ -6484,14 +6616,10 @@ mod tests {
     fn the_menus_offer_what_is_not_in_the_queue_and_work_while_it_runs() {
         let at = iced::Point::new(10.0, 10.0);
         let mut state = state_analysing_one_and_waiting_for_another();
-        // The track that is analysed and the one that waits are in the queue; track 0 is not.
-        let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
-        assert!(state.playlist_menu.is_none());
         let menu = |state: &State| state.track_menu.clone().expect("the menu opens");
         let _ = handle(&mut state, Message::ShowCollection);
         let _ = handle(&mut state, Message::TrackMenuOpen { row: 1, at });
         assert!(menu(&state).queued, "it is being analysed");
-        // (The line is greyed out, so it sends nothing; if it did, nothing would be added.)
         let _ = handle(&mut state, Message::TrackMenuAnalyse);
         assert_eq!(state.analysis_queue.as_ref().unwrap().position(), (1, 2));
         let _ = handle(&mut state, Message::TrackMenuOpen { row: 0, at });
@@ -6504,7 +6632,6 @@ mod tests {
         let _ = handle(&mut state, Message::TrackMenuAnalyse);
         assert!(state.track_menu.is_none());
         let queue = state.analysis_queue.as_ref().unwrap();
-        assert!(queue.contains(0));
         assert_eq!(queue.position(), (1, 3));
 
         // The same for a playlist: what is in the queue is not counted or put in again.
@@ -6527,42 +6654,33 @@ mod tests {
 
     #[test]
     fn a_list_of_tracks_is_analysed_one_after_the_other_and_the_end_says_how_it_went() {
-        let library = "/media/DRIVE/Engine Library".to_owned();
-        let queue = |tracks: u32| {
-            let mut queue = analysis_queue::Queue::new(
-                library.clone(),
-                (1..=tracks).map(|id| (id, format!("Track {id}"))).collect(),
-                false,
-            );
+        let queue = |state: &State, tracks: u32| {
+            let entries = (1..=tracks).map(|id| analyse_entry(state, id)).collect();
+            let mut queue = analysis_queue::Queue::new(DRIVE.into(), entries);
             queue.next();
             queue
         };
-        let finished = |state: &mut State, track: u32, result: Result<_, String>| {
-            let _ = handle(
-                state,
-                Message::AnalysisFinished {
-                    library: library.clone(),
-                    track,
-                    title: format!("Track {track}"),
-                    result,
-                },
-            );
-        };
-        let running = |state: &mut State| {
-            state.toast = Some(toast::Toast::Analysing {
-                library: library.clone(),
-                title: "Track 1".into(),
-                position: Some((1, 2)),
-                stoppable: true,
-            });
+        let run = |state: &mut State, tracks: u32| -> analysis_queue::Entry {
+            state.analysis_queue = Some(queue(state, tracks));
+            state.update_job_toast();
+            state
+                .analysis_queue
+                .as_ref()
+                .unwrap()
+                .running()
+                .unwrap()
+                .clone()
         };
 
         // The first of two is done and the second can't be started (there is no backend
         // here): that ends the queue, with how many are done.
         let mut state = state();
-        state.analysis_queue = Some(queue(2));
-        running(&mut state);
-        finished(&mut state, 1, Ok(analysis_response(120.0, Some("C major"))));
+        let first = run(&mut state, 2);
+        job_finished(
+            &mut state,
+            &first,
+            Ok(JobDone::Analysed(analysis_response(120.0, Some("C major")))),
+        );
         assert!(state.analysis_queue.is_none());
         assert!(!state.analysing(), "nothing is left to wait for");
         match &state.toast {
@@ -6579,9 +6697,8 @@ mod tests {
 
         // A failure is told with the track and why, and stays.
         let mut state = self::state();
-        state.analysis_queue = Some(queue(2));
-        running(&mut state);
-        finished(&mut state, 1, Err("no models".into()));
+        let first = run(&mut state, 2);
+        job_finished(&mut state, &first, Err("no models".into()));
         match &state.toast {
             Some(toast::Toast::Failed { message }) => {
                 assert!(
@@ -6596,17 +6713,14 @@ mod tests {
 
         // A queue of one is told as before: with the track's tempo.
         let mut state = self::state();
-        state.analysis_queue = Some(queue(1));
-        state.toast = Some(toast::Toast::Analysing {
-            library: library.clone(),
-            title: "Track 1".into(),
-            position: None,
-            stoppable: false,
-        });
-        finished(
+        let first = run(&mut state, 1);
+        job_finished(
             &mut state,
-            1,
-            Ok(analysis_response(126.04, Some("A♭ minor"))),
+            &first,
+            Ok(JobDone::Analysed(analysis_response(
+                126.04,
+                Some("A♭ minor"),
+            ))),
         );
         match &state.toast {
             Some(toast::Toast::Done { message, .. }) => {
@@ -6620,13 +6734,12 @@ mod tests {
 
         // Stopping drops the tracks that wait and takes the button away.
         let mut state = self::state();
-        state.analysis_queue = Some(queue(3));
-        running(&mut state);
+        let _ = run(&mut state, 2);
         let _ = handle(&mut state, Message::AnalysisQueueStop);
         assert!(!state.analysis_queue.as_ref().unwrap().has_next());
         assert!(matches!(
             state.toast,
-            Some(toast::Toast::Analysing {
+            Some(toast::Toast::Job {
                 stoppable: false,
                 ..
             })

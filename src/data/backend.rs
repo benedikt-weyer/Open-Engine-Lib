@@ -367,6 +367,7 @@ async fn load_library(
                 lighting,
                 lighting_projects: track.soundswitch_projects,
                 has_stems: track.has_stems,
+                origin_key: track.origin_database_uuid.zip(track.origin_track_id),
                 cue_count: track.cue_count,
                 loop_count: track.loop_count,
                 analysis: track.analysis,
@@ -1013,6 +1014,16 @@ pub async fn generate_stems(
         })
         .await
         .map(|_| ())
+        .map_err(describe)
+}
+
+/// How far the job (an analysis, a stem generation) that is running has got.
+pub async fn job_progress(mut backend: Backend) -> Result<OperationProgress, String> {
+    backend
+        .library
+        .get_job_progress(GetProgressRequest {})
+        .await
+        .map(|response| response.into_inner())
         .map_err(describe)
 }
 

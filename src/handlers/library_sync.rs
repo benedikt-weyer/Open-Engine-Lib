@@ -5,6 +5,7 @@ use crate::*;
 pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::LibrarySyncOpen => {
+            state.stop_jobs_tick = false;
             if !state.locked()
                 && !state.window_open()
                 && matches!(state.library, LibraryState::Open(_))
@@ -109,6 +110,15 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             {
                 let (target, options, diff) = (target.clone(), *options, diff.clone());
                 state.progress = None;
+                // (Copying into the open library replaces its working copy: its jobs go if
+                // that was ticked.)
+                if options.reverse
+                    && state.stop_jobs_tick
+                    && let LibraryState::Open(browser) = &state.library
+                {
+                    let library = browser.library.path.clone();
+                    state.stop_jobs(&library);
+                }
                 state.library_sync = Some(LibrarySyncStage::Syncing {
                     target: target.clone(),
                     options,

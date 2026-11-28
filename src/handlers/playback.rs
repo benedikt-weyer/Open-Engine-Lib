@@ -161,10 +161,27 @@ pub(crate) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
         },
         Message::ProgressTick => {
-            if state.reporting_progress()
-                && let Some(backend) = state.backend()
-            {
-                return Task::perform(backend::progress(backend), Message::ProgressUpdated);
+            let mut asks = Vec::new();
+            if let Some(backend) = state.backend() {
+                if state.reporting_progress() {
+                    asks.push(Task::perform(
+                        backend::progress(backend.clone()),
+                        Message::ProgressUpdated,
+                    ));
+                }
+                // (A job runs alongside, with progress of its own.)
+                if state.analysing() {
+                    asks.push(Task::perform(
+                        backend::job_progress(backend),
+                        Message::JobProgressUpdated,
+                    ));
+                }
+            }
+            return Task::batch(asks);
+        }
+        Message::JobProgressUpdated(result) => {
+            if state.analysing() {
+                state.job_progress = result.ok();
             }
         }
         Message::ProgressUpdated(result) => {
